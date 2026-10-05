@@ -1,7 +1,16 @@
 import { type Hash32, hash32, type ResourceId } from "@openlfcp/core";
-import type { LfcpStorage, OutboundItem, OutboundKind, StorageWrite } from "@openlfcp/storage";
+import { exportSecretKeyBytes } from "@openlfcp/crypto";
+import {
+  dekSecretRef,
+  type LfcpStorage,
+  type OutboundItem,
+  type OutboundKind,
+  type SecretStore,
+  type StorageWrite,
+} from "@openlfcp/storage";
 import {
   canonicalFrontierToCbor,
+  type EpochRotation,
   parseControlRecord,
   parseKeyPackage,
   parseSnapshot,
@@ -39,6 +48,25 @@ async function commit(
 ): Promise<void> {
   const r = await storage.commit(writes);
   if (!r.ok) throw new Error(`the object was not queued: ${r.reason}`);
+}
+
+/**
+ * Queues a Key Epoch this client created (rotateEpoch) and keeps its new
+ * DEK: the secret first, under the epoch's standard reference
+ * (dekSecretRef), then the record for CONTROL_PUT. The creator never needs
+ * a Key Package for a key it made: once the coordinator accepts the record
+ * and the chain is saved, the epoch's row takes the stored DEK
+ * (adoptStoredDeks) with no network round trip.
+ */
+export async function queueKeyEpoch(
+  storage: Pick<LfcpStorage, "commit">,
+  secrets: SecretStore,
+  rotation: EpochRotation,
+  also: readonly StorageWrite[] = [],
+): Promise<Hash32> {
+  const resource = parseControlRecord(rotation.bytes).payload.resourceId;
+  await secrets.put(dekSecretRef(resource, rotation.epoch), exportSecretKeyBytes(rotation.dek));
+  return queueControlRecord(storage, rotation.bytes, also);
 }
 
 /** Stores a sealed Key Package (§25) and queues it for KEY_PACKAGE_PUT. */

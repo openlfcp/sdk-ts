@@ -1,6 +1,7 @@
 import {
   type ControlRecordId,
   dataEpoch,
+  hash32,
   type ResourceId,
   resourceId,
   toHex,
@@ -39,6 +40,8 @@ import {
   DataUnitApplier,
   dekResolver,
   OutboundQueue,
+  queueControlRecord,
+  queueKeyEpoch,
   SyncClient,
   type SyncEvent,
   saveControlChain,
@@ -605,6 +608,152 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     expect(
       (await owner.storage.outbound.list(chain.R)).map((o) => o.blocked?.reason ?? null),
     ).toEqual([null, "stale-epoch"]);
+  });
+
+  /**
+   * A coordinator for `chain` that commits CONTROL_PUTs: `hold` (by the
+   * record's sequence) delays a put's commit and ACK until the next
+   * CONTROL_HAVE has been answered, as when a put lands just after the
+   * server read its heads.
+   */
+  function coordinatorOf(server: FakeServer, chain: ReturnType<typeof chainFor>, hold = -1n) {
+    hostOf(server, chain);
+    const host = server.onMessage;
+    const held: AnyMessage[] = [];
+    const commit = (m: Extract<AnyMessage, { type: "CONTROL_PUT" }>, s: FakeServer) => {
+      const r = validateControlChain([...chain.records, m.body.record]);
+      if (r.kind !== "linear") throw new Error(r.kind);
+      chain.records.push(m.body.record);
+      chain.ids.push(r.state.head);
+      s.reply(m, "ACK", { requestType: 23n, objectIds: [hash32(r.state.head)], durable: true });
+    };
+    server.onMessage = (m, s) => {
+      if (m.type === "CONTROL_PUT") {
+        if (BigInt(chain.records.length) === hold) held.push(m);
+        else commit(m, s);
+        return [];
+      }
+      if (m.type === "CONTROL_HAVE") {
+        const v = chain.view();
+        s.reply(m, "CONTROL_HAVE", {
+          resourceId: chain.R,
+          heads: [{ seq: v.state.seq, recordId: v.state.head }],
+        });
+        for (const h of held.splice(0))
+          commit(h as Extract<AnyMessage, { type: "CONTROL_PUT" }>, s);
+        return [];
+      }
+      return host(m, s);
+    };
+  }
+
+  it("the owner of a new Key Epoch holds its DEK with no Key Package round trip", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(210);
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    coordinatorOf(server, chain);
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(200);
+    await owner.sync.idle();
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+    const rotation = rotateEpoch(chain.view().state, OWNER.signer, {
+      reason: 0n,
+      finalFrontier: [],
+    });
+    await queueKeyEpoch(owner.storage, owner.secrets, rotation);
+    owner.sync.flush();
+    await settle(300);
+    await owner.sync.idle();
+    expect((await owner.storage.control.head(chain.R))?.controlSeq).toBe(1n);
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+    expect(server.of("KEY_PACKAGE_GET")).toEqual([]);
+    const dek = await dekResolver(owner.storage, owner.secrets, chain.R)(rotation.epoch);
+    expect(dek).toBeDefined();
+    expect(toHex(dekCommitment(chain.R, rotation.epoch, dek as never))).toBe(
+      toHex(rotation.dekCommitment),
+    );
+  });
+
+  it("learns its own record committed during a Control sync once LIVE again (no lost refresh)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(211);
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    // The rotation (sequence 2) commits only after the server answered the
+    // CONTROL_HAVE that the grant's (sequence 1) ACK triggered.
+    coordinatorOf(server, chain, 2n);
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(200);
+    await owner.sync.idle();
+    const grant = signControlRecord(
+      { resourceId: chain.R, controlSeq: 1n, prevControlId: chain.ids[0] as ControlRecordId },
+      { type: "CAPABILITY_GRANT", subject: BOB.signer.descriptor, abilities: [1n], delegable: [] },
+      OWNER.signer,
+    );
+    const afterGrant = validateControlChain([...chain.records, grant.bytes]);
+    if (afterGrant.kind !== "linear") throw new Error(afterGrant.kind);
+    const rotation = rotateEpoch(afterGrant.state, OWNER.signer, { reason: 0n, finalFrontier: [] });
+    await queueControlRecord(owner.storage, grant.bytes);
+    await queueKeyEpoch(owner.storage, owner.secrets, rotation);
+    owner.sync.flush();
+    await settle(500);
+    await owner.sync.idle();
+    expect(chain.records).toHaveLength(3); // both committed on the server
+    expect((await owner.storage.control.head(chain.R))?.controlSeq).toBe(2n);
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+    expect(await dekResolver(owner.storage, owner.secrets, chain.R)(rotation.epoch)).toBeDefined();
+    expect(server.of("KEY_PACKAGE_GET")).toEqual([]);
+  });
+
+  it("uses a DEK stored before its epoch row as soon as the row is saved", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(212);
+    chain.add({
+      type: "CAPABILITY_GRANT",
+      subject: BOB.signer.descriptor,
+      abilities: [1n, 2n],
+      delegable: [],
+    });
+    const bob = client(BOB, server, clock);
+    // A Key Package's DEK stored before the chain (the row) existed here.
+    await bob.secrets.put(dekSecretRef(chain.R, dataEpoch(0n)), exportSecretKeyBytes(DEK0));
+    hostOf(server, chain);
+    bob.sync.open(bob.binding(chain.R));
+    bob.sync.start();
+    await settle(200);
+    await bob.sync.idle();
+    expect(bob.sync.resourceState(chain.R)).toBe("LIVE");
+    expect(server.of("KEY_PACKAGE_GET")).toEqual([]);
+    expect((await bob.storage.control.epochs(chain.R))[0]?.dekRef).toBe(
+      dekSecretRef(chain.R, dataEpoch(0n)),
+    );
+  });
+
+  it("never adopts a stored DEK that does not match the epoch's commitment", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(213);
+    chain.add({
+      type: "CAPABILITY_GRANT",
+      subject: BOB.signer.descriptor,
+      abilities: [1n, 2n],
+      delegable: [],
+    });
+    const bob = client(BOB, server, clock);
+    await bob.secrets.put(dekSecretRef(chain.R, dataEpoch(0n)), exportSecretKeyBytes(DEK1));
+    hostOf(server, chain);
+    bob.sync.open(bob.binding(chain.R));
+    bob.sync.start();
+    await settle(200);
+    await bob.sync.idle();
+    expect(bob.sync.resourceState(chain.R)).toBe("KEY_BLOCKED");
+    expect((await bob.storage.control.epochs(chain.R))[0]?.dekRef).toBeNull();
   });
 
   it("surfaces a refused RESOURCE_OPEN and leaves the Resource CLOSED", async () => {

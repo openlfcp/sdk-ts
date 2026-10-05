@@ -54,7 +54,13 @@ import {
   type ResourcePhaseEvent,
   resourcePhaseTransition,
 } from "./resource-state.js";
-import { dekResolver, loadControlChain, saveControlChain, saveControlConflict } from "./storage.js";
+import {
+  adoptStoredDeks,
+  dekResolver,
+  loadControlChain,
+  saveControlChain,
+  saveControlConflict,
+} from "./storage.js";
 
 /**
  * The client sync session (LFCP-039a): one LFCP connection to a server and
@@ -246,6 +252,13 @@ interface ResourceContext {
   lastRound: string;
   /** The server heads the current Control round works towards (to issue it again). */
   lastHeads: readonly ControlHeadRef[];
+  /**
+   * One of our Control Records was committed while the Resource was not
+   * LIVE (e.g. mid Control sync, which may have read the heads before
+   * it): the Control state is refreshed once it is LIVE again, since the
+   * server never pushes our own records back to us.
+   */
+  controlStale: boolean;
 }
 
 const SUBSCRIBE_DATA_AND_CONTROL = 0b11n;
@@ -362,6 +375,7 @@ export class SyncClient {
         lastHave: 0,
         lastKeyRequest: 0,
         lastHeads: [],
+        controlStale: false,
         missingEpochs: [],
         offered: null,
         snapshotPending: false,
@@ -509,6 +523,10 @@ export class SyncClient {
     if (next === undefined) return false;
     ctx.state = next;
     this.#emit({ type: "resource-state", resourceId: ctx.binding.resourceId, state: next });
+    if (next === "LIVE" && ctx.controlStale) {
+      ctx.controlStale = false;
+      this.#refreshControl(ctx);
+    } else if (next === "CLOSED") ctx.controlStale = false; // reopening syncs Control anyway
     return true;
   }
 
@@ -822,6 +840,9 @@ export class SyncClient {
     const R = ctx.binding.resourceId;
     const before = previous ?? ctx.view;
     ctx.view = chain;
+    // DEKs we already hold for epochs the saved chain now has (our own
+    // rotation, or a package that came before the row): no request needed.
+    await adoptStoredDeks(this.#o.storage, this.#o.secrets, chain);
     const epochsChanged =
       before === null ||
       [...chain.state.epochs.values()].some((e) => {
@@ -850,6 +871,7 @@ export class SyncClient {
   // Keys (§52, §53, §66 step 2)
 
   async #epochsWithoutDek(ctx: ResourceContext): Promise<DataEpoch[]> {
+    if (ctx.view !== null) await adoptStoredDeks(this.#o.storage, this.#o.secrets, ctx.view);
     const rows = await this.#o.storage.control.epochs(ctx.binding.resourceId);
     const out: DataEpoch[] = [];
     for (const e of ctx.view?.state.epochs.values() ?? []) {
@@ -1254,6 +1276,7 @@ export class SyncClient {
     if (m.body.requestType === MESSAGE_TYPE.CONTROL_PUT && outcome.acked.length > 0)
       for (const ctx of this.#resources.values())
         if (ctx.state === "LIVE") this.#refreshControl(ctx);
+        else ctx.controlStale = true;
   }
 
   async #onNack(m: LfcpMessage<"NACK">): Promise<void> {

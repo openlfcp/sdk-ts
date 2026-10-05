@@ -11,14 +11,15 @@ import {
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
-import { importResourceDEK, type ResourceDEK } from "@openlfcp/crypto";
-import type {
-  CommitResult,
-  DataUnitRow,
-  EpochRow,
-  LfcpStorage,
-  SecretStore,
-  StorageWrite,
+import { dekCommitment, importResourceDEK, type ResourceDEK } from "@openlfcp/crypto";
+import {
+  type CommitResult,
+  type DataUnitRow,
+  dekSecretRef,
+  type EpochRow,
+  type LfcpStorage,
+  type SecretStore,
+  type StorageWrite,
 } from "@openlfcp/storage";
 import {
   type ChainResult,
@@ -222,6 +223,47 @@ export async function saveControlConflict(
   return storage.commit([
     { op: "set-control-conflict", resourceId: resource, conflict: { heads: conflict.competing } },
   ]);
+}
+
+/**
+ * Epoch rows of `chain` with no DEK reference take a DEK this client
+ * already holds under the epoch's standard reference (dekSecretRef): one
+ * it created (queueKeyEpoch), or one a Key Package delivered before the
+ * row was stored. A DEK is adopted only if it matches the epoch's
+ * commitment in the validated chain. Returns the adopted epochs. Called
+ * whenever a chain is saved, so the row and its key meet without waiting
+ * for another Key Package request.
+ */
+export async function adoptStoredDeks(
+  storage: Pick<LfcpStorage, "control" | "commit">,
+  secrets: SecretStore,
+  chain: Extract<ChainResult, { kind: "linear" }>,
+): Promise<DataEpoch[]> {
+  const R = chain.state.resourceId;
+  const writes: StorageWrite[] = [];
+  const adopted: DataEpoch[] = [];
+  for (const row of await storage.control.epochs(R)) {
+    if (row.dekRef !== null) continue;
+    const epoch = chain.state.epochs.get(String(row.epoch));
+    if (epoch === undefined) continue;
+    const ref = dekSecretRef(R, row.epoch);
+    const bytes = await secrets.get(ref);
+    if (bytes === undefined) continue;
+    const matches = bytesEqual(
+      dekCommitment(R, row.epoch, importResourceDEK(bytes)),
+      epoch.dekCommitment,
+    );
+    bytes.fill(0);
+    if (!matches) continue;
+    // put-epoch merges inside the commit: a concurrent close is kept.
+    writes.push({ op: "put-epoch", resourceId: R, epoch: { ...row, dekRef: ref } });
+    adopted.push(row.epoch);
+  }
+  if (writes.length > 0) {
+    const r = await storage.commit(writes);
+    if (!r.ok) throw new Error(`the DEK references were not stored: ${r.reason}`);
+  }
+  return adopted;
 }
 
 /**

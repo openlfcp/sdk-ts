@@ -56,6 +56,7 @@ export {
   createQueuedSnapshot,
   outboundItem,
   queueControlRecord,
+  queueKeyEpoch,
   queueKeyPackage,
   queueSnapshot,
 } from "./queue.js";
@@ -66,6 +67,7 @@ export {
 } from "./resource-state.js";
 export { type CreatedSnapshot, type CreateSnapshotOptions, createSnapshot } from "./snapshot.js";
 export {
+  adoptStoredDeks,
   createQueuedDataUnit,
   dataUnitRow,
   dekResolver,
