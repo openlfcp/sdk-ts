@@ -2,6 +2,15 @@
 export const PACKAGE = "@openlfcp/wire";
 
 export {
+  type ChainOptions,
+  type ChainProblem,
+  type ChainResult,
+  type ControlEpoch,
+  type ControlRoute,
+  type ControlState,
+  validateControlChain,
+} from "./chain.js";
+export {
   type ControlBody,
   type ControlBodyType,
   type ControlRecord,
