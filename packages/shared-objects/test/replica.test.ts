@@ -349,6 +349,37 @@ describe("collaborative Text is not a profile string (G-SC3)", () => {
   });
 });
 
+describe("one diagnostic per field, in §74.1 table order (SOG-2)", () => {
+  const write = (save: Uint8Array, actor: string, status: unknown) =>
+    A.change(A.load<Record<string, unknown>>(save, { actor }), { time: 0 }, (d) => {
+      (
+        (d.objects as Record<string, Record<string, unknown>>)[ID] as Record<string, unknown>
+      ).status = status;
+    });
+  const problemsOf = (r: SharedObjectsReplica) =>
+    r.validate().problems.map((p) => `${p.diagnostic} ${p.pointer}`);
+
+  it("a Text value that is also not a status is INVALID_FIELD_TYPE only", () => {
+    const { replica } = aliceWithTask();
+    const r = SharedObjectsReplica.fromSave(
+      A.save(write(replica.save(), "ee".repeat(32), "bogus")),
+      opts(),
+    );
+    expect(problemsOf(r)).toEqual([`INVALID_FIELD_TYPE /objects/${ID}/status`]);
+    expect(r.task(ID)?.status).toBe("profile_invalid");
+  });
+
+  it("a conflicted field gets the first diagnostic over all its values (§45)", () => {
+    const { replica } = aliceWithTask();
+    const save = replica.save();
+    const number = write(save, "ee".repeat(32), 42); // INVALID_ENUM_VALUE
+    const text = write(save, "ff".repeat(32), "done"); // INVALID_FIELD_TYPE
+    const r = SharedObjectsReplica.fromSave(A.save(A.merge(number, text)), opts());
+    expect(r.task(ID)?.fields.status?.conflicted).toBe(true);
+    expect(problemsOf(r)).toEqual([`INVALID_FIELD_TYPE /objects/${ID}/status`]);
+  });
+});
+
 describe("profile framing (§11, §13)", () => {
   it("frames one change exactly as [1, change] and reads it back", () => {
     const { create } = aliceWithTask();

@@ -230,6 +230,14 @@ describe("parseTask and validation (§74, §74.1)", () => {
     );
   });
 
+  it("reports one diagnostic per value, the first in §74.1 table order (SOG-2)", () => {
+    // Not a UUIDv7 and not the objects key: INVALID_OBJECT_ID only.
+    const r = parseTask({ ...base(), id: "not-a-uuid" }, ID);
+    expect(r.valid ? [] : r.problems.map((p) => `${p.diagnostic} ${p.pointer}`)).toEqual([
+      "INVALID_OBJECT_ID /id",
+    ]);
+  });
+
   it("reports a missing required field at the object", () => {
     const { priority: _drop, ...rest } = base();
     expect(diagnostics(rest)).toEqual(["MISSING_REQUIRED_FIELD "]);
@@ -295,6 +303,19 @@ describe("validateRoot (§15, §17, §77)", () => {
     expect(
       validateTransition(before, root({ [ID]: { ...(task as Record<string, Json>), title: "x" } })),
     ).toEqual([]);
+  });
+
+  it("validateTransition puts IMMUTABLE_FIELD_MUTATED last (§74.1)", () => {
+    const before = root({ [ID]: task });
+    const { created_by: _drop, ...rest } = task as Record<string, Json>;
+    // A changed id that is not a UUIDv7, a type that is not text, a removed created_by.
+    const after = root({ [ID]: { ...rest, id: "not-a-uuid", type: 7 } });
+    expect(validateTransition(before, after)).toEqual([]);
+    expect(validateRoot(after).problems.map((p) => [p.diagnostic, p.pointer])).toEqual([
+      ["MISSING_REQUIRED_FIELD", `/objects/${ID}`],
+      ["INVALID_OBJECT_ID", `/objects/${ID}/id`],
+      ["INVALID_FIELD_TYPE", `/objects/${ID}/type`],
+    ]);
   });
 });
 

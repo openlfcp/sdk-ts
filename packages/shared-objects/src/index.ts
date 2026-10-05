@@ -71,6 +71,8 @@ export {
   unassign,
 } from "./task.js";
 export {
+  DIAGNOSTIC_ORDER,
+  firstPerField,
   isMap,
   type Json,
   objectProblems,

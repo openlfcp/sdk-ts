@@ -12,7 +12,8 @@ import {
  * Profile validation of Shared Objects logical state (SHARED-OBJECTS-
  * PROFILE-01 §73-§77): the JSON an Automerge document of this profile
  * materializes to. Every failure is PROFILE_INVALID with exactly one §74.1
- * diagnostic, at a JSON Pointer (RFC 6901). One invalid object never makes
+ * diagnostic, at a JSON Pointer (RFC 6901); a field value that breaks
+ * several rules gets the first in §74.1 table order. One invalid object never makes
  * the others unusable (§77); unknown fields, extension namespaces, object
  * types and x/…/… values are accepted and preserved (§70-§72).
  */
@@ -42,6 +43,48 @@ export interface ProfileProblem {
   /** JSON Pointer of the offending value (of its container, for a missing field). */
   readonly pointer: string;
   readonly message: string;
+}
+
+/** The §74.1 registry in table order: structure and value rules first, IMMUTABLE_FIELD_MUTATED last. */
+export const DIAGNOSTIC_ORDER: readonly ProfileDiagnostic[] = Object.freeze([
+  "INVALID_ROOT",
+  "INVALID_OBJECT_ID",
+  "OBJECT_ID_MISMATCH",
+  "MISSING_REQUIRED_FIELD",
+  "INVALID_FIELD_TYPE",
+  "INVALID_ENUM_VALUE",
+  "INVALID_EXTENSION_NAMESPACE",
+  "INVALID_PRINCIPAL_REF",
+  "INVALID_TIMESTAMP",
+  "INVALID_LOCAL_DATE",
+  "INVALID_COLLECTION_REPRESENTATION",
+  "INVALID_TAG",
+  "IMMUTABLE_FIELD_MUTATED",
+  "CHANGE_ACTOR_MISMATCH",
+]);
+
+/**
+ * §74.1 precedence for the fields of the object at `object` (its JSON
+ * Pointer): "When one value breaks several rules, its diagnostic is the
+ * first that applies in the order of this table", and a field with
+ * concurrent values (§45) gets the diagnostic of its first invalid value in
+ * that order. Of several problems at one field pointer, those with the
+ * first diagnostic are kept. Problems at the object itself (its key, a
+ * missing field) and deeper (set members, extension keys) are kept as
+ * they are.
+ */
+export function firstPerField(
+  problems: readonly ProfileProblem[],
+  object: string,
+): ProfileProblem[] {
+  const rank = (p: ProfileProblem) => DIAGNOSTIC_ORDER.indexOf(p.diagnostic);
+  const isField = (pointer: string) =>
+    pointer.startsWith(`${object}/`) && !pointer.slice(object.length + 1).includes("/");
+  const best = new Map<string, number>();
+  for (const p of problems)
+    if (isField(p.pointer))
+      best.set(p.pointer, Math.min(best.get(p.pointer) ?? Number.POSITIVE_INFINITY, rank(p)));
+  return problems.filter((p) => !isField(p.pointer) || rank(p) === best.get(p.pointer));
 }
 
 /** PROFILE_INVALID thrown for a rejected profile plaintext, with its §74.1 diagnostic. */
@@ -137,6 +180,10 @@ export function objectProblems(
   key: string,
   at = `/objects/${pointerToken(key)}`,
 ): ProfileProblem[] {
+  return firstPerField(allObjectProblems(object, key, at), at);
+}
+
+function allObjectProblems(object: Json | undefined, key: string, at: string): ProfileProblem[] {
   const out: ProfileProblem[] = [];
   if (!isObjectId(key))
     out.push(
@@ -300,7 +347,10 @@ const IMMUTABLE = ["id", "type", "created_by"];
 
 /**
  * §75: id, type and created_by never change. Problems for every object
- * present in both states whose immutable field differs.
+ * present in both states whose immutable field differs, unless the new
+ * value breaks a structure or value rule: §74.1 puts
+ * IMMUTABLE_FIELD_MUTATED last, so that value's diagnostic is the one
+ * objectProblems reports.
  */
 export function validateTransition(
   before: Json | undefined,
@@ -311,12 +361,16 @@ export function validateTransition(
   for (const [key, old] of Object.entries(before.objects)) {
     const now = after.objects[key];
     if (!isMap(old) || !isMap(now)) continue;
+    const at = `/objects/${pointerToken(key)}`;
+    const broken = new Set(objectProblems(now, key, at).map((p) => p.pointer));
     for (const field of IMMUTABLE) {
+      // A removed field is MISSING_REQUIRED_FIELD, an earlier diagnostic.
+      if (!(field in now) || broken.has(`${at}/${field}`)) continue;
       if (field in old && JSON.stringify(old[field]) !== JSON.stringify(now[field]))
         out.push(
           problem(
             "IMMUTABLE_FIELD_MUTATED",
-            `/objects/${pointerToken(key)}/${field}`,
+            `${at}/${field}`,
             `${field} changed (§24, §25, §27, §75)`,
           ),
         );

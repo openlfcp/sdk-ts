@@ -16,6 +16,7 @@ import {
 } from "./automerge-bytes.js";
 import { ProfileError, parseTask, type Task, type TaskIntent } from "./task.js";
 import {
+  firstPerField,
   isMap,
   type Json,
   objectProblems,
@@ -599,7 +600,11 @@ export class SharedObjectsReplica {
       ].filter(
         (p) => !problems.some((q) => q.pointer === p.pointer && q.diagnostic === p.diagnostic),
       );
-      perObject.set(id, Object.freeze([...problems, ...more]));
+      // §74.1: one diagnostic per field, the first in table order over every value.
+      perObject.set(
+        id,
+        Object.freeze(firstPerField([...problems, ...more], `/objects/${pointerToken(id)}`)),
+      );
     }
     const rootProblems = base.problems.filter((p) => !p.pointer.startsWith("/objects/"));
     const all = [...rootProblems, ...extraRoot, ...[...perObject.values()].flat()];
@@ -612,13 +617,20 @@ export class SharedObjectsReplica {
   }
 
   #objectProblems(id: string, stored: AMap): ProfileProblem[] {
-    return [
-      ...objectProblems(plain(stored), id).filter((p) =>
-        p.pointer.startsWith(`/objects/${pointerToken(id)}`),
-      ),
+    const at = `/objects/${pointerToken(id)}`;
+    const all = [
+      ...objectProblems(plain(stored), id).filter((p) => p.pointer.startsWith(at)),
       ...textProblems(stored, id),
       ...conflictValueProblems(stored, id),
     ];
+    // §74.1: one diagnostic per field, the first in table order over every value.
+    return firstPerField(
+      all.filter(
+        (p, i) =>
+          all.findIndex((q) => q.pointer === p.pointer && q.diagnostic === p.diagnostic) === i,
+      ),
+      at,
+    );
   }
 
   /** §99: the Task under `id` with conflict metadata, or undefined if there is no object or it is not a Task. */
