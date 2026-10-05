@@ -10,6 +10,7 @@ import {
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
+import { sha256 } from "@openlfcp/crypto";
 import type {
   LfcpStorage,
   OutboundBlock,
@@ -280,6 +281,19 @@ export class OutboundQueue {
         size = 0;
       };
       for (const item of items) {
+        // Fail closed on local corruption: an object ID is the SHA-256 of its
+        // exact bytes, so other bytes are never sent (nor "repaired").
+        if (!bytesEqual(sha256(item.bytes), item.itemId)) {
+          writes.push({
+            op: "update-outbound",
+            itemId: item.itemId,
+            blocked: {
+              reason: "rejected",
+              detail: "local corruption: the stored bytes do not hash to the object ID",
+            },
+          });
+          continue;
+        }
         if (item.bytes.length > limit) {
           writes.push({
             op: "update-outbound",
