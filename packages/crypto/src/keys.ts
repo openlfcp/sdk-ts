@@ -1,5 +1,12 @@
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { LfcpError } from "@openlfcp/core";
+import {
+  type ActorDataKey,
+  isSymmetricSecret,
+  type ResourceDEK,
+  type SnapshotKey,
+  symmetricSecretBytes,
+} from "./epoch.js";
 
 /**
  * Key material for an LFCP Principal (LFCP-WIRE-01 §7): an Ed25519 signing
@@ -143,15 +150,19 @@ export function importAgreementKey(secret: Uint8Array): AgreementKeyPair {
 }
 
 /**
- * Returns a copy of the private key bytes, for persistence only.
+ * Returns a copy of the secret bytes of a key pair or a Data Epoch key, for
+ * persistence (or, for a DEK, HPKE delivery to a recipient) only.
  *
  * WARNING: the result is secret. Never log it, put it in errors or
  * diagnostics, or send it anywhere except an encrypted local secret store.
  */
-export function exportSecretKeyBytes(key: SigningKeyPair | AgreementKeyPair): Uint8Array {
-  return Uint8Array.from(
-    key instanceof SigningKeyPair ? readSigningSecret(key) : readAgreementSecret(key),
-  );
+export function exportSecretKeyBytes(
+  key: SigningKeyPair | AgreementKeyPair | ResourceDEK | ActorDataKey | SnapshotKey,
+): Uint8Array {
+  if (key instanceof SigningKeyPair) return Uint8Array.from(readSigningSecret(key));
+  if (key instanceof AgreementKeyPair) return Uint8Array.from(readAgreementSecret(key));
+  if (isSymmetricSecret(key)) return Uint8Array.from(symmetricSecretBytes(key));
+  throw new LfcpError("CRYPTO_FAILURE", "not a secret key of this package");
 }
 
 /** Verifies an Ed25519 signature. Returns false (never throws) for malformed input. */

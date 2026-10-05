@@ -4,7 +4,20 @@
  */
 export const PACKAGE = "@openlfcp/crypto";
 
+export {
+  ActorDataKey,
+  dataUnitNonce,
+  dekCommitment,
+  deriveActorDataKey,
+  deriveSnapshotKey,
+  generateResourceDEK,
+  importResourceDEK,
+  ResourceDEK,
+  SnapshotKey,
+  snapshotNonce,
+} from "./epoch.js";
 export { sha256 } from "./hash.js";
+export { hkdfExpand, hkdfExtract } from "./hkdf.js";
 export {
   AgreementKeyPair,
   exportSecretKeyBytes,
