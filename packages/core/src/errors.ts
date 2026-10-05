@@ -59,7 +59,19 @@ export type LfcpErrorCode =
    * §14 names no wire code; until the spec does, it surfaces as
    * MALFORMED_MESSAGE.
    */
-  | "UNSUPPORTED_VALUE";
+  | "UNSUPPORTED_VALUE"
+  /**
+   * An integer outside the range a construction requires: a Data Epoch or
+   * uint64 value outside 0..2^64-1, an actor sequence outside 1..2^64-1, or
+   * a number that is not a safe integer. Values are never truncated.
+   * SDK-local; decoded wire values are range-checked by the decoders.
+   */
+  | "OUT_OF_RANGE"
+  /**
+   * A local attempt to use an actor sequence twice for one (Resource,
+   * Principal) (LFCP-WIRE-01 §8, §12: nonce reuse). SDK-local; never sent.
+   */
+  | "SEQUENCE_REUSE";
 
 /** Error with a stable machine-readable `code`; the message is for humans only. */
 export class LfcpError extends Error {

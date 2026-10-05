@@ -26,3 +26,11 @@ export {
   type ObjectId,
   parseObjectId,
 } from "./object-id.js";
+export {
+  type ActorSequence,
+  actorSequence,
+  type DataEpoch,
+  dataEpoch,
+  UINT64_MAX,
+  uint64BE,
+} from "./uint64.js";
