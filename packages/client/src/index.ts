@@ -66,6 +66,7 @@ export {
   defaultReconnect,
   type ReconnectPolicy,
   type ResourceBinding,
+  type SnapshotBinding,
   SyncClient,
   type SyncClientOptions,
   type SyncEvent,

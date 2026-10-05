@@ -1,21 +1,28 @@
 import {
+  actorSequence,
   type ControlRecordId,
   type DataEpoch,
   dataEpoch,
+  type Hash32,
+  LfcpError,
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
 import { type AgreementKeyPair, exportSecretKeyBytes } from "@openlfcp/crypto";
 import { dekSecretRef, type EpochRow, type LfcpStorage, type SecretStore } from "@openlfcp/storage";
 import {
+  type ActorRange,
   type AnyMessage,
   addSequence,
   batchDataRanges,
   type ChainResult,
   type ClientConnectionState,
   type ControlHeadRef,
+  canonicalFrontierToCbor,
   createMessage,
+  type DataProfileCodec,
   type HaveVector,
+  hasSequence,
   type LfcpMessage,
   type LiveActorHave,
   localControlOf,
@@ -27,20 +34,24 @@ import {
   planControlSync,
   type ReadySession,
   receiveKeyPackage,
+  receiveSnapshot,
   type Signer,
+  type SnapshotSummary,
   validateControlChain,
 } from "@openlfcp/wire";
+import { encode } from "@openlfcp/wire/cbor";
 import type { ApplyOutcome, DataUnitApplier, EpochReconciliation } from "./apply.js";
 import type { ProfileCheckpointer } from "./checkpoint.js";
 import { LfcpConnection, type WebSocketFactory } from "./connection.js";
 import type { AckOutcome, NackOutcome, OutboundQueue, StaleOutboundUnit } from "./outbound.js";
-import { resourceSyncState } from "./outbound.js";
+import { resourceSyncState, snapshotFrontier } from "./outbound.js";
+import { createQueuedSnapshot } from "./queue.js";
 import {
   type ResourcePhase,
   type ResourcePhaseEvent,
   resourcePhaseTransition,
 } from "./resource-state.js";
-import { loadControlChain, saveControlChain, saveControlConflict } from "./storage.js";
+import { dekResolver, loadControlChain, saveControlChain, saveControlConflict } from "./storage.js";
 
 /**
  * The client sync session (LFCP-039a): one LFCP connection to a server and
@@ -67,10 +78,24 @@ import { loadControlChain, saveControlChain, saveControlConflict } from "./stora
  */
 
 /** A Resource to synchronize: its Data Profile applier (and optional checkpoints). */
+/**
+ * How a Data Profile reads and writes Snapshots (§29, §66 step 3): its §13
+ * codec, loading a received Snapshot's state, and the state to publish
+ * (for Shared Objects: snapshotCodec(), loadSnapshot(), snapshotState()).
+ */
+export interface SnapshotBinding<T> {
+  readonly codec: DataProfileCodec<T>;
+  load(value: T): void;
+  current(): T;
+}
+
+/** A Resource to synchronize: its Data Profile applier (and optional checkpoints and Snapshots). */
 export interface ResourceBinding {
   readonly resourceId: ResourceId;
   readonly applier: DataUnitApplier;
   readonly checkpointer?: ProfileCheckpointer;
+  /** Load an offered Snapshot instead of replaying every unit, and allow publishing. */
+  readonly snapshot?: SnapshotBinding<unknown>;
 }
 
 /** When to try connecting again after the `attempt`-th failure (1, 2, …): a delay in ms, or null to stop. */
@@ -98,6 +123,12 @@ export interface SyncClientOptions {
   /** An opaque hosting credential for AUTH (§36): server policy only. */
   readonly credential?: Uint8Array;
   readonly dataProfiles?: readonly string[];
+  /**
+   * Whether to publish a Snapshot of a LIVE Resource now, asked on every
+   * tick with the number of units merged since the last one; no automatic
+   * schedule otherwise (publishSnapshot can also be called directly).
+   */
+  readonly snapshotPolicy?: (resourceId: ResourceId, unitsSinceLast: number) => boolean;
 }
 
 /** What the session reports to the application. */
@@ -127,6 +158,18 @@ export type SyncEvent =
       readonly resourceId: ResourceId;
       readonly epochs: readonly DataEpoch[];
     }
+  /** A Snapshot was loaded (§66 step 3); only units beyond its frontier are fetched. */
+  | {
+      readonly type: "snapshot-loaded";
+      readonly resourceId: ResourceId;
+      readonly snapshotId: Hash32;
+      readonly frontier: HaveVector;
+    }
+  | {
+      readonly type: "snapshot-published";
+      readonly resourceId: ResourceId;
+      readonly snapshotId: Hash32;
+    }
   | { readonly type: "ack"; readonly outcome: AckOutcome }
   /** A NACK of an outbound object: stale, equivocation alarm, rejected, repropose, … */
   | { readonly type: "nack"; readonly outcome: NackOutcome }
@@ -145,6 +188,7 @@ type Request =
   | { readonly kind: "keys"; readonly resource: string }
   | { readonly kind: "data-get"; readonly resource: string }
   | { readonly kind: "data-have"; readonly resource: string }
+  | { readonly kind: "snapshot"; readonly resource: string }
   | {
       readonly kind: "host";
       readonly resolve: (durability: bigint) => void;
@@ -172,6 +216,13 @@ interface ResourceContext {
   lastHave: number;
   lastKeyRequest: number;
   missingEpochs: DataEpoch[];
+  /** The newest Snapshot the server offered in RESOURCE_OPENED. */
+  offered: SnapshotSummary | null;
+  /** A SNAPSHOT_GET is outstanding: units wait in `early`. */
+  snapshotPending: boolean;
+  /** Units inside a stored Snapshot's frontier: accepted as covered, not merged again. */
+  covered: HaveVector;
+  unitsSinceSnapshot: number;
 }
 
 const SUBSCRIBE_DATA_AND_CONTROL = 0b11n;
@@ -284,6 +335,10 @@ export class SyncClient {
         lastHave: 0,
         lastKeyRequest: 0,
         missingEpochs: [],
+        offered: null,
+        snapshotPending: false,
+        covered: [],
+        unitsSinceSnapshot: 0,
       };
       this.#resources.set(key, ctx);
     }
@@ -352,6 +407,12 @@ export class SyncClient {
           this.#requestKeys(ctx, now);
         await this.#flush(ctx);
         await ctx.binding.checkpointer?.maybeFlush(now);
+        if (
+          ctx.state === "LIVE" &&
+          ctx.binding.snapshot !== undefined &&
+          this.#o.snapshotPolicy?.(ctx.binding.resourceId, ctx.unitsSinceSnapshot) === true
+        )
+          await this.#publish(ctx);
       }
     });
   }
@@ -451,6 +512,7 @@ export class SyncClient {
         if (ctx === undefined || ctx.state !== "OPENING") return;
         this.#done(m);
         ctx.remoteHave = normalizeLiveHaves(m.body.haves);
+        ctx.offered = m.body.snapshot ?? null;
         this.#move(ctx, "OPENED");
         await this.#controlRound(ctx, m.body.heads);
         return;
@@ -485,6 +547,12 @@ export class SyncClient {
       case "DATA_BATCH": {
         const ctx = this.#ctx(m.body.resourceId);
         if (ctx !== undefined) await this.#onUnits(ctx, m.body.objects);
+        return;
+      }
+      case "SNAPSHOT": {
+        const ctx = this.#ctx(m.body.resourceId);
+        this.#done(m);
+        if (ctx !== undefined && ctx.snapshotPending) await this.#onSnapshot(ctx, m.body.snapshot);
         return;
       }
       case "DATA_HAVE": {
@@ -782,16 +850,144 @@ export class SyncClient {
 
   async #startData(ctx: ResourceContext): Promise<void> {
     await this.#flush(ctx); // §88 step 6: upload locally queued valid units
+    if (await this.#snapshotUseful(ctx)) {
+      // §66 step 3: the preferred Snapshot first, then the units beyond it.
+      const R = ctx.binding.resourceId;
+      ctx.snapshotPending = true;
+      this.#request(
+        { kind: "snapshot", resource: toHex(R) },
+        createMessage("SNAPSHOT_GET", {
+          resourceId: R,
+          snapshotId: (ctx.offered as SnapshotSummary).snapshotId,
+        }),
+      );
+      return;
+    }
+    await this.#afterSnapshot(ctx);
+  }
+
+  async #afterSnapshot(ctx: ResourceContext): Promise<void> {
+    ctx.snapshotPending = false;
     const early = ctx.early;
     ctx.early = [];
-    if (early.length > 0) await this.#onUnits(ctx, early);
     await this.#dataRound(ctx);
+    if (early.length > 0) await this.#onUnits(ctx, early);
+  }
+
+  /** The offered Snapshot holds units we lack, we can load it, and we did not load it before. */
+  async #snapshotUseful(ctx: ResourceContext): Promise<boolean> {
+    const offered = ctx.offered;
+    if (offered === null || ctx.binding.snapshot === undefined) return false;
+    if ((await this.#o.storage.snapshots.get(offered.snapshotId)) !== undefined) return false;
+    const local = (await resourceSyncState(this.#o.storage, ctx.binding.resourceId)).have;
+    return missingFrom(local, normalizeLiveHaves(offered.frontier)).length > 0;
+  }
+
+  async #onSnapshot(ctx: ResourceContext, bytes: Uint8Array): Promise<void> {
+    const R = ctx.binding.resourceId;
+    const view = ctx.view;
+    const binding = ctx.binding.snapshot;
+    if (view !== null && binding !== undefined) {
+      const r = await receiveSnapshot(view, bytes, {
+        dek: dekResolver(this.#o.storage, this.#o.secrets, R),
+        profile: binding.codec,
+      });
+      if (r.kind === "accepted") {
+        binding.load(r.value);
+        const frontier = encode(canonicalFrontierToCbor(r.frontier));
+        await this.#o.storage.commit([
+          {
+            op: "put-snapshot",
+            row: {
+              snapshotId: r.snapshotId,
+              resourceId: R,
+              dataEpoch: r.epoch,
+              publisher: r.publisher,
+              snapshotSeq: r.seq,
+              frontier,
+              bytes,
+            },
+          },
+        ]);
+        ctx.binding.checkpointer?.noteChange();
+        this.#emit({
+          type: "snapshot-loaded",
+          resourceId: R,
+          snapshotId: r.snapshotId,
+          frontier: r.frontier,
+        });
+      } else {
+        const code = r.kind === "local-failure" ? r.reason : r.wireCode;
+        this.#error(
+          code,
+          `the offered Snapshot was not loaded (${r.kind}); replaying units instead`,
+          R,
+        );
+      }
+    }
+    await this.#afterSnapshot(ctx);
+  }
+
+  /**
+   * Publishes a Snapshot of the Resource's current state (§29): its frontier
+   * is every merged unit and every stored Snapshot's frontier, so a client
+   * that loads it never skips content the state does not hold. Queued and
+   * sent like any object; returns its ID.
+   */
+  async publishSnapshot(resource: ResourceId): Promise<Hash32> {
+    const ctx = this.#resources.get(toHex(resource));
+    if (ctx === undefined)
+      throw new LfcpError("UNSUPPORTED_VALUE", "the Resource is not open here");
+    let id: Hash32 | undefined;
+    await new Promise<void>((resolve, reject) =>
+      this.#serial(async () => {
+        try {
+          id = await this.#publish(ctx);
+          resolve();
+        } catch (e) {
+          reject(e);
+        }
+      }),
+    );
+    return id as Hash32;
+  }
+
+  async #publish(ctx: ResourceContext): Promise<Hash32> {
+    const R = ctx.binding.resourceId;
+    const binding = ctx.binding.snapshot;
+    const view = ctx.view;
+    if (binding === undefined || view === null)
+      throw new LfcpError(
+        "UNSUPPORTED_VALUE",
+        "no Snapshot binding, or the Control Chain is not synchronized",
+      );
+    const dek = await dekResolver(this.#o.storage, this.#o.secrets, R)(view.state.epoch.epoch);
+    if (dek === undefined) throw new LfcpError("UNSUPPORTED_VALUE", "no DEK for the current epoch");
+    let frontier = await snapshotFrontier(this.#o.storage, R);
+    for (const u of await this.#o.storage.dataUnits.withStatus(R, "merged"))
+      if (u.accepted) frontier = addSequence(frontier, u.actor, u.actorSeq);
+    const created = await createQueuedSnapshot(this.#o.storage, {
+      view,
+      controlHead: view.state.head,
+      publisher: this.#o.signer,
+      dek,
+      frontier: haveToLive(frontier),
+      profile: binding.codec,
+      value: binding.current(),
+    });
+    ctx.unitsSinceSnapshot = 0;
+    this.#emit({ type: "snapshot-published", resourceId: R, snapshotId: created.snapshotId });
+    await this.#flush(ctx);
+    return created.snapshotId;
   }
 
   async #dataRound(ctx: ResourceContext): Promise<void> {
     const R = ctx.binding.resourceId;
+    ctx.covered = await snapshotFrontier(this.#o.storage, R);
     const local = (await resourceSyncState(this.#o.storage, R)).have;
-    const missing = missingFrom(local, ctx.remoteHave);
+    // Beyond a loaded Snapshot's frontier (missingAfter: `local` includes it),
+    // plus each actor's last covered unit, so the next one links (§26.2).
+    const missing = [...(await this.#boundary(ctx)), ...missingFrom(local, ctx.remoteHave)];
     if (missing.length === 0) {
       if (ctx.state === "DATA_SYNC") this.#move(ctx, "FRONTIER_REACHED");
       ctx.expected = [];
@@ -814,13 +1010,34 @@ export class SyncClient {
       );
   }
 
+  /** The last unit of each actor run a stored Snapshot covers, when we do not hold it yet. */
+  async #boundary(ctx: ResourceContext): Promise<ActorRange[]> {
+    const R = ctx.binding.resourceId;
+    const out: ActorRange[] = [];
+    for (const h of ctx.covered)
+      for (const seq of [
+        ...(h.contiguous > 0n ? [h.contiguous] : []),
+        ...h.extras.map(([, end]) => end),
+      ]) {
+        if (!hasSequence(ctx.remoteHave, h.principalId, seq)) continue;
+        if (
+          (await this.#o.storage.dataUnits.acceptedAt(R, h.principalId, actorSequence(seq))) !==
+          undefined
+        )
+          continue;
+        out.push({ actor: h.principalId, start: seq, end: seq });
+      }
+    return out;
+  }
+
   async #onUnits(ctx: ResourceContext, units: readonly Uint8Array[]): Promise<void> {
     const view = ctx.view;
     if (
       view === null ||
       ctx.state === "KEY_SYNC" ||
       ctx.state === "KEY_BLOCKED" ||
-      ctx.state === "CONTROL_SYNC"
+      ctx.state === "CONTROL_SYNC" ||
+      ctx.snapshotPending
     ) {
       ctx.early.push(...units);
       return;
@@ -829,17 +1046,30 @@ export class SyncClient {
     let changed = false;
     let needControl = false;
     for (const bytes of units) {
+      let covered = false;
       try {
         const p = parseDataUnit(bytes).payload;
         ctx.received = addSequence(ctx.received, p.actor, p.actorSeq);
+        covered = hasSequence(ctx.covered, p.actor, p.actorSeq);
       } catch {
         // malformed: the applier reports it
       }
-      const outcome = await ctx.binding.applier.receive(view, bytes);
-      if (outcome.kind === "applied" || outcome.kind === "profile-pending") changed = true;
+      const outcome = covered
+        ? await ctx.binding.applier.acceptCovered(view, bytes)
+        : await ctx.binding.applier.receive(view, bytes);
+      if (outcome.kind === "applied" || outcome.kind === "profile-pending") {
+        changed = true;
+        ctx.unitsSinceSnapshot += 1;
+      }
       if (outcome.kind === "rejected" && outcome.wireCode === "MISSING_DEPENDENCY")
         needControl = true;
       this.#emit({ type: "unit", resourceId: R, outcome });
+      // Held units this one released (§26.2): their outcomes too.
+      const released = "released" in outcome ? outcome.released : [];
+      for (const r of released) {
+        if (r.kind === "applied" || r.kind === "profile-pending") changed = true;
+        this.#emit({ type: "unit", resourceId: R, outcome: r });
+      }
     }
     if (changed) ctx.binding.checkpointer?.noteChange();
     if (needControl) this.#refreshControl(ctx);
