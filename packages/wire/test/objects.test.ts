@@ -367,6 +367,7 @@ describe("actor-have and canonical frontier (§28.1, §28.2)", () => {
     ["key 2 present and empty (rule 2)", have(1, 7, [])],
     ["range start > end (rule 4)", have(1, 100, [[107, 105]])],
     ["range at contiguous (rule 5)", have(1, 100, [[100, 101]])],
+    ["range at contiguous + 1 (PROVISIONAL W3)", have(1, 100, [[101, 102]])],
     ["range below contiguous (rule 5)", have(1, 100, [[95, 107]])],
     [
       "unsorted (rule 6)",

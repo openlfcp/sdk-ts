@@ -38,7 +38,11 @@ export function actorHaveFromCbor(value: CborValue): ActorHave {
   if (f.has(2)) {
     const list = f.array(2);
     if (list.length === 0) invalid(what, "key 2 must be omitted when there are no ranges (§28.1)");
-    let floor = contiguous; // the next range must start above this
+    // PROVISIONAL (W3, approved for baseline.3): the first extra range starts
+    // at contiguous + 2 or later. A range starting at contiguous + 1 would
+    // extend the contiguous run, so contiguous would not be the highest
+    // contiguous sequence (§28).
+    let floor = contiguous + 1n; // the next range must start above this
     for (const item of list) {
       if (!Array.isArray(item) || item.length !== 2) invalid(what, "a range must be [start, end]");
       const [start, end] = (item as CborValue[]).map((n) => {
@@ -50,7 +54,7 @@ export function actorHaveFromCbor(value: CborValue): ActorHave {
         invalid(
           what,
           extras.length === 0
-            ? "ranges must be strictly above contiguous (§28.1)"
+            ? "ranges must start above contiguous + 1 (§28.1; W3)"
             : "ranges must be sorted, non-overlapping and non-adjacent (§28.1)",
         );
       }

@@ -23,7 +23,7 @@ import {
 } from "./cose.js";
 import { checkWriterUrl, type Endpoint, endpointFromCbor, endpointToCbor } from "./endpoint.js";
 import { Fields } from "./fields.js";
-import { type ActorHave, actorHaveFromCbor, actorHaveToCbor } from "./have.js";
+import { type ActorHave, canonicalFrontierFromCbor, canonicalFrontierToCbor } from "./have.js";
 import {
   CONTROL_TYPE,
   type ControlRecordPayload,
@@ -155,15 +155,13 @@ function endpoints(f: Fields, key: number): readonly Endpoint[] {
   return Object.freeze(list.map(endpointFromCbor));
 }
 
+/**
+ * The Key Epoch final frontier. PROVISIONAL (G-CP1, approved for
+ * baseline.3): a canonical frontier, §28.1 rules 1-9 and the §28.2 order by
+ * raw Principal ID; anything else is MALFORMED_MESSAGE.
+ */
 function frontierList(f: Fields, key: number): readonly ActorHave[] {
-  const entries = f.array(key).map(actorHaveFromCbor);
-  const seen = new Set<string>();
-  for (const e of entries) {
-    const k = Array.from(e.principalId, (b) => b.toString(16).padStart(2, "0")).join("");
-    if (seen.has(k)) f.fail(key, "lists one Principal twice (§28.1 rule 9)");
-    seen.add(k);
-  }
-  return Object.freeze(entries);
+  return canonicalFrontierFromCbor(f.array(key) as CborValue);
 }
 
 /**
@@ -384,7 +382,7 @@ export function controlBodyToCbor(body: ControlBody): CborValue {
       return cborMap([
         [0, dataEpoch(body.epoch)],
         [1, hash32(body.dekCommitment)],
-        [2, body.finalFrontier.map(actorHaveToCbor)],
+        [2, canonicalFrontierToCbor(body.finalFrontier)],
         [3, body.reason],
       ]);
     case "ROUTE_UPDATE":

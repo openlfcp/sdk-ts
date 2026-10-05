@@ -1,5 +1,6 @@
 import {
   type ControlRecordId,
+  compareCanonicalFrontierOrder,
   controlRecordId,
   dataEpoch,
   generateResourceId,
@@ -219,10 +220,11 @@ describe("typed bodies", () => {
         type: "KEY_EPOCH",
         epoch: dataEpoch(1n),
         dekCommitment: COMMITMENT,
+        // A canonical frontier: sorted by raw Principal ID (§28.2, G-CP1).
         finalFrontier: [
           { principalId: ALICE.descriptor.principalId, contiguous: 2n, extras: [] },
           { principalId: BRUNO.descriptor.principalId, contiguous: 7n, extras: [[9n, 9n]] },
-        ],
+        ].sort((a, b) => compareCanonicalFrontierOrder(a.principalId, b.principalId)) as never,
         reason: 1n,
       },
       true,
