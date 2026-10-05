@@ -5,3 +5,13 @@
 export const PACKAGE = "@openlfcp/crypto";
 
 export { sha256 } from "./hash.js";
+export {
+  AgreementKeyPair,
+  exportSecretKeyBytes,
+  generateAgreementKeyPair,
+  generateSigningKeyPair,
+  importAgreementKey,
+  importSigningKey,
+  SigningKeyPair,
+  verifyEd25519,
+} from "./keys.js";
