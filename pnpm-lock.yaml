@@ -79,6 +79,9 @@ importers:
 
   packages/shared-objects:
     dependencies:
+      '@automerge/automerge':
+        specifier: 3.5.0
+        version: 3.5.0
       '@openlfcp/core':
         specifier: workspace:^
         version: link:../core
@@ -102,6 +105,9 @@ importers:
         version: link:../crypto
 
 packages:
+
+  '@automerge/automerge@3.5.0':
+    resolution: {integrity: sha512-ejbqJWfXWM2QbTcUK/5ugYiQiyOP7LYVAp/RuSvthCc07oek0FClMxEuouuhjrLjVPDSI34RP1ftGc45PF7WRA==}
 
   '@biomejs/biome@2.5.15':
     resolution: {integrity: sha512-WZTW4slm/pdkh92K6t/3aEN++44JD1PQ7squ7RCMLI1flHGl43DVOIGXvCjHiZgBMO1V4uYxoFNtqrIA4qGuIQ==}
@@ -571,6 +577,8 @@ packages:
     hasBin: true
 
 snapshots:
+
+  '@automerge/automerge@3.5.0': {}
 
   '@biomejs/biome@2.5.15':
     optionalDependencies:
