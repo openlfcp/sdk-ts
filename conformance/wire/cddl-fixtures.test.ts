@@ -8,7 +8,7 @@
 // by the vector run, not here. Rules sdk-ts cannot decode yet are listed
 // in cddl-pending.json; a rule in neither place fails the run.
 
-import { bytesEqual, fromHex } from "@openlfcp/core";
+import { bytesEqual, dataEpoch, fromHex, principalId, resourceId } from "@openlfcp/core";
 import {
   canonicalFrontierFromCbor,
   controlBodyFromCbor,
@@ -18,6 +18,8 @@ import {
   decodeKeyPackagePayload,
   decodePrincipalDescriptor,
   decodeSnapshotPayload,
+  keyPackageHpkeAad,
+  keyPackageHpkeInfo,
   ownerTransferAcceptPayloadFromCbor,
   ownerTransferOfferPayloadFromCbor,
   parseDataUnit,
@@ -86,6 +88,28 @@ const RULES: Readonly<Record<string, (bytes: Uint8Array) => unknown>> = {
     if (!bytesEqual(sigStructureBytes(prot, payload), b)) throw new Error("not the §10.5 encoding");
   },
   "key-package-payload": decodeKeyPackagePayload,
+  // §25.1: the item must be exactly what keyPackageHpkeInfo / -Aad build from its fields.
+  "key-package-hpke-info": (b) => {
+    const [label, resource, epoch, recipient] = decodeDeterministic(b) as CborValue[];
+    if (label !== "LFCP-KEY-v1") throw new Error("not the LFCP-KEY-v1 label");
+    const rebuilt = keyPackageHpkeInfo(
+      resourceId(resource as Uint8Array),
+      dataEpoch(epoch as number),
+      principalId(recipient as Uint8Array),
+    );
+    if (!bytesEqual(rebuilt, b)) throw new Error("not the §25.1 info");
+  },
+  "key-package-hpke-aad": (b) => {
+    const [resource, epoch, head] = decodeDeterministic(b) as CborValue[];
+    if (!(head instanceof Uint8Array) || head.length !== 32)
+      throw new Error("the Control Head is not 32 bytes");
+    const rebuilt = keyPackageHpkeAad(
+      resourceId(resource as Uint8Array),
+      dataEpoch(epoch as number),
+      head,
+    );
+    if (!bytesEqual(rebuilt, b)) throw new Error("not the §25.1 AAD");
+  },
   "key-package": parseKeyPackage,
   "data-unit-payload": decodeDataUnitPayload,
   "data-unit": parseDataUnit,
