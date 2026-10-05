@@ -9,26 +9,33 @@
 // - the full-save image loads (§13) to the same state and conflicts, and
 //   as a Snapshot accepts the changes beyond it (S14).
 //
+// Every negative is a Data Unit plaintext on top of a scenario's state that
+// the signer-bound profile codec rejects with the expected code and §74.1
+// diagnostic, and that is never merged (SO-SEC1: §8, §11).
+//
 // Behavioral interop only (SHARED-OBJECTS-PROFILE-01 §14, AGENT-OPERATING-
 // GUIDE §13): byte equality of a re-save is checked as informative below.
 
 import { fromHex, principalId, resourceId, toHex } from "@openlfcp/core";
 import {
   checkChange,
+  deriveActorId,
   frameChange,
   frameSnapshot,
   SharedObjectsReplica as Replica,
+  SharedObjectsDataProfile,
   type SharedObjectsReplica,
   unframeChange,
 } from "@openlfcp/shared-objects";
 import { describe, expect, it } from "vitest";
 import type { HandlerContext, VectorCase, VectorSuite } from "../runner.js";
 import { log, openSpec } from "../spec.mjs";
-import { CORPUS_PATH, CORPUS_SPEC_COMMIT, readCorpus } from "./corpus.js";
+import { CORPUS_PATH, corpusScenario, readCorpus } from "./corpus.js";
 import { runScenario } from "./scenarios.js";
 
+const spec = openSpec();
 const corpus = readCorpus();
-const suite = openSpec().readJson(
+const suite = spec.readJson(
   "test-vectors/shared-objects-01/SHARED-OBJECTS-TEST-VECTORS-01.json",
 ) as VectorSuite & {
   fixtures: { resource_a_hex: string; principals: Record<string, { id_hex: string }> };
@@ -40,8 +47,9 @@ const options = {
 };
 
 log(
-  `LFCP Shared Objects Automerge corpus: ${CORPUS_PATH} at spec ${CORPUS_SPEC_COMMIT} ` +
-    `(Automerge ${corpus.automerge_version}), ${corpus.scenarios.length} scenarios`,
+  `LFCP Shared Objects Automerge corpus: ${CORPUS_PATH} from ${spec.lock.repository} ` +
+    `${spec.lock.tag} (${spec.lock.commit}), Automerge ${corpus.automerge_version}, ` +
+    `${corpus.scenarios.length} scenarios, ${corpus.negatives.length} negatives`,
 );
 
 /** Conflicts in the corpus convention: per object, field -> values, and "" -> the number of collided objects. */
@@ -51,7 +59,7 @@ function conflictsOf(replica: SharedObjectsReplica): Record<string, Record<strin
   return out;
 }
 
-describe(`Automerge reference corpus at spec ${CORPUS_SPEC_COMMIT.slice(0, 7)}`, () => {
+describe(`Automerge reference corpus at ${spec.lock.tag}`, () => {
   it("targets the binding's Automerge version and the fixture Resource", () => {
     expect(corpus.automerge_version).toBe("3.5.0");
     expect(corpus.resource_hex).toBe(suite.fixtures.resource_a_hex);
@@ -119,6 +127,41 @@ describe(`Automerge reference corpus at spec ${CORPUS_SPEC_COMMIT.slice(0, 7)}`,
           expect(replica.root()).toEqual(scenario.state);
         });
       }
+    });
+  }
+});
+
+describe(`Automerge reference corpus negatives at ${spec.lock.tag}`, () => {
+  it("has a negative", () => {
+    expect(corpus.negatives.length).toBeGreaterThan(0);
+  });
+
+  for (const negative of corpus.negatives) {
+    const { code, diagnostic } = negative.expected.error;
+    it(`${negative.id}: ${code}${diagnostic !== undefined ? ` / ${diagnostic}` : ""}`, () => {
+      const id = (name: string) =>
+        principalId(fromHex(suite.fixtures.principals[name]?.id_hex as string));
+      const signer = id(negative.signer);
+      expect(toHex(deriveActorId(options.resource, signer))).toBe(negative.signer_actor_hex);
+      const plaintext = fromHex(negative.plaintext_hex);
+      expect(toHex(frameChange(fromHex(negative.change.change_hex)))).toBe(negative.plaintext_hex);
+
+      const base = corpusScenario(negative.base_scenario).changes.map((c) => fromHex(c.change_hex));
+      const profile = new SharedObjectsDataProfile(Replica.fromChanges(base, options).replica);
+      const before = profile.replica.root();
+      // The change itself is valid: its own actor's codec decodes it.
+      const author = Object.entries(corpus.actors).find(
+        ([, hex]) => hex === negative.change.actor_hex,
+      )?.[0];
+      expect(author).toBe(negative.change.actor);
+      const own = profile.codecFor({ resourceId: options.resource, actor: id(author as string) });
+      expect(own.decode(plaintext).hash).toBe(negative.change.hash);
+      const codec = profile.codecFor({ resourceId: options.resource, actor: signer });
+      expect(() => codec.decode(plaintext)).toThrow(
+        expect.objectContaining({ code, ...(diagnostic !== undefined ? { diagnostic } : {}) }),
+      );
+      expect(profile.replica.hasChange(negative.change.hash)).toBe(false);
+      expect(profile.replica.root()).toEqual(before);
     });
   }
 });

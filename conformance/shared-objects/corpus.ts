@@ -1,20 +1,13 @@
 // The SHARED-OBJECTS-TEST-VECTORS-01 Automerge reference corpus
 // (SHARED-OBJECTS-AUTOMERGE-REFERENCE-01.json), generated with
-// @automerge/automerge 3.5.0. It is supplementary, not byte-normative
-// (SHARED-OBJECTS-PROFILE-01 §14): a conforming binding applies its
-// changes, loads its save images and reaches its logical state and
-// conflict sets.
+// @automerge/automerge 3.5.0, read at the spec commit pinned in spec.lock
+// (part of the baseline since mvp-0.1-baseline.4). It is supplementary,
+// not byte-normative (SHARED-OBJECTS-PROFILE-01 §14): a conforming binding
+// applies its changes, loads its save images and reaches its logical state
+// and conflict sets, and rejects its negatives.
 
-import { openSpec, runGit } from "../spec.mjs";
+import { openSpec } from "../spec.mjs";
 
-/**
- * The spec commit that holds the corpus and its fixed generator. It is not
- * in the pinned baseline mvp-0.1-baseline.3 (spec.lock): it lands in
- * baseline.4. The orchestrator approved this pin for the LFCP-031/032 tests.
- * TODO(baseline.4): read the corpus at the spec.lock commit once sdk-ts
- * moves to mvp-0.1-baseline.4, and drop this constant.
- */
-export const CORPUS_SPEC_COMMIT = "e25b1eaab4dc6ace873309bff688f29bc9d38db8";
 export const CORPUS_PATH =
   "test-vectors/shared-objects-01/SHARED-OBJECTS-AUTOMERGE-REFERENCE-01.json";
 
@@ -42,29 +35,38 @@ export interface CorpusScenario {
   readonly snapshot?: { readonly save_hex: string; readonly heads: readonly string[] };
 }
 
+/** A Data Unit plaintext a receiver must reject, on top of a scenario's state. */
+export interface CorpusNegative {
+  readonly id: string;
+  readonly description: string;
+  readonly rule: string;
+  readonly base_scenario: string;
+  /** The fixture Principal that signs the Data Unit carrying the plaintext. */
+  readonly signer: string;
+  readonly signer_actor_hex: string;
+  readonly change: CorpusChange;
+  readonly plaintext_hex: string;
+  readonly expected: {
+    readonly valid: false;
+    readonly disposition: string;
+    readonly error: { readonly code: string; readonly diagnostic?: string };
+  };
+}
+
 export interface Corpus {
   readonly automerge_version: string;
   readonly profile: string;
   readonly resource_hex: string;
   readonly actors: Readonly<Record<string, string>>;
   readonly scenarios: readonly CorpusScenario[];
+  readonly negatives: readonly CorpusNegative[];
 }
-
-// The WHATWG TextDecoder global (sdk-ts compiles without DOM or Node types).
-declare const TextDecoder: new (
-  label: string,
-  options: { fatal: boolean },
-) => { decode(bytes: Uint8Array): string };
 
 let cached: Corpus | undefined;
 
-/** The corpus at CORPUS_SPEC_COMMIT, from the same spec checkout as the suite. */
+/** The corpus at the spec.lock commit, from the same spec checkout as the suite. */
 export function readCorpus(): Corpus {
-  if (cached === undefined) {
-    const spec = openSpec();
-    const bytes = runGit(spec.dir, ["show", `${CORPUS_SPEC_COMMIT}:${CORPUS_PATH}`]);
-    cached = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as Corpus;
-  }
+  if (cached === undefined) cached = openSpec().readJson(CORPUS_PATH) as Corpus;
   return cached;
 }
 
