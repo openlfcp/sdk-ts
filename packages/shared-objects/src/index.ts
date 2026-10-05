@@ -1,10 +1,37 @@
 /**
  * SHARED-OBJECTS-PROFILE-01 (org.openlfcp.shared-objects.v1): the Shared
- * Task model and profile validation over logical state (LFCP-030). The
- * Automerge binding is LFCP-031.
+ * Task model and profile validation over logical state (LFCP-030), and its
+ * Automerge binding (LFCP-031).
  */
 export const PACKAGE = "@openlfcp/shared-objects";
 
+export {
+  type CheckedChange,
+  checkChange,
+  checkSaveHeader,
+  frameChange,
+  frameSnapshot,
+  unframeChange,
+  unframeSnapshot,
+} from "./automerge-bytes.js";
+export {
+  type BuiltReplica,
+  type LocalChange,
+  type ObjectChange,
+  ObjectIdCollisionError,
+  type ObjectStatus,
+  type ReceiveResult,
+  type ReplicaIntent,
+  type ReplicaOptions,
+  type ReplicaValidation,
+  type ResolveFieldConflict,
+  resolveFieldConflict,
+  SCALAR_FIELDS,
+  type ScalarField,
+  type ScalarView,
+  SharedObjectsReplica,
+  type TaskView,
+} from "./replica.js";
 export {
   addTag,
   assign,
