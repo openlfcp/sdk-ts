@@ -44,7 +44,22 @@ export type LfcpErrorCode =
    */
   | "COSE_MALFORMED"
   /** The signing key does not belong to the Principal Descriptor it is used with. */
-  | "COSE_SIGNER_MISMATCH";
+  | "COSE_SIGNER_MISMATCH"
+  /**
+   * Deterministic CBOR that does not have the structure a Wire rule requires:
+   * wrong field set, field type or byte-string length, or a broken structural
+   * rule (actor sequence 0 §8, a non-canonical actor-have or frontier §28.1,
+   * §28.2, Genesis not at control_seq 0 with a null link §13.1). Surfaces on
+   * the wire as MALFORMED_MESSAGE.
+   */
+  | "INVALID_STRUCTURE"
+  /**
+   * A well-formed value that LFCP reserves but this version does not define:
+   * a core Control Record type 9–31 (§14, "MUST cause validation failure").
+   * §14 names no wire code; until the spec does, it surfaces as
+   * MALFORMED_MESSAGE.
+   */
+  | "UNSUPPORTED_VALUE";
 
 /** Error with a stable machine-readable `code`; the message is for humans only. */
 export class LfcpError extends Error {
