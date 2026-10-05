@@ -1,4 +1,6 @@
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
+import { bytesToNumberLE, concatBytes } from "@noble/curves/utils.js";
+import { sha512 } from "@noble/hashes/sha2.js";
 import { LfcpError } from "@openlfcp/core";
 import {
   type ActorDataKey,
@@ -171,14 +173,74 @@ export function exportSecretKeyBytes(
  */
 export const agreementSecretBytes = (key: AgreementKeyPair): Uint8Array => readAgreementSecret(key);
 
-/** Verifies an Ed25519 signature. Returns false (never throws) for malformed input. */
+const POINT = ed25519.Point;
+/** The Ed25519 group order L. */
+const L = POINT.Fn.ORDER;
+
+/**
+ * Decodes an Ed25519 point under §10.5.1 rule 2: y < p, and x = 0 with the
+ * sign bit set is refused. Returns undefined for a non-canonical or
+ * off-curve encoding.
+ */
+function decodePoint(bytes: Uint8Array): InstanceType<typeof POINT> | undefined {
+  try {
+    return POINT.fromBytes(bytes, false);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether `publicKey` is a canonical Ed25519 point encoding that is not of
+ * small order (LFCP-WIRE-01 §7, §10.5.1 rules 2 and 3), as required of every
+ * descriptor's Ed25519 key at receipt.
+ */
+export function isValidEd25519PublicKey(publicKey: Uint8Array): boolean {
+  if (!(publicKey instanceof Uint8Array) || publicKey.length !== KEY_LENGTH) return false;
+  const a = decodePoint(publicKey);
+  return a !== undefined && !a.isSmallOrder();
+}
+
+/**
+ * Strict Ed25519 verification, LFCP-WIRE-01 §10.5.1. Returns false (never
+ * throws) for any malformed or invalid input. The checks run in this order:
+ *
+ * 1. decode: A and R are canonical point encodings (y < p; x = 0 with the
+ *    sign bit set is refused) — rule 2;
+ * 2. S < L — rule 1;
+ * 3. neither A nor R is of small order — rule 3;
+ * 4. the cofactorless equation [S]B = R + [k]A, where k = SHA-512 of the
+ *    exact received R bytes, the exact A bytes and M, reduced mod L — rule 4.
+ *
+ * noble's `ed25519.verify` is not used: it checks the cofactored equation
+ * ([8][S]B = [8]R + [8][k]A) and does not refuse a small-order R, so it
+ * accepts signatures §10.5.1 rejects (a mixed-order A or R, a small-order
+ * R). The rules are composed here from noble's point decoding and
+ * arithmetic, and R and A are never re-encoded.
+ */
 export function verifyEd25519(
   publicKey: Uint8Array,
   message: Uint8Array,
   signature: Uint8Array,
 ): boolean {
   try {
-    return ed25519.verify(signature, message, publicKey);
+    if (
+      !(publicKey instanceof Uint8Array) ||
+      !(message instanceof Uint8Array) ||
+      !(signature instanceof Uint8Array) ||
+      publicKey.length !== KEY_LENGTH ||
+      signature.length !== 2 * KEY_LENGTH
+    )
+      return false;
+    const rBytes = signature.subarray(0, KEY_LENGTH);
+    const a = decodePoint(publicKey);
+    const r = decodePoint(rBytes);
+    if (a === undefined || r === undefined) return false;
+    const s = bytesToNumberLE(signature.subarray(KEY_LENGTH));
+    if (s >= L) return false;
+    if (a.isSmallOrder() || r.isSmallOrder()) return false;
+    const k = bytesToNumberLE(sha512(concatBytes(rBytes, publicKey, message))) % L;
+    return POINT.BASE.multiplyUnsafe(s).equals(r.add(a.multiplyUnsafe(k)));
   } catch {
     return false;
   }

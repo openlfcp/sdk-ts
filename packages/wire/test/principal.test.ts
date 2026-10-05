@@ -86,6 +86,24 @@ describe("Principal Descriptor (LFCP-WIRE-01 §7)", () => {
     );
   });
 
+  it("rejects a small-order or non-canonical Ed25519 key, with the ID recomputed (§7, §10.5.1)", () => {
+    const keys = [
+      new Uint8Array(32), // y = 0, order 4
+      Uint8Array.from({ length: 32 }, (_, i) => (i === 0 ? 1 : 0)), // the neutral element
+      Uint8Array.from({ length: 32 }, (_, i) => (i === 0 ? 0xee : i === 31 ? 0x7f : 0xff)), // y = p + 1
+    ];
+    for (const ed of keys) {
+      const forged = cborMap([
+        [0, derivePrincipalId(ed, agreement.publicKey)],
+        [1, ed],
+        [2, agreement.publicKey],
+      ]);
+      expect(codeOf(() => principalDescriptorFromCbor(forged))).toBe(
+        "INVALID_PRINCIPAL_DESCRIPTOR",
+      );
+    }
+  });
+
   it("rejects missing, extra and wrongly typed fields", () => {
     const base = principalDescriptorToCbor(descriptor).entries;
     expect(codeOf(() => principalDescriptorFromCbor(cborMap(base.slice(0, 2))))).toBe(

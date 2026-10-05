@@ -1,5 +1,5 @@
 import { bytesEqual, LfcpError, type PrincipalId, principalId } from "@openlfcp/core";
-import { sha256 } from "@openlfcp/crypto";
+import { isValidEd25519PublicKey, sha256 } from "@openlfcp/crypto";
 import {
   type CborMap,
   type CborValue,
@@ -88,7 +88,8 @@ export function encodePrincipalDescriptor(descriptor: PrincipalDescriptor): Uint
  * Validates a decoded descriptor: exactly the keys 0, 1 and 2 (the §7 map
  * is closed), each a 32-byte byte string, and a Principal ID equal to the
  * §7 hash of the two public keys ("A verifier MUST recompute the ID
- * whenever a descriptor is received").
+ * whenever a descriptor is received"), and an Ed25519 key that is a
+ * canonical point encoding not of small order (§7, §10.5.1).
  */
 export function principalDescriptorFromCbor(value: CborValue): PrincipalDescriptor {
   if (!isCborMap(value)) invalid("not a map");
@@ -106,6 +107,8 @@ export function principalDescriptorFromCbor(value: CborValue): PrincipalDescript
       "the Principal ID does not match the descriptor's public keys",
     );
   }
+  if (!isValidEd25519PublicKey(descriptor.ed25519PublicKey))
+    invalid("the Ed25519 public key is not a canonical point encoding of large order");
   return descriptor;
 }
 

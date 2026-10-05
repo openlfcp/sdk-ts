@@ -26,6 +26,7 @@ export {
   generateSigningKeyPair,
   importAgreementKey,
   importSigningKey,
+  isValidEd25519PublicKey,
   SigningKeyPair,
   verifyEd25519,
 } from "./keys.js";
