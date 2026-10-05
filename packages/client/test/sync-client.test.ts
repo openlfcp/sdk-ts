@@ -106,9 +106,11 @@ function client(
   who: { signer: Signer; agreement: AgreementKeyPair },
   server: FakeServer,
   clock: { t: number },
+  /** The device's stores, to start again on them (a restart). */
+  device?: { storage: InMemoryLfcpStorage; secrets: InMemorySecretStore },
 ) {
-  const storage = new InMemoryLfcpStorage();
-  const secrets = new InMemorySecretStore();
+  const storage = device?.storage ?? new InMemoryLfcpStorage();
+  const secrets = device?.secrets ?? new InMemorySecretStore();
   const merged: string[] = [];
   const handler: DataProfileHandler<string> = {
     dataProfile: PROFILE,
@@ -785,6 +787,86 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     await bob.sync.idle();
     expect(bob.sync.resourceState(chain.R)).toBe("KEY_BLOCKED");
     expect((await bob.storage.control.epochs(chain.R))[0]?.dekRef).toBeNull();
+  });
+
+  it("never loads again a Snapshot that crashed the engine twice (crash-loop breaker)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(214);
+    const first = client(OWNER, server, clock);
+    await ownerState(first, chain);
+    const v = chain.view();
+    const u = await createQueuedDataUnit(new InMemoryLfcpStorage(), {
+      view: v,
+      controlHead: v.state.head,
+      actor: OWNER.signer,
+      dek: DEK0,
+      profile: TEXT,
+      previousUnitId: null,
+      value: "from units",
+    });
+    const frontier = [{ principalId: OWNER.signer.descriptor.principalId, contiguous: 1n }];
+    const snapshot = await createSnapshot({
+      view: v,
+      controlHead: v.state.head,
+      publisher: OWNER.signer,
+      dek: DEK0,
+      frontier,
+      profile: TEXT,
+      value: "poison",
+      sequences: new InMemorySnapshotSequenceReservation(),
+    });
+    hostOf(server, chain, [u.bytes]);
+    const answer = server.onMessage;
+    server.onMessage = (m, sv) => {
+      if (m.type === "RESOURCE_OPEN") {
+        sv.reply(m, "RESOURCE_OPENED", {
+          resourceId: chain.R,
+          heads: [{ seq: v.state.seq, recordId: v.state.head }],
+          haves: frontier,
+          snapshot: { snapshotId: snapshot.snapshotId, dataEpoch: 0n, frontier },
+        });
+        return [];
+      }
+      if (m.type === "SNAPSHOT_GET") {
+        sv.reply(m, "SNAPSHOT", { resourceId: chain.R, snapshot: snapshot.bytes });
+        return [];
+      }
+      return answer(m, sv);
+    };
+    const run = async (c: ReturnType<typeof client>) => {
+      const binding = {
+        ...c.binding(chain.R),
+        snapshot: {
+          codec: TEXT,
+          load: () => {
+            throw new WebAssembly.RuntimeError("unreachable executed"); // the engine traps
+          },
+          current: () => "",
+        },
+      };
+      c.sync.open(binding);
+      c.sync.start();
+      await settle(200);
+      await c.sync.idle();
+      await c.sync.stop();
+    };
+    // Two starts trap while loading it; the third never asks for it again.
+    await run(first);
+    expect(server.of("SNAPSHOT_GET")).toHaveLength(1);
+    // The trap stops this client once, with ENGINE_TRAP, and it stays stopped.
+    expect(first.events.filter((e) => e.type === "error").map((e) => e.code)).toEqual([
+      "ENGINE_TRAP",
+    ]);
+    await run(client(OWNER, server, clock, first));
+    expect(server.of("SNAPSHOT_GET")).toHaveLength(2);
+    const third = client(OWNER, server, clock, first);
+    await run(third);
+    expect(server.of("SNAPSHOT_GET")).toHaveLength(2);
+    expect(third.merged).toEqual(["from units"]);
+    expect(
+      third.events.some((e) => e.type === "error" && e.code === "INVALID_AUTOMERGE_BYTES"),
+    ).toBe(true);
   });
 
   it("surfaces a refused RESOURCE_OPEN and leaves the Resource CLOSED", async () => {

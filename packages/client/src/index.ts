@@ -26,6 +26,14 @@ export {
 } from "./connection.js";
 export { type CreateDataUnitOptions, type CreatedDataUnit, createDataUnit } from "./data-unit.js";
 export {
+  EngineGuard,
+  type EngineItem,
+  isEngineTrap,
+  type Suspicion,
+  snapshotItem,
+  unitItem,
+} from "./engine-guard.js";
+export {
   type AcceptedInvitation,
   type AcceptInvitationOptions,
   type AcceptInvitationProgress,

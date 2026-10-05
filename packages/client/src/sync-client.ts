@@ -9,7 +9,7 @@ import {
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
-import { type AgreementKeyPair, exportSecretKeyBytes } from "@openlfcp/crypto";
+import { type AgreementKeyPair, exportSecretKeyBytes, sha256 } from "@openlfcp/crypto";
 import { dekSecretRef, type EpochRow, type LfcpStorage, type SecretStore } from "@openlfcp/storage";
 import {
   type ActorRange,
@@ -46,6 +46,7 @@ import { encode } from "@openlfcp/wire/cbor";
 import type { ApplyOutcome, DataUnitApplier, EpochReconciliation } from "./apply.js";
 import type { ProfileCheckpointer } from "./checkpoint.js";
 import { LfcpConnection, type WebSocketFactory } from "./connection.js";
+import { EngineGuard, isEngineTrap, snapshotItem } from "./engine-guard.js";
 import type { AckOutcome, NackOutcome, OutboundQueue, StaleOutboundUnit } from "./outbound.js";
 import { resourceSyncState, snapshotFrontier } from "./outbound.js";
 import { createQueuedSnapshot } from "./queue.js";
@@ -192,6 +193,8 @@ export type SyncEvent =
       readonly resourceId: ResourceId;
       readonly replayed: readonly DataUnitId[];
       readonly skipped: readonly { readonly unitId: DataUnitId; readonly reason: string }[];
+      /** Units quarantined because they crashed the profile engine twice by themselves. */
+      readonly crashed: readonly DataUnitId[];
     }
   | { readonly type: "ack"; readonly outcome: AckOutcome }
   /** A NACK of an outbound object: stale, equivocation alarm, rejected, repropose, … */
@@ -280,7 +283,11 @@ export class SyncClient {
   readonly #requestTimeoutMs: number;
   readonly #listeners = new Set<(event: SyncEvent) => void>();
   readonly #antiEntropyMs: number;
+  /** The crash-loop breaker for Snapshot loads (EngineGuard). */
+  readonly #snapshots: EngineGuard;
   #stopped = true;
+  /** The profile engine trapped: nothing more is processed (ENGINE_TRAP). */
+  #trapped = false;
   #attempt = 0;
   #reconnectAt: number | null = null;
   /** Serializes message handling: each message is handled after the previous one finished. */
@@ -288,6 +295,7 @@ export class SyncClient {
 
   constructor(options: SyncClientOptions) {
     this.#o = options;
+    this.#snapshots = new EngineGuard(options.storage, "snapshots");
     this.#antiEntropyMs = options.antiEntropyMs ?? 30_000;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
     this.#connection = new LfcpConnection(
@@ -319,13 +327,30 @@ export class SyncClient {
   }
 
   #serial(fn: () => Promise<void> | void): void {
-    this.#queue = this.#queue.then(fn).catch((e: unknown) =>
-      this.#emit({
-        type: "error",
-        code: "INTERNAL",
-        message: e instanceof Error ? e.message : String(e),
-      }),
-    );
+    this.#queue = this.#queue
+      .then(() => (this.#trapped ? undefined : fn()))
+      .catch((e: unknown) => {
+        if (!isEngineTrap(e)) {
+          this.#emit({
+            type: "error",
+            code: "INTERNAL",
+            message: e instanceof Error ? e.message : String(e),
+          });
+          return;
+        }
+        // The profile engine trapped: in this process it is gone for good.
+        // Stop once, loudly; the crash-loop breaker takes over at the next start.
+        if (this.#trapped) return;
+        this.#trapped = true;
+        this.#stopped = true;
+        this.#reconnectAt = null;
+        this.#connection.close("the profile engine trapped");
+        this.#emit({
+          type: "error",
+          code: "ENGINE_TRAP",
+          message: `the profile engine trapped (${e instanceof Error ? e.message : String(e)}); this process must restart`,
+        });
+      });
   }
 
   /** Resolves once every message received so far has been handled (tests and shutdown). */
@@ -343,6 +368,7 @@ export class SyncClient {
 
   /** Connects, and reconnects after losses (per the ReconnectPolicy) until stop(). */
   start(): void {
+    if (this.#trapped) return;
     this.#stopped = false;
     this.#reconnectAt = null;
     this.#connection.connect();
@@ -963,11 +989,25 @@ export class SyncClient {
     // Accepted units on disk that the profile state lacks (a crash before
     // the checkpoint caught up) are applied again before any new unit.
     if (ctx.view !== null) {
+      const R = ctx.binding.resourceId;
+      // Snapshots that crashed the engine twice are never loaded again.
+      for (const item of await this.#snapshots.recover(R))
+        this.#error(
+          "INVALID_AUTOMERGE_BYTES",
+          `Snapshot ${item.slice("snapshot:".length)} crashed the profile engine twice; it is not loaded again on this device`,
+          R,
+        );
       const r = await ctx.binding.applier.replayStored(ctx.view);
-      if (r.replayed.length > 0 || r.skipped.length > 0) {
+      if (r.replayed.length > 0 || r.skipped.length > 0 || r.crashed.length > 0) {
         ctx.binding.checkpointer?.noteChange();
-        this.#emit({ type: "replayed", resourceId: ctx.binding.resourceId, ...r });
+        this.#emit({ type: "replayed", resourceId: R, ...r });
       }
+      for (const unitId of r.crashed)
+        this.#error(
+          "INVALID_AUTOMERGE_BYTES",
+          `Data Unit ${toHex(unitId)} crashed the profile engine twice; it is quarantined on this device`,
+          R,
+        );
     }
     await this.#flush(ctx); // §88 step 6: upload locally queued valid units
     if (await this.#snapshotUseful(ctx)) {
@@ -999,6 +1039,9 @@ export class SyncClient {
     const offered = ctx.offered;
     if (offered === null || ctx.binding.snapshot === undefined) return false;
     if ((await this.#o.storage.snapshots.get(offered.snapshotId)) !== undefined) return false;
+    const R = ctx.binding.resourceId;
+    await this.#snapshots.recover(R);
+    if (this.#snapshots.suspicion(R, snapshotItem(offered.snapshotId)) === 2) return false;
     const local = (await resourceSyncState(this.#o.storage, ctx.binding.resourceId)).have;
     return missingFrom(local, normalizeLiveHaves(offered.frontier)).length > 0;
   }
@@ -1008,12 +1051,32 @@ export class SyncClient {
     const view = ctx.view;
     const binding = ctx.binding.snapshot;
     if (view !== null && binding !== undefined) {
-      const r = await receiveSnapshot(view, bytes, {
-        dek: dekResolver(this.#o.storage, this.#o.secrets, R),
-        profile: binding.codec,
+      // Decode and load under the crash-loop breaker; a trap in decode is
+      // rethrown, not reported as the Snapshot's local failure.
+      let trap: unknown;
+      const codec = binding.codec;
+      const guarded = {
+        dataProfile: codec.dataProfile,
+        encode: (v: unknown) => codec.encode(v as never),
+        decode: (plaintext: Uint8Array) => {
+          try {
+            return codec.decode(plaintext);
+          } catch (e) {
+            if (isEngineTrap(e)) trap = e;
+            throw e;
+          }
+        },
+      };
+      const r = await this.#snapshots.run(R, [snapshotItem(sha256(bytes))], async () => {
+        const received = await receiveSnapshot(view, bytes, {
+          dek: dekResolver(this.#o.storage, this.#o.secrets, R),
+          profile: guarded,
+        });
+        if (trap !== undefined) throw trap;
+        if (received.kind === "accepted") binding.load(received.value);
+        return received;
       });
       if (r.kind === "accepted") {
-        binding.load(r.value);
         const frontier = encode(canonicalFrontierToCbor(r.frontier));
         await this.#o.storage.commit([
           {

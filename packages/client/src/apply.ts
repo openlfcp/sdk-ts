@@ -4,12 +4,20 @@ import {
   bytesEqual,
   type DataEpoch,
   type DataUnitId,
+  dataUnitId,
+  fromHex,
   type PrincipalId,
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
 import { decryptDataUnit, deriveActorDataKey, type ResourceDEK } from "@openlfcp/crypto";
-import type { DataUnitRow, DataUnitStatus, LfcpStorage, StorageWrite } from "@openlfcp/storage";
+import type {
+  DataUnitRow,
+  DataUnitStatus,
+  LfcpStorage,
+  StorageWrite,
+  StoredDataUnit,
+} from "@openlfcp/storage";
 import {
   beyondCutoff,
   type ControlView,
@@ -26,6 +34,7 @@ import {
   receiveDataUnit,
 } from "@openlfcp/wire";
 import { decodeDeterministic } from "@openlfcp/wire/cbor";
+import { EngineGuard, isEngineTrap, unitItem } from "./engine-guard.js";
 import { dataUnitRow, StoredSeenUnits } from "./storage.js";
 
 /**
@@ -52,6 +61,14 @@ import { dataUnitRow, StoredSeenUnits } from "./storage.js";
  *   other units' content arrives (Automerge dependencies); the handler
  *   buffers it and merges it when they do;
  * - quarantined (STALE_DATA_EPOCH): never merged automatically.
+ *
+ * Crash-loop breaker (EngineGuard): every engine call on received units
+ * (decode and apply, also when replaying) runs with a durable record of
+ * the units it covers. After a crash those units are suspects, received
+ * and replayed alone; a unit that crashes the engine again by itself is
+ * quarantined locally (status local-failure, INVALID_AUTOMERGE_BYTES) and
+ * never given to the engine again. Exclusion and rebuild (G-EP7) work on
+ * units already merged once and are not guarded.
  */
 
 /** An LFCP-accepted unit as the profile sees it. */
@@ -218,6 +235,17 @@ export type ApplyOutcome =
       /** Held units of the same actor that were retried after this one, with their outcomes. */
       readonly released: readonly ApplyOutcome[];
     }
+  /**
+   * The unit crashed the profile engine twice by itself (EngineGuard): it
+   * is quarantined on this device and never applied again. Local only: no
+   * wire code; the unit may be valid elsewhere.
+   */
+  | {
+      readonly kind: "engine-crash";
+      readonly code: "INVALID_AUTOMERGE_BYTES";
+      readonly unitId: DataUnitId;
+      readonly message: string;
+    }
   | EquivocationOutcome
   | Exclude<ReceivedDataUnit<unknown>, { readonly kind: "accepted" | "equivocation" }>;
 
@@ -253,7 +281,7 @@ export interface DataUnitApplierOptions extends DataUnitCheckOptions {
    * marks live (the wire SeenUnits runs on it). InMemoryLfcpStorage for
    * tests and development only.
    */
-  readonly storage: Pick<LfcpStorage, "dataUnits" | "snapshots" | "commit">;
+  readonly storage: Pick<LfcpStorage, "dataUnits" | "snapshots" | "commit" | "localMarks">;
   /** The DEK of a Data Epoch, if this client holds it (e.g. dekResolver). */
   readonly dek: (epoch: DataEpoch) => ResourceDEK | undefined | Promise<ResourceDEK | undefined>;
   /** The profiles this client implements. */
@@ -273,6 +301,9 @@ const unreachableCodec = (dataProfile: string): DataProfileCodec<never> => ({
 
 const LFCP_ACCEPTED: readonly DataUnitStatus[] = ["merged", "profile-pending"];
 
+const CRASHED =
+  "this unit crashed the profile engine twice, applied alone; it is not applied again on this device (local only)";
+
 type Accepted = Extract<ReceivedDataUnit<unknown>, { kind: "accepted" }>;
 
 const profileUnit = (view: ControlView, r: Accepted): ProfileUnit => ({
@@ -286,14 +317,54 @@ const profileUnit = (view: ControlView, r: Accepted): ProfileUnit => ({
 export class DataUnitApplier {
   readonly #options: DataUnitApplierOptions;
   readonly #handlers: ReadonlyMap<string, DataProfileHandler<unknown>>;
-  readonly #storage: Pick<LfcpStorage, "dataUnits" | "snapshots" | "commit">;
+  readonly #storage: Pick<LfcpStorage, "dataUnits" | "snapshots" | "commit" | "localMarks">;
   readonly #seen: StoredSeenUnits;
+  readonly #guard: EngineGuard;
+  /** Units quarantined by the crash-loop breaker at this start, not yet reported. */
+  #crashed: DataUnitId[] = [];
 
   constructor(options: DataUnitApplierOptions) {
     this.#options = options;
     this.#handlers = new Map(options.handlers.map((h) => [h.dataProfile, h]));
     this.#storage = options.storage;
     this.#seen = new StoredSeenUnits(options.storage);
+    this.#guard = new EngineGuard(options.storage, "units");
+  }
+
+  /** Once per Resource: a leftover apply record becomes suspects; second-time crashers are quarantined. */
+  async #recover(resource: ResourceId): Promise<void> {
+    const crashed = await this.#guard.recover(resource);
+    const writes: StorageWrite[] = [];
+    for (const item of crashed) {
+      const unitId = dataUnitId(fromHex(item.slice("unit:".length)));
+      if ((await this.#storage.dataUnits.get(unitId)) === undefined) continue;
+      writes.push({
+        op: "set-data-unit-status",
+        unitId,
+        status: "local-failure",
+        detail: `INVALID_AUTOMERGE_BYTES: ${CRASHED}`,
+      });
+      this.#crashed.push(unitId);
+    }
+    await this.#write(writes);
+  }
+
+  /** The unit's ID from its bytes, or undefined when they do not parse (reported by the LFCP checks). */
+  #idOf(bytes: Uint8Array): DataUnitId | undefined {
+    try {
+      return parseDataUnit(bytes).signed.id as unknown as DataUnitId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  #crashOutcome(unitId: DataUnitId): ApplyOutcome {
+    return Object.freeze({
+      kind: "engine-crash",
+      code: "INVALID_AUTOMERGE_BYTES",
+      unitId,
+      message: CRASHED,
+    });
   }
 
   async #write(writes: readonly StorageWrite[]): Promise<void> {
@@ -307,11 +378,18 @@ export class DataUnitApplier {
    * a Data Unit: received content is applied, not re-sent as local work.
    */
   async receive(view: ControlView, bytes: Uint8Array): Promise<ApplyOutcome> {
-    const v = await this.#verify(view, bytes);
-    if ("outcome" in v) return v.outcome;
-    return v.r.kind === "accepted"
-      ? this.#apply(view, v.handler, v.r)
-      : this.#settle(view, v.handler, v.r);
+    const R = view.state.resourceId;
+    await this.#recover(R);
+    const id = this.#idOf(bytes);
+    if (id !== undefined && this.#guard.suspicion(R, unitItem(id)) === 2)
+      return this.#crashOutcome(id);
+    return this.#guard.run(R, id === undefined ? [] : [unitItem(id)], async () => {
+      const v = await this.#verify(view, bytes);
+      if ("outcome" in v) return v.outcome;
+      return v.r.kind === "accepted"
+        ? this.#apply(view, v.handler, v.r)
+        : this.#settle(view, v.handler, v.r);
+    });
   }
 
   /**
@@ -332,6 +410,39 @@ export class DataUnitApplier {
       for (const bytes of units) outcomes.push(await this.receive(view, bytes));
       return outcomes;
     }
+    // Units that crashed the engine before go alone (receive), after the batch.
+    const R = view.state.resourceId;
+    await this.#recover(R);
+    const batch: { index: number; bytes: Uint8Array }[] = [];
+    const alone: { index: number; bytes: Uint8Array }[] = [];
+    for (const [index, bytes] of units.entries()) {
+      const id = this.#idOf(bytes);
+      if (id !== undefined && this.#guard.suspicion(R, unitItem(id)) > 0)
+        alone.push({ index, bytes });
+      else batch.push({ index, bytes });
+    }
+    const items = batch.flatMap(({ bytes }) => {
+      const id = this.#idOf(bytes);
+      return id === undefined ? [] : [unitItem(id)];
+    });
+    const done = await this.#guard.run(R, items, () =>
+      this.#receiveBatch(
+        view,
+        handler,
+        batch.map((b) => b.bytes),
+      ),
+    );
+    for (const [k, { index }] of batch.entries()) outcomes[index] = done[k] as ApplyOutcome;
+    for (const { index, bytes } of alone) outcomes[index] = await this.receive(view, bytes);
+    return outcomes;
+  }
+
+  async #receiveBatch(
+    view: ControlView,
+    handler: DataProfileHandler<unknown>,
+    units: readonly Uint8Array[],
+  ): Promise<ApplyOutcome[]> {
+    const outcomes: ApplyOutcome[] = [];
     let staged: { index: number; r: Accepted }[] = [];
     const flush = async () => {
       const batch = staged;
@@ -381,6 +492,8 @@ export class DataUnitApplier {
       seen: this.#seen,
       profile: codec,
     });
+    // A decode that trapped the engine is not this unit's local failure.
+    if (r.kind === "local-failure" && isEngineTrap(r.error)) throw r.error;
     return { handler, r };
   }
 
@@ -423,6 +536,7 @@ export class DataUnitApplier {
     try {
       result = handler.apply(profileUnit(view, r), r.value);
     } catch (e) {
+      if (isEngineTrap(e)) throw e; // the engine is gone: not the unit's refusal
       const code = (e as { code?: unknown }).code;
       return this.#rejected(
         r,
@@ -446,7 +560,8 @@ export class DataUnitApplier {
       batch = handler.applyBatch(
         staged.map(({ r }) => ({ unit: profileUnit(view, r), value: r.value })),
       );
-    } catch {
+    } catch (e) {
+      if (isEngineTrap(e)) throw e;
       // The handler failed as a whole: apply one by one, which isolates the failing unit.
       const out: [number, ApplyOutcome][] = [];
       for (const { index, r } of staged) out.push([index, await this.#apply(view, handler, r)]);
@@ -657,12 +772,23 @@ export class DataUnitApplier {
   async replayStored(view: ControlView): Promise<{
     readonly replayed: readonly DataUnitId[];
     readonly skipped: readonly { readonly unitId: DataUnitId; readonly reason: string }[];
+    /** Units quarantined at this start: they crashed the engine twice by themselves. */
+    readonly crashed: readonly DataUnitId[];
   }> {
     const handler = this.#handlers.get(view.state.dataProfile);
     const replayed: DataUnitId[] = [];
     const skipped: { unitId: DataUnitId; reason: string }[] = [];
-    if (handler?.has === undefined) return { replayed, skipped };
+    if (handler?.has === undefined) {
+      await this.#recover(view.state.resourceId);
+      const crashed = this.#crashed;
+      this.#crashed = [];
+      return { replayed, skipped, crashed };
+    }
     const resource = view.state.resourceId;
+    // A crash during an earlier apply: suspects, or units quarantined now.
+    await this.#recover(resource);
+    const crashed = this.#crashed;
+    this.#crashed = [];
     // Also units accepted by LFCP whose merge was never recorded (a crash
     // between the accepted mark and the status write leaves them "seen" or "held").
     const stored = [
@@ -675,8 +801,52 @@ export class DataUnitApplier {
       .sort((a, b) => (a.actorSeq < b.actorSeq ? -1 : a.actorSeq > b.actorSeq ? 1 : 0));
     const merged: DataUnitId[] = [];
     const pendingNow: DataUnitId[] = [];
+    // Suspects of an earlier crash replay alone, each under its own record.
+    const suspect = (u: { unitId: DataUnitId }) =>
+      this.#guard.suspicion(resource, unitItem(u.unitId)) > 0;
+    const groups = [...stored.filter(suspect).map((u) => [u]), stored.filter((u) => !suspect(u))];
+    for (const group of groups)
+      if (group.length > 0)
+        await this.#guard.run(
+          resource,
+          group.map((u) => unitItem(u.unitId)),
+          () => this.#replayGroup(handler, group, { merged, pendingNow, replayed, skipped }),
+        );
+    await this.#write([
+      ...pendingNow
+        .filter((id) => !merged.some((m) => bytesEqual(m, id)))
+        .map(
+          (unitId): StorageWrite => ({
+            op: "set-data-unit-status",
+            unitId,
+            status: "profile-pending",
+            detail: "replayed; waiting for content it builds on",
+          }),
+        ),
+      ...merged.map(
+        (unitId): StorageWrite => ({ op: "set-data-unit-status", unitId, status: "merged" }),
+      ),
+    ]);
+    return {
+      replayed: Object.freeze(replayed),
+      skipped: Object.freeze(skipped),
+      crashed: Object.freeze(crashed),
+    };
+  }
+  /** Decrypts, decodes and applies replayed units (replayStored), adding to `acc`. */
+  async #replayGroup(
+    handler: DataProfileHandler<unknown>,
+    group: readonly StoredDataUnit[],
+    acc: {
+      readonly merged: DataUnitId[];
+      readonly pendingNow: DataUnitId[];
+      readonly replayed: DataUnitId[];
+      readonly skipped: { unitId: DataUnitId; reason: string }[];
+    },
+  ): Promise<void> {
+    const { merged, pendingNow, replayed, skipped } = acc;
     const decoded: { readonly unit: ProfileUnit; readonly value: unknown }[] = [];
-    for (const u of stored) {
+    for (const u of group) {
       const dek = await this.#options.dek(u.dataEpoch);
       if (dek === undefined) {
         skipped.push({ unitId: u.unitId, reason: `no DEK for epoch ${u.dataEpoch}` });
@@ -700,6 +870,7 @@ export class DataUnitApplier {
           value,
         });
       } catch (e) {
+        if (isEngineTrap(e)) throw e;
         skipped.push({ unitId: u.unitId, reason: e instanceof Error ? e.message : String(e) });
       }
     }
@@ -725,25 +896,10 @@ export class DataUnitApplier {
           if (!r.merged.some((id) => bytesEqual(id, unit.unitId))) pendingNow.push(unit.unitId);
           replayed.push(unit.unitId);
         } catch (e) {
+          if (isEngineTrap(e)) throw e;
           skipped.push({ unitId: unit.unitId, reason: e instanceof Error ? e.message : String(e) });
         }
       }
-    await this.#write([
-      ...pendingNow
-        .filter((id) => !merged.some((m) => bytesEqual(m, id)))
-        .map(
-          (unitId): StorageWrite => ({
-            op: "set-data-unit-status",
-            unitId,
-            status: "profile-pending",
-            detail: "replayed; waiting for content it builds on",
-          }),
-        ),
-      ...merged.map(
-        (unitId): StorageWrite => ({ op: "set-data-unit-status", unitId, status: "merged" }),
-      ),
-    ]);
-    return { replayed: Object.freeze(replayed), skipped: Object.freeze(skipped) };
   }
 
   /**
