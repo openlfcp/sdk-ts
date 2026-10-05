@@ -1,0 +1,30 @@
+{
+  "name": "@openlfcp/client",
+  "version": "0.0.0",
+  "description": "LFCP client: session, Control Plane and Data Plane synchronization.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openlfcp/sdk-ts.git",
+    "directory": "packages/client"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@openlfcp/core": "workspace:^",
+    "@openlfcp/wire": "workspace:^",
+    "@openlfcp/storage": "workspace:^"
+  }
+}

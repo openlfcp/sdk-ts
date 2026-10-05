@@ -1,0 +1,28 @@
+{
+  "name": "@openlfcp/shared-objects",
+  "version": "0.0.0",
+  "description": "SHARED-OBJECTS-PROFILE-01 (org.openlfcp.shared-objects.v1) implementation.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openlfcp/sdk-ts.git",
+    "directory": "packages/shared-objects"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@openlfcp/core": "workspace:^"
+  }
+}

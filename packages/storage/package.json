@@ -1,0 +1,28 @@
+{
+  "name": "@openlfcp/storage",
+  "version": "0.0.0",
+  "description": "Storage interfaces for LFCP clients (no adapters).",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openlfcp/sdk-ts.git",
+    "directory": "packages/storage"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@openlfcp/core": "workspace:^"
+  }
+}

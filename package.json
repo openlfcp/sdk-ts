@@ -2,7 +2,7 @@
   "name": "openlfcp-sdk-ts",
   "version": "0.0.0",
   "private": true,
-  "description": "Reusable TypeScript LFCP implementation.",
+  "description": "Reusable TypeScript LFCP implementation (workspace root, not published).",
   "license": "Apache-2.0",
   "type": "module",
   "packageManager": "pnpm@10.33.4",
@@ -10,7 +10,15 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "echo \"sdk-ts: nothing to build yet (workspace layout is LFCP-011)\"",
-    "test": "node --test"
+    "build": "tsc -b",
+    "typecheck": "tsc -b && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "lint": "biome check .",
+    "format": "biome check --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3"
   }
 }
