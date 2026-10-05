@@ -220,7 +220,17 @@ describe(`CDDL fixture manifest at ${spec.lock.tag}`, () => {
           throw new Error(`rule ${f.rule} has no decoder and is not in cddl-pending.json`);
         });
     } else if (f.expect === "pass" && f.source.from === "inputs") {
-      it.todo(`${label(f)}: validation input, outcome asserted by the vector run`);
+      // CDDL-valid by design, but the input of a validation case: the
+      // decoder may refuse it for a reason the CDDL does not express (its
+      // signature, its sequence, its semantics). Its real outcome is the
+      // vector run's (vectors.test.ts). Here: the case is a validation case
+      // the vector run covers, and the item is deterministic CBOR, which
+      // CDDL validity implies.
+      it(`${label(f)}: validation input, its outcome in the vector run`, () => {
+        const c = suite.cases.find((x) => x.id === f.source.case);
+        expect(c?.type, `${f.source.case} is a validation case`).toBe("validation");
+        expect(() => decodeDeterministic(item(f))).not.toThrow();
+      });
     } else {
       it(label(f), () => {
         let error: unknown = null;
