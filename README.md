@@ -9,7 +9,8 @@ stay portable to browsers and editors; Node-only code goes into separate
 ## Status
 
 Workspace scaffold (LFCP-011). `@openlfcp/core` has its identifier
-primitives (LFCP-012); the other packages still export only a `PACKAGE`
+primitives (LFCP-012) and `@openlfcp/wire` its deterministic CBOR codec
+(LFCP-013); the other packages still export only a `PACKAGE`
 placeholder. Protocol code arrives with the backlog tasks that own each
 package.
 
@@ -18,7 +19,7 @@ package.
 | Package | Purpose | Depends on | Exports |
 | --- | --- | --- | --- |
 | `@openlfcp/core` | Identifiers, shared types, errors, byte helpers | none | 32-byte ids (`ResourceId`, `PrincipalId`, `Hash32`, `ControlRecordId`, `DataUnitId`), `ObjectId` (UUIDv7), hex/base64url, `LfcpError` |
-| `@openlfcp/wire` | Deterministic CBOR, COSE, LFCP Wire structures and codecs | core | `PACKAGE` |
+| `@openlfcp/wire` | Deterministic CBOR, COSE, LFCP Wire structures and codecs | core | `PACKAGE`; low-level deterministic CBOR (`encode`, `decodeStrict`, `isDeterministic`, `cborMap`) under the `@openlfcp/wire/cbor` subpath |
 | `@openlfcp/storage` | Storage interfaces only (adapters such as a future `@openlfcp/storage-node` live elsewhere) | core | `PACKAGE` |
 | `@openlfcp/shared-objects` | SHARED-OBJECTS-PROFILE-01 (`org.openlfcp.shared-objects.v1`) | core | `PACKAGE` |
 | `@openlfcp/client` | Session, Control Plane and Data Plane synchronization | core, wire, storage | `PACKAGE` |
