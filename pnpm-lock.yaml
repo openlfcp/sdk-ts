@@ -26,6 +26,9 @@ importers:
       '@openlfcp/storage':
         specifier: workspace:*
         version: link:packages/storage
+      '@openlfcp/storage-node':
+        specifier: workspace:*
+        version: link:packages/storage-node
       '@openlfcp/wire':
         specifier: workspace:*
         version: link:packages/wire
