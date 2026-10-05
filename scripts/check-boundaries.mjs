@@ -10,6 +10,9 @@
 //   hpke             an hpke or @panva/hpke-noble dependency or import outside
 //                    @openlfcp/crypto (LFCP-024; @noble/ciphers and
 //                    @noble/post-quantum are covered by the noble rule)
+//   automerge        an @automerge/* dependency or import outside
+//                    @openlfcp/shared-objects (LFCP-031: only the Shared
+//                    Objects Profile binds to the CRDT engine)
 //
 // The portable packages must run in browsers and editors; Node-only code
 // belongs in future *-node packages, which still have to be listed in ALLOWED.
@@ -37,6 +40,8 @@ export const ALLOWED = {
 };
 // The only package allowed to use the @noble cryptography libraries and HPKE.
 const NOBLE_OWNER = "crypto";
+// The only package allowed to use Automerge.
+const AUTOMERGE_OWNER = "shared-objects";
 const PORTABLE = new Set(["core", "crypto", "wire", "storage", "shared-objects", "client"]);
 const NODE_GLOBALS = new Set([
   "process",
@@ -54,6 +59,7 @@ const SOURCE = /\.(ts|tsx|mts|cts|js|mjs|cjs)$/;
 
 const isObsidian = (spec) => /(^|[@/])obsidian($|[-/])/i.test(spec);
 const isNoble = (spec) => spec.startsWith("@noble/");
+const isAutomerge = (spec) => spec.startsWith("@automerge/");
 const isHpke = (spec) => /^(hpke|@panva\/hpke-noble)($|\/)/.test(spec);
 const scopeName = (spec) => /^@openlfcp\/([^/]+)/.exec(spec)?.[1];
 const isNodeBuiltin = (spec) => spec.startsWith("node:") || NODE_BUILTINS.has(spec.split("/")[0]);
@@ -164,6 +170,11 @@ export function check(root) {
       if (isHpke(dep) && name !== NOBLE_OWNER) {
         problems.push(`${rel(pkgPath)}:1 hpke: only @openlfcp/${NOBLE_OWNER} may depend on ${dep}`);
       }
+      if (isAutomerge(dep) && name !== AUTOMERGE_OWNER) {
+        problems.push(
+          `${rel(pkgPath)}:1 automerge: only @openlfcp/${AUTOMERGE_OWNER} may depend on ${dep}`,
+        );
+      }
       const target = scopeName(dep);
       if (known && target && !allowed.has(target))
         problems.push(`${rel(pkgPath)}:1 graph: @openlfcp/${name} may not depend on ${dep}`);
@@ -179,6 +190,9 @@ export function check(root) {
         }
         if (isHpke(spec) && name !== NOBLE_OWNER) {
           problems.push(`${where} hpke: only @openlfcp/${NOBLE_OWNER} may import ${spec}`);
+        }
+        if (isAutomerge(spec) && name !== AUTOMERGE_OWNER) {
+          problems.push(`${where} automerge: only @openlfcp/${AUTOMERGE_OWNER} may import ${spec}`);
         }
         const target = scopeName(spec);
         if (known && target && !allowed.has(target))

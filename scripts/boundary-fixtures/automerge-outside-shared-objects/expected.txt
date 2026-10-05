@@ -1,0 +1,3 @@
+packages/wire/package.json:1 automerge: only @openlfcp/shared-objects may depend on @automerge/automerge
+packages/wire/src/index.ts:1 automerge: only @openlfcp/shared-objects may import @automerge/automerge
+packages/wire/src/index.ts:2 automerge: only @openlfcp/shared-objects may import @automerge/automerge/slim

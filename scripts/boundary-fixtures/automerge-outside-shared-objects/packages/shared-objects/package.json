@@ -1,0 +1,7 @@
+{
+  "name": "@openlfcp/shared-objects",
+  "version": "0.0.0",
+  "dependencies": {
+    "@automerge/automerge": "3.5.0"
+  }
+}
