@@ -9,6 +9,10 @@ export interface RunningRustServer {
   files(): { readonly path: string; readonly bytes: Uint8Array }[];
   /** Everything the server logged so far (debug level: message types and codes, never payloads). */
   log(): string;
+  /** SIGKILLs the server process (no clean shutdown); its state directory stays. */
+  kill(): Promise<void>;
+  /** SIGKILLs the server if it runs, then starts it again on the same port, config and state. */
+  restart(): Promise<void>;
   /** Stops the server and deletes its state directory. */
   stop(): Promise<void>;
 }

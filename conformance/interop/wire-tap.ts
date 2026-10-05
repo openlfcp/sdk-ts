@@ -30,7 +30,9 @@ export type Action =
   /** Deliver it, then close the connection (e.g. a request sent, its reply never seen). */
   | { readonly kind: "deliver-then-cut" }
   /** Cut the connection instead of delivering. */
-  | { readonly kind: "cut" };
+  | { readonly kind: "cut" }
+  /** Deliver once `until` settles (an explicit barrier, not a timer). */
+  | { readonly kind: "hold"; readonly until: Promise<unknown> };
 
 export type Rule = (frame: Frame) => Action | undefined;
 
@@ -104,6 +106,9 @@ export class WireTap {
           return;
         case "cut":
           ws.close(4000, "cut by the test");
+          return;
+        case "hold":
+          void action.until.then(deliver);
           return;
       }
     };

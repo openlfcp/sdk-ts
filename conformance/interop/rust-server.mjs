@@ -110,17 +110,24 @@ export async function startRustServer() {
     ].join("\n"),
   );
   let log = "";
-  const child = spawn(built.bin, ["--config", join(dir, "server.toml")], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  child.stdout.on("data", (d) => {
-    log += d.toString();
-  });
-  child.stderr.on("data", (d) => {
-    log += d.toString();
-  });
-  const healthy = await waitHealthy(`http://127.0.0.1:${port}`, child, Date.now() + 20_000);
-  if (!healthy) {
+  let child;
+  const spawnServer = async () => {
+    child = spawn(built.bin, ["--config", join(dir, "server.toml")], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.on("data", (d) => {
+      log += d.toString();
+    });
+    child.stderr.on("data", (d) => {
+      log += d.toString();
+    });
+    return waitHealthy(`http://127.0.0.1:${port}`, child, Date.now() + 20_000);
+  };
+  const exited = (c) =>
+    c.exitCode !== null || c.signalCode !== null
+      ? Promise.resolve()
+      : new Promise((r) => c.once("exit", () => r(undefined)));
+  if (!(await spawnServer())) {
     child.kill("SIGKILL");
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`the Rust server did not become healthy:\n${log.slice(-2000)}`);
@@ -130,8 +137,20 @@ export async function startRustServer() {
     stateDir: join(dir, "state"),
     files: () => readTree(join(dir, "state")),
     log: () => log,
+    kill: async () => {
+      const c = child;
+      if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
+      await exited(c);
+    },
+    restart: async () => {
+      const c = child;
+      if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
+      await exited(c);
+      if (!(await spawnServer()))
+        throw new Error(`the Rust server did not restart:\n${log.slice(-2000)}`);
+    },
     stop: async () => {
-      if (child.exitCode === null) {
+      if (child.exitCode === null && child.signalCode === null) {
         child.kill("SIGTERM");
         await new Promise((r) => {
           const t = setTimeout(() => {
