@@ -103,6 +103,22 @@ export type LfcpErrorCode =
   /** A profile plaintext that is not the §11/§13 framing [1, bstr]. Profile-level, client-local. */
   | "PROFILE_FRAMING"
   /**
+   * A Resource whose Data Profile this client does not implement (§27):
+   * its plaintext is never applied. PROFILE_UNSUPPORTED on the wire (§62).
+   */
+  | "PROFILE_UNSUPPORTED"
+  /**
+   * Two concurrent Shared Objects under one Object ID (SHARED-OBJECTS-
+   * PROFILE-01 §21). A profile error of its own, not PROFILE_INVALID.
+   */
+  | "OBJECT_ID_COLLISION"
+  /**
+   * A received second, different change or unit for one (resource, actor,
+   * sequence) (§26.2). ACTOR_EQUIVOCATION on the wire (§62). A local attempt
+   * to reuse a sequence is SEQUENCE_REUSE instead.
+   */
+  | "ACTOR_EQUIVOCATION"
+  /**
    * The keys given to open a Key Package are not those of the Principal it
    * names (§25: recipient binding). Client-local, no wire code (ADR 0001 N5).
    */
