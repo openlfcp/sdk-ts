@@ -15,6 +15,7 @@ import {
   classifyDataUnit,
   type DataProfileCodec,
   type DataUnitCheckOptions,
+  type DataUnitEquivocation,
   type DataUnitQuarantined,
   type ReceivedDataUnit,
   receiveDataUnit,
@@ -124,6 +125,22 @@ interface Applied {
   readonly released: readonly ApplyOutcome[];
 }
 
+/**
+ * Two or more signature-valid units for one (resource, actor, seq).
+ * PROVISIONAL (G-DP5): no unit of the set stays merged, since keeping the
+ * first one would choose by arrival order (§26.2 forbids choosing). Every
+ * unit is marked "equivocation" and un-accepted; merged ones were taken out
+ * of the profile state.
+ */
+export type EquivocationOutcome = DataUnitEquivocation & {
+  /** Units of the set that were merged and are now excluded from the profile state. */
+  readonly excluded: readonly DataUnitId[];
+  /** Objects whose state changed through the exclusion. */
+  readonly objects: readonly string[];
+  /** Merged units that now wait in the profile for an excluded unit's content. */
+  readonly pending: readonly DataUnitId[];
+};
+
 /** The outcome of one received Data Unit. */
 export type ApplyOutcome =
   /** Accepted by LFCP and merged into the profile state. */
@@ -149,7 +166,8 @@ export type ApplyOutcome =
       readonly unitId: DataUnitId;
       readonly dataProfile: string;
     }
-  | Exclude<ReceivedDataUnit<unknown>, { readonly kind: "accepted" }>;
+  | EquivocationOutcome
+  | Exclude<ReceivedDataUnit<unknown>, { readonly kind: "accepted" | "equivocation" }>;
 
 /** A merged unit that a newly known Key Epoch puts beyond its cutoff (G-EP7). */
 export interface ExcludedUnit {
@@ -189,6 +207,8 @@ const unreachableCodec = (dataProfile: string): DataProfileCodec<never> => ({
     throw new Error("no codec for a malformed unit");
   },
 });
+
+const LFCP_ACCEPTED: readonly DataUnitStatus[] = ["merged", "profile-pending"];
 
 export class DataUnitApplier {
   readonly #options: DataUnitApplierOptions;
@@ -254,10 +274,7 @@ export class DataUnitApplier {
         await this.#write([status(r.unitId, "local-failure", `${r.reason}: ${r.message}`)]);
         return r;
       case "equivocation":
-        // Never merged and no winner chosen: this unit is kept as evidence,
-        // and every ID (and the one merged earlier, if any) is surfaced.
-        if (row !== undefined) await this.#write([status(row.unitId, "equivocation")]);
-        return r;
+        return this.#equivocation(handler, r);
       default:
         return r; // duplicate (harmless replay) or rejected (never stored)
     }
@@ -350,6 +367,44 @@ export class DataUnitApplier {
     );
   }
 
+  // PROVISIONAL (G-DP5): exclude every merged unit of an equivocating set.
+  async #equivocation(
+    handler: DataProfileHandler<unknown>,
+    r: DataUnitEquivocation,
+  ): Promise<EquivocationOutcome> {
+    const stored = (
+      await Promise.all(r.unitIds.map((id) => this.#storage.dataUnits.get(id)))
+    ).filter((u) => u !== undefined);
+    const merged = stored.filter((u) => LFCP_ACCEPTED.includes(u.status)).map((u) => u.unitId);
+    const result: ProfileExcludeResult =
+      merged.length > 0 ? handler.exclude(merged) : { objects: [], pending: [] };
+    await this.#write([
+      ...stored.flatMap((u): StorageWrite[] => [
+        {
+          op: "set-data-unit-status",
+          unitId: u.unitId,
+          status: "equivocation",
+          detail: "ACTOR_EQUIVOCATION (G-DP5)",
+        },
+        { op: "set-accepted", unitId: u.unitId, accepted: false },
+      ]),
+      ...result.pending.map(
+        (unitId): StorageWrite => ({
+          op: "set-data-unit-status",
+          unitId,
+          status: "profile-pending",
+          detail: "builds on an equivocating unit",
+        }),
+      ),
+    ]);
+    return Object.freeze({
+      ...r,
+      excluded: Object.freeze(merged),
+      objects: result.objects,
+      pending: result.pending,
+    });
+  }
+
   async #unsupported(
     view: ControlView,
     bytes: Uint8Array,
@@ -357,6 +412,8 @@ export class DataUnitApplier {
   ): Promise<ApplyOutcome> {
     // DEK-free checks only: the plaintext of an unknown profile is never decrypted.
     const c = await checkDataUnit(view, bytes, this.#seen, this.#options);
+    if (c.kind === "equivocation")
+      return Object.freeze({ ...c, excluded: [], objects: [], pending: [] });
     if (c.kind !== "valid") return c;
     await this.#write([
       { op: "set-data-unit-status", unitId: c.unitId, status: "profile-unsupported" },

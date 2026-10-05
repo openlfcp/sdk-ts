@@ -290,7 +290,7 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
     expect(profile.replica.actorSeq).toBe(0);
   });
 
-  it("4. a second unit for one (resource, actor, seq) is equivocation: surfaced, not merged, no winner", async () => {
+  it("4, G-DP5. a second unit for one (resource, actor, seq) is equivocation: neither stays merged", async () => {
     const { chain, initUnit, createUnit, alice } = await resource();
     const { applier, profile, counts, storage } = receiver(chain);
     const view = chain.view();
@@ -316,8 +316,20 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
       expect(toHex(r.accepted as DataUnitId)).toBe(toHex(createUnit.unitId));
     }
     expect(counts.apply).toBe(applies);
-    expect(profile.replica.objectIds()).toEqual([TASK_A]);
-    expect((await storage.dataUnits.get(forged.unitId))?.status).toBe("equivocation");
+    // PROVISIONAL (G-DP5): the merged unit is taken out too, so no arrival order wins.
+    expect(r.kind === "equivocation" && r.excluded.map(toHex)).toEqual([toHex(createUnit.unitId)]);
+    expect(r.kind === "equivocation" && r.objects).toEqual([TASK_A]);
+    expect(profile.replica.objectIds()).toEqual([]);
+    for (const u of [createUnit, forged]) {
+      expect(await storage.dataUnits.get(u.unitId)).toMatchObject({
+        status: "equivocation",
+        accepted: false,
+        bytes: u.bytes,
+      });
+    }
+    // A replay of either stays equivocation, never a duplicate or a merge.
+    expect((await applier.receive(view, createUnit.bytes)).kind).toBe("equivocation");
+    expect(profile.replica.objectIds()).toEqual([]);
   });
 
   it("5, 6, 8. invalid signature, missing data/write and AEAD failure never reach the profile", async () => {

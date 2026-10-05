@@ -7,6 +7,7 @@ export {
   DataUnitApplier,
   type DataUnitApplierOptions,
   type EpochReconciliation,
+  type EquivocationOutcome,
   type ExcludedUnit,
   type ProfileApplyResult,
   type ProfileDiagnostic,
