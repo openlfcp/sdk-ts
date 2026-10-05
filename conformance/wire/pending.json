@@ -285,12 +285,6 @@
       "task": "LFCP-026",
       "reason": "A CONTROL_PUT message: message codec (LFCP-026); the stale-head result itself is LFCP-022."
     },
-    "control_fork_C6": {
-      "reason": "The competing record parses, verifies and has the published ID; fork detection needs the chain.",
-      "parts": {
-        "outcome": "LFCP-020"
-      }
-    },
     "actor_seq1_prev_not_null_D1": {
       "reason": "Structurally valid; §26.2 asks for a report to the sync engine (G4: LFCP-025/LFCP-028).",
       "parts": {

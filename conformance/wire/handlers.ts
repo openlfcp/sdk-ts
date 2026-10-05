@@ -53,6 +53,7 @@ import {
   signControlRecord,
   signObject,
   sigStructureBytes,
+  validateControlChain,
   verifyGenesis,
   verifySignedObject,
 } from "@openlfcp/wire";
@@ -248,8 +249,98 @@ const controlRecord: Handler = (c, context) => {
         ? [bytesCheck("record_id/parsed", hexOf(e, "record_id"), signed.parsed.signed.id)]
         : []),
       ...typedControlChecks(c, context, cose, payload, hexOf(e, "record_id")),
+      chainCheck(c, context, cose),
     ],
   };
+};
+
+// ---------------------------------------------------------------------------
+// LFCP-020: Control Chain validation over the suite's published records.
+
+const PUBLISHED_CHAIN = new WeakMap<VectorSuite, Uint8Array[]>();
+
+/** The exact COSE bytes of every bytes/control_record case of the suite. */
+function publishedChain(context: HandlerContext): Uint8Array[] {
+  let chain = PUBLISHED_CHAIN.get(context.suite);
+  if (chain === undefined) {
+    chain = context.suite.cases
+      .filter((x) => x.type === "bytes" && x.kind === "control_record")
+      .map((x) => hexOf(x.expected, "cose_sign1"));
+    PUBLISHED_CHAIN.set(context.suite, chain);
+  }
+  return chain;
+}
+
+/** The published records form one linear chain; this one is at its seq, and the last is the head. */
+function chainCheck(c: VectorCase, context: HandlerContext, cose: Uint8Array): Check {
+  return check("cose_sign1/chain", () => {
+    const result = validateControlChain(publishedChain(context));
+    if (result.kind !== "linear")
+      return `the published records do not form a linear chain: ${result.kind}`;
+    const id = toHex(objectId(cose));
+    const position = result.records.findIndex((r) => toHex(r.signed.id) === id);
+    if (position < 0) return `${c.id} is not on the validated chain`;
+    if (BigInt(position) !== decodeControlRecord(cose).payload.controlSeq)
+      return `${c.id} is at chain position ${position}, not at its control_seq`;
+    if (position === result.records.length - 1 && toHex(result.state.head) !== id)
+      return "the last record is not the Control Head";
+    return true;
+  });
+}
+
+/** The value a `{case, field}` reference in a vector's context names. */
+function referenced(context: HandlerContext, ref: unknown): Uint8Array {
+  const r = ref as { case?: string; field?: string } | undefined;
+  const target = r?.case === undefined ? undefined : context.caseById(r.case);
+  if (target === undefined || r?.field === undefined)
+    throw new Error(`bad reference ${JSON.stringify(ref)}`);
+  return hexOf(target.expected, r.field);
+}
+
+/**
+ * A received Control Record against the published chain: CONTROL_CONFLICT
+ * for a fork, the chain's wire code when invalid, null when it extends the
+ * chain. The diagnostics are checked against the vector's context.
+ */
+const controlRecordNegative: Handler = (c, context) => {
+  const cose = hexOf(c.inputs, "cose_sign1");
+  const result = validateControlChain([...publishedChain(context), cose]);
+  const checks: Check[] = [];
+  if (has(c.inputs, "record_id"))
+    checks.push(bytesCheck("inputs.record_id", hexOf(c.inputs, "record_id"), objectId(cose)));
+  const ctx = c.context as { previous_record?: unknown; competing_record?: unknown } | undefined;
+  if (result.kind === "conflict" && ctx?.previous_record !== undefined) {
+    checks.push(
+      check(
+        "context.previous_record",
+        () =>
+          bytesEqual(
+            result.commonHead ?? new Uint8Array(0),
+            referenced(context, ctx.previous_record),
+          ) || "the common head is not the context's previous record",
+      ),
+    );
+  }
+  if (result.kind === "conflict" && ctx?.competing_record !== undefined) {
+    checks.push(
+      check("context.competing_record", () => {
+        const ids = result.competing.map(toHex);
+        return (
+          (ids.includes(toHex(referenced(context, ctx.competing_record))) &&
+            ids.includes(toHex(objectId(cose)))) ||
+          "the competing records are not the context's record and the input"
+        );
+      }),
+    );
+  }
+  const actual =
+    result.kind === "conflict"
+      ? result.wireCode
+      : result.kind === "invalid"
+        ? result.wireCode
+        : null;
+  const outcome = negative(c, actual);
+  return { checks: [...checks, ...outcome.checks], pending: outcome.pending };
 };
 
 /**
@@ -691,7 +782,7 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   "bytes/invite_uri": inviteUri,
   "bytes/wire_message": wireMessage,
   "validation/data_unit": signedNegative(parseDataUnit, (p) => expectedSignerOf(p.payload)),
-  "validation/control_record": signedNegative(parseControlRecord, (p) => p.payload.issuer),
+  "validation/control_record": controlRecordNegative,
   "validation/key_package": signedNegative(parseKeyPackage, (p) => expectedSignerOf(p.payload)),
   "validation/snapshot": signedNegative(parseSnapshot, (p) => expectedSignerOf(p.payload)),
   "validation/principal": principalNegative,
