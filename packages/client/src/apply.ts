@@ -166,6 +166,17 @@ export type ApplyOutcome =
       readonly unitId: DataUnitId;
       readonly dataProfile: string;
     }
+  /**
+   * A unit whose content a loaded Snapshot already holds: verified without
+   * a DEK and accepted, never decrypted or merged again (acceptCovered).
+   */
+  | {
+      readonly kind: "covered";
+      readonly unitId: DataUnitId;
+      readonly dataProfile: string;
+      /** Held units of the same actor that were retried after this one, with their outcomes. */
+      readonly released: readonly ApplyOutcome[];
+    }
   | EquivocationOutcome
   | Exclude<ReceivedDataUnit<unknown>, { readonly kind: "accepted" | "equivocation" }>;
 
@@ -402,6 +413,65 @@ export class DataUnitApplier {
       excluded: Object.freeze(merged),
       objects: result.objects,
       pending: result.pending,
+    });
+  }
+
+  /**
+   * A unit inside the frontier of a Snapshot this client loaded (§29, §66
+   * step 3): its content is in the Snapshot, so it is not decrypted or
+   * merged again. It gets the DEK-free LFCP checks (structure, signature,
+   * equivocation, data/write at its head, epoch cutoff) and is then marked
+   * accepted, so the actor's next unit links to it (§26.2). Its own link to
+   * the previous unit is not checked: that unit is attested by the signed,
+   * authorized Snapshot and was never received. A replay is a duplicate.
+   */
+  async acceptCovered(view: ControlView, bytes: Uint8Array): Promise<ApplyOutcome> {
+    const dataProfile = view.state.dataProfile;
+    try {
+      this.#seen.expect(dataUnitRow(bytes));
+    } catch {
+      // checkDataUnit reports it as MALFORMED_MESSAGE
+    }
+    const c = await checkDataUnit(view, bytes, this.#seen, this.#options);
+    if (c.kind === "equivocation") {
+      const handler = this.#handlers.get(dataProfile);
+      return handler === undefined
+        ? Object.freeze({ ...c, excluded: [], objects: [], pending: [] })
+        : this.#equivocation(handler, c);
+    }
+    if (c.kind !== "valid") {
+      if (c.kind === "quarantined")
+        await this.#write([
+          { op: "set-data-unit-status", unitId: c.unitId, status: "quarantined", detail: c.reason },
+        ]);
+      return c;
+    }
+    const p = c.parsed.payload;
+    if ((await this.#storage.dataUnits.acceptedAt(p.resourceId, p.actor, p.actorSeq)) !== undefined)
+      return Object.freeze({ kind: "duplicate", unitId: c.unitId });
+    await this.#write([
+      {
+        op: "set-data-unit-status",
+        unitId: c.unitId,
+        status: "merged",
+        detail: "covered by a Snapshot",
+      },
+      { op: "set-accepted", unitId: c.unitId, accepted: true },
+    ]);
+    // §26.2, G-DP1: a held unit of this actor at seq + 1 may link now.
+    const next = await this.#storage.dataUnits.at(
+      p.resourceId,
+      p.actor,
+      actorSequence(p.actorSeq + 1n),
+    );
+    const released: ApplyOutcome[] = [];
+    for (const held of next.filter((u) => u.status === "held"))
+      released.push(await this.receive(view, held.bytes));
+    return Object.freeze({
+      kind: "covered",
+      unitId: c.unitId,
+      dataProfile,
+      released: Object.freeze(released),
     });
   }
 

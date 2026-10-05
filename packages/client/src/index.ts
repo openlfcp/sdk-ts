@@ -38,6 +38,7 @@ export {
   type RetryReason,
   resourceSyncState,
   type StaleOutboundUnit,
+  snapshotFrontier,
 } from "./outbound.js";
 export {
   createQueuedSnapshot,

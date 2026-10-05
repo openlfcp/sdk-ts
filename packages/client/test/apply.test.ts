@@ -167,4 +167,35 @@ describe("DataUnitApplier (profile-agnostic)", () => {
     });
     expect(deks).toBe(0);
   });
+
+  it("accepts a unit a loaded Snapshot covers without merging it, so the next unit links (§29, §26.2)", async () => {
+    const merged: string[] = [];
+    const storage = new InMemoryLfcpStorage();
+    const applier = new DataUnitApplier({
+      storage,
+      dek: () => DEK0,
+      handlers: [textHandler(merged) as DataProfileHandler<unknown>],
+    });
+    const [, u2, u3, u4] = (await units("one", "two", "three", "four")) as {
+      bytes: Uint8Array;
+      unitId: DataUnitId;
+    }[];
+    // A Snapshot covered 1..2; 4 arrives first and is held, then 2 (covered), then 3.
+    expect(await applier.receive(VIEW, (u4 as { bytes: Uint8Array }).bytes)).toMatchObject({
+      kind: "held",
+    });
+    const covered = await applier.acceptCovered(VIEW, (u2 as { bytes: Uint8Array }).bytes);
+    expect(covered).toMatchObject({ kind: "covered", released: [] });
+    expect(await storage.dataUnits.get((u2 as { unitId: DataUnitId }).unitId)).toMatchObject({
+      status: "merged",
+      accepted: true,
+      detail: "covered by a Snapshot",
+    });
+    const third = await applier.receive(VIEW, (u3 as { bytes: Uint8Array }).bytes);
+    expect(third.kind === "applied" && third.released.map((r) => r.kind)).toEqual(["applied"]);
+    expect(merged).toEqual(["three", "four"]); // "two" was never decrypted or merged
+    expect(await applier.acceptCovered(VIEW, (u2 as { bytes: Uint8Array }).bytes)).toMatchObject({
+      kind: "duplicate",
+    });
+  });
 });

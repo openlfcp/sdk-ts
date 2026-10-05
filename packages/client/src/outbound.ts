@@ -21,6 +21,7 @@ import {
   addSequence,
   type ControlView,
   type CoreMessageType,
+  canonicalFrontierFromCbor,
   classifyDataUnit,
   createMessage,
   DEFAULT_MAX_MESSAGE_BYTES,
@@ -30,8 +31,10 @@ import {
   type LfcpMessage,
   MESSAGE_TYPE,
   parseControlRecord,
+  unionHaves,
   type WireErrorName,
 } from "@openlfcp/wire";
+import { decodeDeterministic } from "@openlfcp/wire/cbor";
 
 /**
  * The pending outbound queue and its sync state (LFCP-036): a
@@ -643,10 +646,11 @@ export interface ResourceSyncState {
 
 /** The sync state of `resource` from storage alone (valid after a restart). */
 export async function resourceSyncState(
-  storage: Pick<LfcpStorage, "outbound" | "dataUnits" | "syncState">,
+  storage: Pick<LfcpStorage, "outbound" | "dataUnits" | "syncState" | "snapshots">,
   resource: ResourceId,
 ): Promise<ResourceSyncState> {
-  let have: HaveVector = [];
+  // Units held through a stored (loaded or published) Snapshot count too (§29).
+  let have: HaveVector = await snapshotFrontier(storage, resource);
   for (const status of ["merged", "profile-pending", "profile-rejected"] as const)
     for (const u of await storage.dataUnits.withStatus(resource, status))
       if (u.accepted) have = addSequence(have, u.actor, u.actorSeq);
@@ -659,4 +663,15 @@ export async function resourceSyncState(
     recentlyAcked: sync?.recentlyAcked ?? [],
     ackedDurability: sync?.ackedDurability ?? null,
   });
+}
+
+/** The union of the frontiers of the Snapshots stored for `resource` (those loaded or published here). */
+export async function snapshotFrontier(
+  storage: Pick<LfcpStorage, "snapshots">,
+  resource: ResourceId,
+): Promise<HaveVector> {
+  let have: HaveVector = [];
+  for (const s of await storage.snapshots.list(resource))
+    have = unionHaves(have, canonicalFrontierFromCbor(decodeDeterministic(s.frontier)));
+  return have;
 }
