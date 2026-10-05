@@ -100,3 +100,4 @@ export {
   principalRef,
   unframeProfilePayload,
 } from "./values.js";
+export { initializeAutomerge, isAutomergeInitialized } from "./wasm.js";
