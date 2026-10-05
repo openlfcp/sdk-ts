@@ -325,6 +325,67 @@ describe("unknown data (§70-§72)", () => {
 });
 
 describe("collaborative Text is not a profile string (G-SC3)", () => {
+  // SO-STRINGS (§30, §74.1), mirroring sdk-rs `text_anywhere_in_an_object_is_profile_invalid`:
+  // Text anywhere in an object, at its own pointer, beating each field's own rule.
+  it("reports Text anywhere in an object at its own pointer, scalar strings nowhere", () => {
+    const { replica } = aliceWithTask();
+    let doc = A.load<Record<string, unknown>>(replica.save(), { actor: "ee".repeat(32) });
+    const raw = (f: (o: Record<string, unknown>) => void) => {
+      doc = A.change(doc, { time: 0 }, (d) => {
+        f((d.objects as Record<string, Record<string, unknown>>)[ID] as Record<string, unknown>);
+      });
+    };
+    raw((o) => {
+      o.extensions = {
+        "org.example.app": {
+          note: "n",
+          ok: new A.ImmutableString("scalar"),
+          list: [new A.ImmutableString("s"), "l"],
+        },
+      };
+    });
+    raw((o) => {
+      o.x_unknown = "u";
+    });
+    raw((o) => {
+      o.status = "todo";
+    });
+    raw((o) => {
+      o.due = "2026-10-05";
+    });
+    const r = SharedObjectsReplica.fromSave(A.save(doc), opts());
+    const problems = r
+      .validate()
+      .problems.map((p) => `${p.code}/${p.diagnostic} ${p.pointer}`)
+      .sort();
+    expect(problems).toEqual(
+      [
+        `/objects/${ID}/due`,
+        `/objects/${ID}/extensions/org.example.app/list/1`,
+        `/objects/${ID}/extensions/org.example.app/note`,
+        `/objects/${ID}/status`,
+        `/objects/${ID}/x_unknown`,
+      ].map((pointer) => `PROFILE_INVALID/INVALID_FIELD_TYPE ${pointer}`),
+    );
+    expect(r.task(ID)?.status).toBe("profile_invalid");
+  });
+
+  it("a Text tags member is INVALID_FIELD_TYPE, not INVALID_COLLECTION_REPRESENTATION", () => {
+    const { replica } = aliceWithTask();
+    let doc = A.load<Record<string, unknown>>(replica.save(), { actor: "ee".repeat(32) });
+    doc = A.change(doc, { time: 0 }, (d) => {
+      const task = (d.objects as Record<string, Record<string, unknown>>)[ID] as Record<
+        string,
+        unknown
+      >;
+      (task.tags as Record<string, unknown>).backend = "yes";
+    });
+    const r = SharedObjectsReplica.fromSave(A.save(doc), opts());
+    expect(r.validate().problems.map((p) => `${p.diagnostic} ${p.pointer}`)).toEqual([
+      `INVALID_FIELD_TYPE /objects/${ID}/tags/backend`,
+    ]);
+  });
+
   it("reports a Text title as INVALID_FIELD_TYPE and refuses other writes until repaired", () => {
     const { replica } = aliceWithTask();
     let doc = A.load<Record<string, unknown>>(replica.save(), { actor: "ee".repeat(32) });

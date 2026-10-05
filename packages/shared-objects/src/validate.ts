@@ -72,17 +72,17 @@ export const DIAGNOSTIC_ORDER: readonly ProfileDiagnostic[] = Object.freeze([
  * first that applies in the order of this table", and a field with
  * concurrent values (§45) gets the diagnostic of its first invalid value in
  * that order. Of several problems at one field pointer, those with the
- * first diagnostic are kept. Problems at the object itself (its key, a
- * missing field) and deeper (set members, extension keys) are kept as
- * they are.
+ * first diagnostic are kept, at every pointer below the object (fields,
+ * set members, values inside extensions). Problems at the object itself
+ * (its key, a missing field) are kept as they are.
  */
 export function firstPerField(
   problems: readonly ProfileProblem[],
   object: string,
 ): ProfileProblem[] {
   const rank = (p: ProfileProblem) => DIAGNOSTIC_ORDER.indexOf(p.diagnostic);
-  const isField = (pointer: string) =>
-    pointer.startsWith(`${object}/`) && !pointer.slice(object.length + 1).includes("/");
+  // Every value below the object (a field, a set member, a value inside extensions).
+  const isField = (pointer: string) => pointer.startsWith(`${object}/`);
   const best = new Map<string, number>();
   for (const p of problems)
     if (isField(p.pointer))

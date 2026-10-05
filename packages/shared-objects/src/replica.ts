@@ -70,9 +70,8 @@ export const SCALAR_FIELDS = [
 export type ScalarField = (typeof SCALAR_FIELDS)[number];
 const DATE_FIELDS = new Set<string>(["due", "scheduled", "completion_date"]);
 
-/** Base fields (§23) and Task fields (§30) whose values are profile strings (G-SC3). */
-const BASE_STRING_FIELDS = ["id", "type", "lifecycle", "created_by", "created_at"];
-const TASK_STRING_FIELDS = ["title", "status", "due", "scheduled", "completion_date", "priority"];
+/** RFC 6901: a reference token back to its key. */
+const unescapeToken = (token: string): string => token.replace(/~1/g, "/").replace(/~0/g, "~");
 
 /** §69 task.resolve_field_conflict: write `value` (null clears a date) after the merged conflicts. */
 export interface ResolveFieldConflict {
@@ -270,22 +269,37 @@ const problem = (
   message: string,
 ): ProfileProblem => Object.freeze({ code: "PROFILE_INVALID", diagnostic, pointer, message });
 
-/** G-SC3 problems of one stored object: known string fields with a Text value. */
+/**
+ * §30, §74.1 (SO-STRINGS): every collaborative Text value anywhere in one
+ * stored object (known and unknown fields, `extensions`, nested maps,
+ * lists by index, every concurrent value) is INVALID_FIELD_TYPE at its own
+ * JSON Pointer. Read from the backend's getAll datatypes (see hasTextValue):
+ * "text" is Text, "str" a scalar string.
+ */
 function textProblems(doc: Doc, object: AMap, key: string): ProfileProblem[] {
-  const fields =
-    object.type !== undefined && plain(object.type) === "task"
-      ? [...BASE_STRING_FIELDS, ...TASK_STRING_FIELDS]
-      : BASE_STRING_FIELDS;
-  return fields
-    .filter((f) => hasTextValue(doc, object, f))
-    .map((f) =>
-      // §30 (G-SC3)
-      problem(
-        "INVALID_FIELD_TYPE",
-        `/objects/${pointerToken(key)}/${pointerToken(f)}`,
-        `${f} is collaborative Text, not a scalar string (§30, G-SC3)`,
-      ),
-    );
+  const obj = A.getObjectId(object);
+  if (obj === null) return [];
+  const backend = A.getBackend(doc);
+  const heads = A.getHeads(doc);
+  const out: ProfileProblem[] = [];
+  const scan = (id: string, kind: "map" | "list", at: string): void => {
+    const props: (string | number)[] =
+      kind === "list"
+        ? Array.from({ length: backend.length(id, heads) }, (_, i) => i)
+        : backend.keys(id, heads);
+    for (const prop of props) {
+      const here = `${at}/${pointerToken(String(prop))}`;
+      const values = backend.getAll(id, prop, heads);
+      if (values.some((v) => v[0] === "text"))
+        out.push(
+          problem("INVALID_FIELD_TYPE", here, "collaborative Text, not a scalar string (§30)"),
+        );
+      for (const v of values)
+        if (v[0] === "map" || v[0] === "list") scan(v[1] as string, v[0], here);
+    }
+  };
+  scan(obj, "map", `/objects/${pointerToken(key)}`);
+  return out;
 }
 
 /** Problems of the non-visible concurrent values of a Task's scalar registers (§45). */
@@ -754,8 +768,9 @@ export class SharedObjectsReplica {
       ...(next.type === "task"
         ? objectProblems(next, id)
         : [problem("INVALID_FIELD_TYPE", `/objects/${pointerToken(id)}/type`, "not a Task (§25)")]),
+      // Text in a field this intent writes is replaced by the write.
       ...textProblems(this.#doc, object, id).filter(
-        (p) => !touched.has(p.pointer.split("/").pop() as string),
+        (p) => !touched.has(unescapeToken(p.pointer.split("/")[3] ?? "")),
       ),
     ];
     if (problems.length > 0) throw new ProfileError(problems);
