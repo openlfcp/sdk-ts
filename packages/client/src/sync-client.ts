@@ -563,7 +563,7 @@ export class SyncClient {
       case "SNAPSHOT": {
         const ctx = this.#ctx(m.body.resourceId);
         this.#done(m);
-        if (ctx !== undefined && ctx.snapshotPending) await this.#onSnapshot(ctx, m.body.snapshot);
+        if (ctx?.snapshotPending) await this.#onSnapshot(ctx, m.body.snapshot);
         return;
       }
       case "DATA_HAVE": {
