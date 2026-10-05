@@ -2,10 +2,7 @@
   "note": "CDDL rules of wire/fixtures/manifest.json that sdk-ts cannot decode yet, with the task that implements them (LFCP-017). Remove a rule when its task lands: the run fails on stale entries.",
   "rules": {
     "invite-secret": "LFCP-053",
-    "data-unit-aad": "LFCP-025",
     "snapshot-aad": "LFCP-029",
-    "lfcp-message": "LFCP-026",
-    "typed-lfcp-message": "LFCP-026",
     "auth-transcript": "LFCP-027",
     "auth-proof": "LFCP-027"
   }

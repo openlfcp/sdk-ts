@@ -8,14 +8,26 @@
 // by the vector run, not here. Rules sdk-ts cannot decode yet are listed
 // in cddl-pending.json; a rule in neither place fails the run.
 
-import { bytesEqual, dataEpoch, fromHex, principalId, resourceId } from "@openlfcp/core";
+import {
+  actorSequence,
+  bytesEqual,
+  controlRecordId,
+  dataEpoch,
+  dataUnitId,
+  fromHex,
+  principalId,
+  resourceId,
+} from "@openlfcp/core";
 import {
   canonicalFrontierFromCbor,
   controlBodyFromCbor,
+  dataUnitAad,
   decodeControlRecord,
   decodeControlRecordPayload,
   decodeDataUnitPayload,
+  decodeEnvelope,
   decodeKeyPackagePayload,
+  decodeMessage,
   decodePrincipalDescriptor,
   decodeSnapshotPayload,
   keyPackageHpkeAad,
@@ -58,11 +70,10 @@ const RULES: Readonly<Record<string, (bytes: Uint8Array) => unknown>> = {
   "lfcp-protected-header": (b) =>
     parseSignedObject(encode([b, cborMap([]), Uint8Array.of(0xa0), new Uint8Array(64)])),
   "control-record-payload": decodeControlRecordPayload,
-  // typed-control-record-payload admits only the core types 0-8 (§14 also allows
-  // extensions 32+, which this decoder keeps; queued as spec gap G2).
+  // typed-control-record-payload: the core types 0-8 and, since baseline.3
+  // (W2), the extension space 32+ with an untyped body; 9-31 never match.
   "typed-control-record-payload": (b) => {
     const p = decodeControlRecordPayload(b);
-    if (p.controlType > 8n) throw new Error("not a core Control Record type");
     controlBodyFromCbor(p.controlType, p.body);
   },
   "genesis-record-payload": (b) => {
@@ -111,11 +122,31 @@ const RULES: Readonly<Record<string, (bytes: Uint8Array) => unknown>> = {
     if (!bytesEqual(rebuilt, b)) throw new Error("not the §25.1 AAD");
   },
   "key-package": parseKeyPackage,
+  // §26.1: the item must be exactly what dataUnitAad builds from its fields.
+  "data-unit-aad": (b) => {
+    const v = decodeDeterministic(b) as CborValue[];
+    if (!Array.isArray(v) || v.length !== 7 || v[0] !== "LFCP-DATA-v1")
+      throw new Error('not ["LFCP-DATA-v1", ...] with seven elements');
+    const [, resource, epoch, actor, seq, prev, head] = v;
+    const rebuilt = dataUnitAad({
+      resourceId: resourceId(resource as Uint8Array),
+      dataEpoch: dataEpoch(epoch as number),
+      actor: principalId(actor as Uint8Array),
+      actorSeq: actorSequence(seq as number),
+      prevDataUnitId: prev === null ? null : dataUnitId(prev as Uint8Array),
+      controlHead: controlRecordId(head as Uint8Array),
+    });
+    if (!bytesEqual(rebuilt, b)) throw new Error("not the §26.1 AAD");
+  },
   "data-unit-payload": decodeDataUnitPayload,
   "data-unit": parseDataUnit,
   "canonical-frontier": (b) => canonicalFrontierFromCbor(decodeDeterministic(b)),
   "snapshot-payload": decodeSnapshotPayload,
   snapshot: parseSnapshot,
+  // §32: the generic envelope (any type code, untyped body).
+  "lfcp-message": decodeEnvelope,
+  // §32-§61: a registry type with its typed body.
+  "typed-lfcp-message": decodeMessage,
 };
 const PENDING: Readonly<Record<string, string>> = cddlPending.rules;
 

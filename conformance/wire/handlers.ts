@@ -31,19 +31,24 @@ import {
   snapshotNonce,
 } from "@openlfcp/crypto";
 import {
+  type AnyMessage,
+  type ControlPutBody,
   type ControlRecord,
   canonicalFrontierFromCbor,
-  controlPutBodyFromCbor,
   type DataProfileCodec,
   dataUnitAad,
   decodeControlRecord,
   decodeControlRecordPayload,
   decodeDataUnitPayload,
+  decodeEnvelope,
   decodeKeyPackagePayload,
+  decodeMessage,
   decodePrincipalDescriptor,
   decodeSnapshotPayload,
   derivePrincipalId,
+  ERROR_CODE,
   encodeControlRecordPayload,
+  encodeMessage,
   encodePrincipalDescriptor,
   expectedSignerOf,
   InMemorySeenUnits,
@@ -51,6 +56,9 @@ import {
   type KeyPackageRecipient,
   keyPackageHpkeAad,
   keyPackageHpkeInfo,
+  type LfcpMessage,
+  MESSAGE_TYPE,
+  messageErrorWireCode,
   objectId,
   openKeyPackage,
   type Parsed,
@@ -377,22 +385,25 @@ const controlRecordNegative: Handler = (c, context) => {
 };
 
 /**
- * LFCP-022: a CONTROL_PUT against the coordinator's state at the vector's
- * current head. Only the §47 body is decoded (field 4 of the envelope,
- * read with generic CBOR); the envelope codec itself is LFCP-026. A body
- * that does not decode (a null expected head, §47) fails before any state
- * is needed.
+ * LFCP-022, LFCP-026: a CONTROL_PUT against the coordinator's state at the
+ * vector's current head. The message is decoded with the message codec; a
+ * body that does not decode (a null expected head, §47) fails before any
+ * state is needed.
  */
 const controlPutNegative: Handler = (c, context) => {
-  const message = decodeStrict(hexOf(c.inputs, "message_cbor"));
-  const field = (k: number): CborValue | undefined =>
-    isCborMap(message) ? message.entries.find(([key]) => key === k)?.[1] : undefined;
-  const checks: Check[] = [equalCheck("inputs.message_cbor/type", 23, field(0))]; // §33: 23 = CONTROL_PUT
-  let body: ReturnType<typeof controlPutBodyFromCbor>;
+  const checks: Check[] = [
+    check(
+      "inputs.message_cbor/type",
+      () => decodeEnvelope(hexOf(c.inputs, "message_cbor")).code === MESSAGE_TYPE.CONTROL_PUT,
+    ),
+  ];
+  let body: ControlPutBody;
   try {
-    body = controlPutBodyFromCbor(field(4) as CborValue);
+    const message = decodeMessage(hexOf(c.inputs, "message_cbor"));
+    if (message.type !== "CONTROL_PUT") throw new Error(`a ${message.type}, not a CONTROL_PUT`);
+    body = message.body;
   } catch (e) {
-    const outcome = negative(c, wireCodeOf(e));
+    const outcome = negative(c, messageErrorWireCode(e));
     return { checks: [...checks, ...outcome.checks], pending: outcome.pending };
   }
   const ctx = c.context as { current_control_head?: unknown } | undefined;
@@ -925,10 +936,106 @@ const inviteUri: Handler = (c, context) => {
   };
 };
 
+/** The persistent objects a message carries, with the parser for each (§39-§57, §36). */
+function embeddedObjects(m: AnyMessage): {
+  readonly field: string;
+  readonly bytes: Uint8Array;
+  readonly parse: (b: Uint8Array) => unknown;
+}[] {
+  const list = (field: string, objects: readonly Uint8Array[], parse: (b: Uint8Array) => unknown) =>
+    objects.map((bytes, i) => ({ field: `${field}[${i}]`, bytes, parse }));
+  switch (m.type) {
+    case "AUTH":
+      return list("proof", [m.body.proof], parseSignedObject);
+    case "RESOURCE_HOST":
+      return list("genesis", [m.body.genesis], decodeControlRecord);
+    case "CONTROL_BATCH":
+      return list("records", m.body.objects, decodeControlRecord);
+    case "CONTROL_PUT":
+      return list("record", [m.body.record], decodeControlRecord);
+    case "DATA_BATCH":
+    case "DATA_PUT":
+      return list("units", m.body.objects, parseDataUnit);
+    case "KEY_PACKAGE_BATCH":
+    case "KEY_PACKAGE_PUT":
+      return list("packages", m.body.objects, parseKeyPackage);
+    case "SNAPSHOT":
+    case "SNAPSHOT_PUT":
+      return list("snapshot", [m.body.snapshot], parseSnapshot);
+    default:
+      return [];
+  }
+}
+
+/** The exact bytes of every signed object the suite publishes. */
+function publishedObjects(context: HandlerContext): Set<string> {
+  const out = new Set<string>();
+  for (const c of context.suite.cases)
+    for (const [field, value] of Object.entries(c.expected ?? {}))
+      if (/cose_sign1$/.test(field) && typeof (value as { hex?: unknown })?.hex === "string")
+        out.add((value as { hex: string }).hex);
+  return out;
+}
+
+/** The message ID (field 1) of a message's bytes. */
+const messageIdOf = (bytes: Uint8Array): string => toHex(decodeEnvelope(bytes).messageId);
+
+/**
+ * LFCP-026. The message decodes with the typed codec (envelope, §33 type
+ * and §34-§61 body) and re-encodes to its exact bytes; every persistent
+ * object it carries parses with its own parser and is byte for byte a
+ * published object (never re-encoded). An ACK names the type of the
+ * request it correlates to (A1); NACK(CONTROL_HEAD_MISMATCH) carries the
+ * current head the coordinator reports for the correlated CONTROL_PUT
+ * (G-MSG5). The AUTH transcript and proof binding are LFCP-027.
+ */
 const wireMessage: Handler = (c, context) => {
   const e = c.expected;
-  const checks: Check[] = [deterministic("message_cbor/deterministic", hexOf(e, "message_cbor"))];
-  const pending = ["message_cbor/typed"];
+  const bytes = hexOf(e, "message_cbor");
+  const checks: Check[] = [deterministic("message_cbor/deterministic", bytes)];
+  const pending: string[] = [];
+  let message: AnyMessage | undefined;
+  try {
+    message = decodeMessage(bytes);
+    checks.push(bytesCheck("message_cbor/typed", bytes, encodeMessage(message)));
+  } catch (err) {
+    checks.push({ name: "message_cbor/typed", ok: false, message: describeError(err) });
+  }
+  if (message !== undefined) {
+    const m = message;
+    const objects = embeddedObjects(m);
+    if (objects.length > 0) {
+      const published = publishedObjects(context);
+      checks.push(
+        check("message_cbor/objects", () => {
+          for (const o of objects) {
+            o.parse(o.bytes);
+            if (!published.has(toHex(o.bytes))) return `${o.field} is not a published object`;
+          }
+          return true;
+        }),
+      );
+    }
+    if (m.type === "ACK" && m.correlationId !== undefined) {
+      const request = context.suite.cases.find(
+        (x) =>
+          x.type === "bytes" &&
+          x.kind === "wire_message" &&
+          messageIdOf(hexOf(x.expected, "message_cbor")) === toHex(m.correlationId as Uint8Array),
+      );
+      checks.push(
+        check("message_cbor/ack-request-type", () => {
+          if (request === undefined) return "no published request has the correlation ID";
+          return (
+            decodeEnvelope(hexOf(request.expected, "message_cbor")).code === m.body.requestType ||
+            "the ACK does not name the request's type"
+          );
+        }),
+      );
+    }
+    if (m.type === "NACK" && m.body.code === ERROR_CODE.CONTROL_HEAD_MISMATCH)
+      checks.push(check("message_cbor/current-head", () => nackCurrentHead(context, m)));
+  }
   if (has(e, "auth_transcript_cbor")) {
     checks.push(
       deterministic("auth_transcript_cbor/deterministic", hexOf(e, "auth_transcript_cbor")),
@@ -952,6 +1059,38 @@ const wireMessage: Handler = (c, context) => {
   }
   return { checks, pending };
 };
+
+/**
+ * G-MSG5: the NACK correlates to a CONTROL_PUT vector that expects
+ * CONTROL_HEAD_MISMATCH; proposing that put at its context head must report
+ * exactly the NACK's details as the current head.
+ */
+function nackCurrentHead(context: HandlerContext, nack: LfcpMessage<"NACK">): true | string {
+  const correlation = nack.correlationId;
+  if (correlation === undefined) return "the NACK has no correlation ID";
+  const put = context.suite.cases.find((x) => {
+    const code = (x.expected as { error?: { code?: unknown } }).error?.code;
+    return (
+      x.type === "validation" &&
+      x.kind === "control_put" &&
+      code === "CONTROL_HEAD_MISMATCH" &&
+      messageIdOf(hexOf(x.inputs, "message_cbor")) === toHex(correlation)
+    );
+  });
+  if (put === undefined) return "no CONTROL_PUT vector with this message ID expects the mismatch";
+  const request = decodeMessage(hexOf(put.inputs, "message_cbor"));
+  if (request.type !== "CONTROL_PUT") return "the correlated request is not a CONTROL_PUT";
+  const state = publishedView(context).stateAt(
+    referenced(context, (put.context as { current_control_head?: unknown })?.current_control_head),
+  );
+  if (state === undefined) return "the put's context head is not on the chain";
+  const result = proposeControlPut(state, request.body);
+  if (result.kind !== "head-mismatch") return `the put is ${result.kind}, not a head mismatch`;
+  return (
+    bytesEqual(result.currentHead, nack.body.details as Uint8Array) ||
+    "the NACK details are not the current head"
+  );
+}
 
 // ---------------------------------------------------------------------------
 // validation cases
@@ -1199,6 +1338,21 @@ const dataUnitNegative: Handler = async (c, context) => {
   return { checks: [...checks, ...outcome.checks], pending: outcome.pending };
 };
 
+/**
+ * LFCP-026: a received message through decodeMessage; the outcome is its
+ * §62 code (messageErrorWireCode). Semantic rules beyond the codec, such
+ * as live Have ranges (§48, LFCP-028), are named pending by the case.
+ */
+const wireMessageNegative: Handler = (c) => {
+  let actual: string | null = null;
+  try {
+    decodeMessage(hexOf(c.inputs, "message_cbor"));
+  } catch (err) {
+    actual = messageErrorWireCode(err);
+  }
+  return negative(c, actual);
+};
+
 const principalNegative: Handler = (c) => {
   let actual: string | null = null;
   try {
@@ -1229,4 +1383,5 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   ),
   "validation/snapshot": signedNegative(parseSnapshot, (p) => expectedSignerOf(p.payload)),
   "validation/principal": principalNegative,
+  "validation/wire_message": wireMessageNegative,
 };

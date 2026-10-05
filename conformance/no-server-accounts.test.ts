@@ -77,3 +77,18 @@ describe("no profile semantics in the Data Unit core", () => {
     );
   });
 });
+
+// LFCP-026: the message codec is representation only. It opens no socket
+// and reaches no network; transports adapt frames to decodeFrame.
+describe("no network in the message codec", () => {
+  it("packages/wire/src/message.ts uses no socket, fetch or Node networking", () => {
+    const code = readRepoText("packages/wire/src/message.ts")
+      .split("\n")
+      .filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line));
+    expect(
+      code.filter((line) =>
+        /\b(WebSocket|fetch|XMLHttpRequest|node:net|node:http|node:tls|ws)\b/.test(line),
+      ),
+    ).toEqual([]);
+  });
+});
