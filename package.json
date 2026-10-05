@@ -18,10 +18,11 @@
     "format": "biome check --write ."
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
     "@openlfcp/core": "workspace:*",
     "@openlfcp/crypto": "workspace:*",
+    "@openlfcp/shared-objects": "workspace:*",
     "@openlfcp/wire": "workspace:*",
-    "@biomejs/biome": "^2.5.15",
     "typescript": "^5.9.3",
     "vitest": "^5.0.3"
   }

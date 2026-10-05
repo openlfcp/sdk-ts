@@ -1,0 +1,104 @@
+{
+  "suite": "SHARED-OBJECTS-TEST-VECTORS-01",
+  "note": "Cases or parts of cases that sdk-ts cannot check yet, with the task that implements them (LFCP-030). Remove an entry when its task lands: the runner fails on stale entries.",
+  "cases": {
+    "S01": {
+      "reason": "Every stated value is profile-valid (checked); Automerge round trip, preservation or collision outcome (LFCP-032 Shared Objects runner, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "objects/merge": "LFCP-032"
+      }
+    },
+    "S02": {
+      "reason": "Every stated value is profile-valid (checked); Concurrent-merge outcome (LFCP-037 convergence suite, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "title/merge": "LFCP-037",
+        "status/merge": "LFCP-037",
+        "completion_date/merge": "LFCP-037",
+        "conflicts/merge": "LFCP-037"
+      }
+    },
+    "S03": {
+      "reason": "Every stated value is profile-valid (checked); Concurrent-merge outcome (LFCP-037 convergence suite, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "status_conflict_set/merge": "LFCP-037",
+        "must_report_conflict/merge": "LFCP-037",
+        "completion_date_values_may_include/merge": "LFCP-037"
+      }
+    },
+    "S04": {
+      "reason": "Every stated value is profile-valid (checked); Concurrent-merge outcome (LFCP-037 convergence suite, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "status/merge": "LFCP-037",
+        "status_conflict_set/merge": "LFCP-037",
+        "must_report_conflict/merge": "LFCP-037"
+      }
+    },
+    "S05": {
+      "reason": "Every stated value is profile-valid (checked); Concurrent-merge outcome (LFCP-037 convergence suite, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "due_conflict_set/merge": "LFCP-037",
+        "must_report_conflict/merge": "LFCP-037"
+      }
+    },
+    "S06": {
+      "reason": "Every stated value is profile-valid (checked); Concurrent-merge outcome (LFCP-037 convergence suite, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "tags/merge": "LFCP-037"
+      }
+    },
+    "S07": {
+      "reason": "Every stated value is profile-valid (checked); Concurrent-merge outcome (LFCP-037 convergence suite, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "tags/merge": "LFCP-037"
+      }
+    },
+    "S08": {
+      "reason": "Every stated value is profile-valid (checked); Concurrent-merge outcome (LFCP-037 convergence suite, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "assignees/merge": "LFCP-037"
+      }
+    },
+    "S09": {
+      "reason": "Every stated value is profile-valid (checked); Concurrent-merge outcome (LFCP-037 convergence suite, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "lifecycle/merge": "LFCP-037",
+        "title/merge": "LFCP-037",
+        "object_present/merge": "LFCP-037"
+      }
+    },
+    "S10": {
+      "reason": "Every stated value is profile-valid (checked); Concurrent-merge outcome (LFCP-037 convergence suite, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "lifecycle_conflict_set/merge": "LFCP-037",
+        "must_report_conflict/merge": "LFCP-037"
+      }
+    },
+    "S11": {
+      "reason": "Every stated value is profile-valid (checked); Automerge round trip, preservation or collision outcome (LFCP-032 Shared Objects runner, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "status/merge": "LFCP-032",
+        "preserve/merge": "LFCP-032"
+      }
+    },
+    "S12": {
+      "reason": "Every stated value is profile-valid (checked); Automerge round trip, preservation or collision outcome (LFCP-032 Shared Objects runner, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "objects/merge": "LFCP-032"
+      }
+    },
+    "S13": {
+      "reason": "Every stated value is profile-valid (checked); Automerge round trip, preservation or collision outcome (LFCP-032 Shared Objects runner, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "profile_error/merge": "LFCP-032",
+        "must_not_silently_treat_as_same_object/merge": "LFCP-032"
+      }
+    },
+    "S14": {
+      "reason": "Every stated value is profile-valid (checked); Automerge round trip, preservation or collision outcome (LFCP-032 Shared Objects runner, over the LFCP-031 Automerge binding).",
+      "parts": {
+        "task_status/merge": "LFCP-032",
+        "snapshot_roundtrip_preserves_objects/merge": "LFCP-032"
+      }
+    }
+  }
+}

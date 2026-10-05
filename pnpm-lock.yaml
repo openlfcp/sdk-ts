@@ -17,6 +17,9 @@ importers:
       '@openlfcp/crypto':
         specifier: workspace:*
         version: link:packages/crypto
+      '@openlfcp/shared-objects':
+        specifier: workspace:*
+        version: link:packages/shared-objects
       '@openlfcp/wire':
         specifier: workspace:*
         version: link:packages/wire
