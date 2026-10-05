@@ -44,12 +44,22 @@ export const ALLOWED = {
   "shared-objects": ["core", "crypto"],
   client: ["core", "wire", "storage", "crypto"],
   "storage-node": ["core", "storage"],
+  "storage-idb": ["core", "storage"],
 };
 // The only package allowed to use the @noble cryptography libraries and HPKE.
 const NOBLE_OWNER = "crypto";
 // The only package allowed to use Automerge.
 const AUTOMERGE_OWNER = "shared-objects";
-const PORTABLE = new Set(["core", "crypto", "wire", "storage", "shared-objects", "client"]);
+const PORTABLE = new Set([
+  "core",
+  "crypto",
+  "wire",
+  "storage",
+  "shared-objects",
+  "client",
+  // IndexedDB (LFCP-059): browsers, Electron, mobile WebViews; never Node built-ins.
+  "storage-idb",
+]);
 // Node-only packages (LFCP-035): headless Node, CLI, examples and tests.
 const NODE_ONLY = new Set(["storage-node"]);
 const NODE_GLOBALS = new Set([
