@@ -29,7 +29,13 @@ export type LfcpErrorCode =
   /** A text string that is not well-formed UTF-8 (or a JS string with lone surrogates). */
   | "CBOR_INVALID_UTF8"
   /** Nesting deeper than the SDK's safety limit. */
-  | "CBOR_TOO_DEEP";
+  | "CBOR_TOO_DEEP"
+  /** A cryptographic operation failed (e.g. a low-order X25519 public key). Never carries key bytes. */
+  | "CRYPTO_FAILURE"
+  /** A Principal Descriptor has the wrong shape, field set, key lengths or encoding (LFCP-WIRE-01 §7). */
+  | "INVALID_PRINCIPAL_DESCRIPTOR"
+  /** A Principal Descriptor's ID is not the §7 hash of its public keys. */
+  | "PRINCIPAL_ID_MISMATCH";
 
 /** Error with a stable machine-readable `code`; the message is for humans only. */
 export class LfcpError extends Error {
