@@ -149,7 +149,7 @@ const profileValidation: Handler = (c, context) => {
 };
 
 // ---------------------------------------------------------------------------
-// behavioral scenarios (S01-S14): stated values must be valid; merges pending
+// behavioral scenarios (S01-S16): stated values must be valid; merges pending
 
 /** The scenario's base Task (inline fields or base_state.task), else S01's Task. */
 function baseTask(c: VectorCase, context: HandlerContext): Record<string, Json> {

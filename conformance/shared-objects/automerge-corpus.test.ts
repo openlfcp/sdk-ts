@@ -13,6 +13,10 @@
 // the signer-bound profile codec rejects with the expected code and §74.1
 // diagnostic, and that is never merged (SO-SEC1: §8, §11).
 //
+// Every validation is a save image (Text cannot be written in JSON) whose
+// profile validation reports exactly the expected problems, at the Text
+// value's own pointer (SO-STRINGS: §30, §74.1).
+//
 // Behavioral interop only (SHARED-OBJECTS-PROFILE-01 §14, AGENT-OPERATING-
 // GUIDE §13): byte equality of a re-save is checked as informative below.
 
@@ -168,6 +172,24 @@ describe(`Automerge reference corpus negatives at ${spec.lock.tag}`, () => {
       );
       if (change !== undefined) expect(profile.replica.hasChange(change.hash)).toBe(false);
       expect(profile.replica.root()).toEqual(before);
+    });
+  }
+});
+
+describe(`Automerge reference corpus validations at ${spec.lock.tag}`, () => {
+  it("has a validation", () => {
+    expect(corpus.validations.length).toBeGreaterThan(0);
+  });
+
+  for (const validation of corpus.validations) {
+    it(`${validation.id}: ${validation.expected_problems.map((p) => p.diagnostic).join(", ")}`, () => {
+      // Text cannot be written in a JSON fixture, so the case is a save image.
+      const replica = Replica.fromSave(fromHex(validation.save_hex), options);
+      const problems = replica
+        .validate()
+        .problems.map((p) => ({ pointer: p.pointer, code: p.code, diagnostic: p.diagnostic }))
+        .sort((a, b) => (a.pointer < b.pointer ? -1 : a.pointer > b.pointer ? 1 : 0));
+      expect(problems).toEqual(validation.expected_problems);
     });
   }
 });

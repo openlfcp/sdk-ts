@@ -4,7 +4,8 @@
 // (part of the baseline since mvp-0.1-baseline.4). It is supplementary,
 // not byte-normative (SHARED-OBJECTS-PROFILE-01 §14): a conforming binding
 // applies its changes, loads its save images and reaches its logical state
-// and conflict sets, and rejects its negatives.
+// and conflict sets, rejects its negatives, and reports exactly the problems
+// its validations name.
 
 import { openSpec } from "../spec.mjs";
 
@@ -55,6 +56,20 @@ export interface CorpusNegative {
   };
 }
 
+/** A save image whose profile validation must report exactly these problems (SO-STRINGS). */
+export interface CorpusValidation {
+  readonly id: string;
+  readonly description: string;
+  readonly rule: string;
+  readonly base_scenario: string;
+  readonly save_hex: string;
+  readonly expected_problems: readonly {
+    readonly pointer: string;
+    readonly code: string;
+    readonly diagnostic: string;
+  }[];
+}
+
 export interface Corpus {
   readonly automerge_version: string;
   readonly profile: string;
@@ -62,6 +77,8 @@ export interface Corpus {
   readonly actors: Readonly<Record<string, string>>;
   readonly scenarios: readonly CorpusScenario[];
   readonly negatives: readonly CorpusNegative[];
+  /** Since mvp-0.1-baseline.6. */
+  readonly validations: readonly CorpusValidation[];
 }
 
 let cached: Corpus | undefined;

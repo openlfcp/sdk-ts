@@ -119,7 +119,7 @@ The official vectors belong to `openlfcp/spec` and are never copied into
 sdk-ts. `spec.lock` pins the spec version the SDK implements:
 
 ```json
-{ "tag": "mvp-0.1-baseline.5", "commit": "dfd5db24c8cade7397737145a062c1ba5bc8a354" }
+{ "tag": "mvp-0.1-baseline.6", "commit": "c13aef1245c3f4d433fc2a07635ad92e7552841b" }
 ```
 
 `conformance/spec.mjs` reads spec files with `git show <commit>:<path>`

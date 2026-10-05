@@ -1,4 +1,4 @@
-// Runs the SHARED-OBJECTS-TEST-VECTORS-01 behavioral scenarios (S01-S14)
+// Runs the SHARED-OBJECTS-TEST-VECTORS-01 behavioral scenarios (S01-S16)
 // through the sdk-ts Automerge binding (LFCP-031): every branch is a
 // semantic intent applied by its fixture actor's replica, branches "from
 // base" run concurrently and are merged by exchanging changes, and the
