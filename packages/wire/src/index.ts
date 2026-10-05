@@ -89,8 +89,14 @@ export {
 } from "./have.js";
 export {
   type KeyPackageCheck,
+  type KeyPackageRecipient,
   keyPackageHpkeAad,
   keyPackageHpkeInfo,
+  openKeyPackage,
+  type ReceivedKeyPackage,
+  receiveKeyPackage,
+  type SealedKeyPackage,
+  sealKeyPackage,
   verifyKeyPackage,
 } from "./key-package.js";
 export {
