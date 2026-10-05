@@ -55,6 +55,7 @@ describe("HPKE info and AAD (§25.1)", () => {
 });
 
 // G <- grant BRUNO (data/read, key/distribute) <- invite grant (invite/claim only) <- grant CARLA (data/write only)
+// <- invite grant without claim_limit
 const records: { bytes: Uint8Array; id: Uint8Array }[] = [];
 function add(body: ControlBody, by: Signer) {
   const prev = records[records.length - 1];
@@ -95,6 +96,12 @@ add(
   ALICE,
 );
 add({ type: "CAPABILITY_GRANT", subject: CARLA.descriptor, abilities: [2n], delegable: [] }, ALICE);
+// §18: an invitation grant without claim_limit is not claimable, but still confers invite/claim.
+const UNCLAIMABLE = signer(129);
+add(
+  { type: "CAPABILITY_GRANT", subject: UNCLAIMABLE.descriptor, abilities: [11n], delegable: [] },
+  ALICE,
+);
 const view = validateControlChain(records.map((r) => r.bytes)) as Extract<
   ChainResult,
   { kind: "linear" }
@@ -166,6 +173,26 @@ describe("verifyKeyPackage (§25.2)", () => {
   it("evaluates authority at the package's head, not the latest one", () => {
     const atGenesis = keyPackage(ALICE, BRUNO, { head: (records[0] as { id: Uint8Array }).id });
     expect(verifyKeyPackage(view, atGenesis)).toMatchObject({ reason: "UNAUTHORIZED" }); // BRUNO had no grant yet
+  });
+
+  it("refuses a sender no Control Record describes with MISSING_DEPENDENCY (§10.5)", () => {
+    expect(verifyKeyPackage(view, keyPackage(signer(161), BRUNO))).toMatchObject({
+      reason: "UNKNOWN_SENDER",
+      wireCode: "MISSING_DEPENDENCY",
+    });
+    // Described by a later record: resolvable, but without key/distribute at the head.
+    const early = keyPackage(BRUNO, BRUNO, { head: (records[0] as { id: Uint8Array }).id });
+    expect(verifyKeyPackage(view, early)).toMatchObject({
+      reason: "UNAUTHORIZED",
+      wireCode: "AUTHORIZATION_FAILED",
+    });
+  });
+
+  it("accepts a recipient whose invite grant has no claim_limit (§18, §25.2)", () => {
+    const head = (records[4] as { id: Uint8Array }).id;
+    expect(verifyKeyPackage(view, keyPackage(ALICE, UNCLAIMABLE, { head })).kind).toBe(
+      "authorized",
+    );
   });
 });
 

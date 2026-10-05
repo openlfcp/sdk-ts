@@ -87,6 +87,8 @@ const reject = (
  * - the head is on the chain and the package's epoch is known there.
  *   Packages of closed epochs stay valid (PROVISIONAL G-EP6): they are
  *   needed to read history. Otherwise MISSING_DEPENDENCY (G-EP2);
+ * - the sender resolves to a descriptor on the chain: MISSING_DEPENDENCY
+ *   (§10.5);
  * - the package is signed by its sender (kid = sender): INVALID_SIGNATURE;
  * - the sender held key/distribute and the recipient data/read, or an
  *   active invite grant (canDistributeKey, LFCP-021): AUTHORIZATION_FAILED.
@@ -113,12 +115,14 @@ export function verifyKeyPackage(
       "MISSING_DEPENDENCY",
       `epoch ${p.dataEpoch} is not known at the package's head`,
     );
-  const sender = atHead.principals.get(toHex(expectedSignerOf(p)));
+  // §10.5: the sender resolves from the whole chain; whether it held
+  // key/distribute at the head is the authority check below.
+  const sender = view.state.principals.get(toHex(expectedSignerOf(p)));
   if (sender === undefined)
     return reject(
       "UNKNOWN_SENDER",
-      "AUTHORIZATION_FAILED",
-      "the sender holds no grant at the package's head",
+      "MISSING_DEPENDENCY",
+      "no Control Record describes the sender (§10.5)",
     );
   const signature = verifySignedObject(parsed.signed, sender);
   if (!signature.valid)
