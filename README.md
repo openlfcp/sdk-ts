@@ -6,6 +6,14 @@ The SDK does not depend on Obsidian or any other editor. Its packages must
 stay portable to browsers and editors; Node-only code goes into separate
 `*-node` packages.
 
+## Scope
+
+sdk-ts implements the OpenLFCP MVP 0.1 subset of LFCP-WIRE-01
+at `mvp-0.1-baseline.6`, not every deferred WIRE-01 feature (coordinator
+recovery, Resource tombstones, route migration, presence, mirror
+seeding and others; see `.github: docs/release/deferred-wire-01-features.md` (in [openlfcp/.github](https://github.com/openlfcp/.github))).
+It does not claim full LFCP-WIRE-01 conformance.
+
 ## Status
 
 Workspace scaffold (LFCP-011). `@openlfcp/core` has its identifier
