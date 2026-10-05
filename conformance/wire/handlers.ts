@@ -60,8 +60,10 @@ import {
   keyPackageHpkeAad,
   keyPackageHpkeInfo,
   type LfcpMessage,
+  liveHavesOf,
   MESSAGE_TYPE,
   messageErrorWireCode,
+  normalizeLiveHaves,
   objectId,
   openKeyPackage,
   type Parsed,
@@ -1041,6 +1043,29 @@ const wireMessage: Handler = (c, context) => {
         }),
       );
     }
+    // LFCP-028: a sender emits each live Have list normalized (§28, §48).
+    const lists =
+      m.type === "DATA_HAVE" || m.type === "RESOURCE_OPEN"
+        ? [m.body.haves]
+        : m.type === "RESOURCE_OPENED"
+          ? [m.body.haves, ...(m.body.snapshot ? [m.body.snapshot.frontier] : [])]
+          : [];
+    const text = (v: unknown) =>
+      JSON.stringify(v, (_k, x) =>
+        x instanceof Uint8Array ? toHex(x) : typeof x === "bigint" ? String(x) : x,
+      );
+    if (lists.some((l) => l.length > 0))
+      checks.push(
+        check(
+          "message_cbor/live-haves-normalized",
+          () =>
+            lists.every(
+              (l) =>
+                text(liveHavesOf(normalizeLiveHaves(l))) ===
+                text([...l].sort((a, b) => (toHex(a.principalId) < toHex(b.principalId) ? -1 : 1))),
+            ) || "a live Have list is not in normalized form",
+        ),
+      );
     if (m.type === "NACK" && m.body.code === ERROR_CODE.CONTROL_HEAD_MISMATCH)
       checks.push(check("message_cbor/current-head", () => nackCurrentHead(context, m)));
   }
