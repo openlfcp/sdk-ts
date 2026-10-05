@@ -410,6 +410,21 @@ describe("collaborative Text is not a profile string (G-SC3)", () => {
   });
 });
 
+describe("root() is canonical (comparable JSON across replicas)", () => {
+  it("lists keys in the same order on the writer and a receiver after a G-SC4 delete+put", () => {
+    const { replica: a } = aliceWithTask({ due: "2026-10-10" });
+    const b = fork(a, BOB);
+    a.apply(setTitle(taskOf(a), taskOf(a).title).intent); // G-SC4: an unchanged value, a real op
+    a.apply(setDue(taskOf(a), "2026-10-10").intent);
+    sync(a, b);
+    expect(JSON.stringify(a.root())).toBe(JSON.stringify(b.root()));
+    const keys = Object.keys(
+      (a.root() as { objects: Record<string, object> }).objects[ID] as object,
+    );
+    expect(keys).toEqual([...keys].sort());
+  });
+});
+
 describe("concurrent scalar strings are not Text (G-SC3, LFCP-070)", () => {
   /** Alice and Bob each change `edit` concurrently; Alice receives Bob's change. */
   function concurrent(edit: (r: Replica, side: "a" | "b") => void): Replica {

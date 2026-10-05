@@ -249,6 +249,24 @@ const byJson = (a: Json, b: Json): number => {
   return x < y ? -1 : x > y ? 1 : 0;
 };
 
+/**
+ * The same JSON with object keys in a canonical order (UTF-16 code unit
+ * order, at every level; arrays keep their order). Automerge's property
+ * order depends on history: after a G-SC4 delete+put the writer and a
+ * receiver list the same keys in different orders, so only a canonical form
+ * makes JSON of the logical state comparable across replicas.
+ */
+function canonical(value: Json): Json {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+        .map((k) => [k, canonical((value as Record<string, Json>)[k] as Json)]),
+    );
+  return value;
+}
+
 /** Every concurrent value of `map[key]`: none if absent, one if not conflicted. */
 function valuesOf(map: AMap, key: string): unknown[] {
   if (!(key in map)) return [];
@@ -413,6 +431,34 @@ function perform(object: AMap, writes: readonly Write[]): void {
 const actorHex = (opts: ReplicaOptions): string =>
   toHex(deriveActorId(opts.resource, opts.principal));
 
+/**
+ * Applies one change that passed the receive checks. Automerge can throw
+ * after changing the document in place (a change that skips a sequence
+ * number stays in its graph without its operations), so on any engine error
+ * the handle is dropped: the document is rebuilt from the changes it held,
+ * which must give back the heads it had. Exported for tests.
+ */
+export function applyChecked(
+  doc: Doc,
+  bytes: Uint8Array,
+): { readonly next: Doc } | { readonly restored: Doc; readonly error: Error } {
+  const before = [...A.getHeads(doc)].sort().join();
+  try {
+    return { next: A.applyChanges(doc, [bytes])[0] };
+  } catch (e) {
+    const error = e instanceof Error ? e : new Error(String(e));
+    let restored: Doc;
+    try {
+      [restored] = A.applyChanges(A.init({ actor: A.getActorId(doc) }), A.getAllChanges(doc));
+    } catch (r) {
+      throw new Error(`the replica could not be restored after an Automerge error: ${String(r)}`);
+    }
+    if ([...A.getHeads(restored)].sort().join() !== before)
+      throw new Error("the replica could not be restored after an Automerge error: heads differ");
+    return { restored, error };
+  }
+}
+
 function loadFailure(e: unknown, what: string): never {
   if (e instanceof LfcpError) throw e;
   throw new ProfileInvalidError("INVALID_AUTOMERGE_BYTES", `${what}: ${(e as Error).message}`);
@@ -512,8 +558,10 @@ export class SharedObjectsReplica {
   /**
    * §14.1 (G-EP7): this replica rebuilt from its own changes minus
    * `exclude` (change hashes). Changes that depend on an excluded change are
-   * unapplied too. If an excluded change is this actor's own, the rebuilt
-   * replica refuses local writes (§9): its sequences are already used.
+   * unapplied too. An excluded change of this actor is not lost state (§9):
+   * the rebuilt replica writes on from its own sequence, reusing the
+   * sequence numbers of the removed changes. A replica that was already
+   * behind its persisted sequence stays refused.
    */
   rebuildWithout(exclude: Iterable<string>): BuiltReplica {
     const out = new Set(exclude);
@@ -521,7 +569,7 @@ export class SharedObjectsReplica {
     return SharedObjectsReplica.fromChanges(kept, {
       resource: this.resource,
       principal: this.#principal,
-      minSeq: Math.max(this.#minSeq, this.actorSeq),
+      minSeq: this.writable ? 0 : this.#minSeq,
     });
   }
 
@@ -588,9 +636,13 @@ export class SharedObjectsReplica {
     return frameProfilePayload(this.save());
   }
 
-  /** The logical root: scalar strings (and Text) read as strings. */
+  /**
+   * The logical root: scalar strings (and Text) read as strings, object keys
+   * in canonical order, so JSON.stringify(root()) is comparable across
+   * replicas holding the same state.
+   */
   root(): Json {
-    return plain(this.#doc);
+    return canonical(plain(this.#doc));
   }
 
   /** The logical object stored under `id` (its visible value), if any. */
@@ -839,16 +891,25 @@ export class SharedObjectsReplica {
         "ACTOR_EQUIVOCATION",
         `actor ${change.actor} sequence ${change.seq} already has a different change (§26.2)`,
       );
-    const before = A.getHeads(this.#doc);
-    let next: Doc;
-    try {
-      [next] = A.applyChanges(this.#doc, [change.bytes]);
-    } catch (e) {
+    // §14.1: with every dependency present, the sequence follows the
+    // actor's latest change. Checked before Automerge sees it: Automerge
+    // 3.5.0 records a skipping change in its graph without its operations
+    // and the document no longer saves loadably (automerge-rs 0.12 aborts).
+    if (change.seq !== (this.#seqs.get(change.actor) ?? 0) + 1)
       throw new ProfileInvalidError(
         "INVALID_AUTOMERGE_BYTES",
-        `Automerge rejected the change (§11): ${(e as Error).message}`,
+        `actor ${change.actor} sequence ${change.seq} skips sequence ${(this.#seqs.get(change.actor) ?? 0) + 1} (§14.1)`,
+      );
+    const before = A.getHeads(this.#doc);
+    const applied = applyChecked(this.#doc, change.bytes);
+    if ("error" in applied) {
+      this.#doc = applied.restored;
+      throw new ProfileInvalidError(
+        "INVALID_AUTOMERGE_BYTES",
+        `Automerge rejected the change (§11): ${applied.error.message}`,
       );
     }
+    const next = applied.next;
     this.#doc = next;
     this.#noteSeq(change.actor, change.seq);
     return Object.freeze({

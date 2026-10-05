@@ -118,7 +118,8 @@ describe(`Automerge corpus S02-S12 in every delivery order (${spec.lock.tag})`, 
       // Objects of unknown types are untouched.
       for (const [key, object] of others) expect(after.objects[key]).toEqual(object);
       if (id === "S11") {
-        const task = Object.values(after.objects)[0] as Record<string, Json>;
+        // By key: root() lists objects in canonical order, not creation order.
+        const task = after.objects[(tasks[0] as [string, unknown])[0]] as Record<string, Json>;
         expect(task.x_future_scalar).toBe("future-value");
         expect(task.extensions).toEqual({ "com.example.tracker": { ticket: "ABC-42" } });
       }

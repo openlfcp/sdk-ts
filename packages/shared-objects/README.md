@@ -61,7 +61,10 @@ section and decision ID:
   is `PROFILE_INVALID` / `INVALID_FIELD_TYPE`.
 - **G-SC4** (§58): an intent that writes a value already present deletes it
   first, so it is a real concurrent write: a re-add wins over a concurrent
-  removal, and a restore conflicts with a concurrent delete.
+  removal, and a restore conflicts with a concurrent delete. Because of that delete+put, Automerge's property order differs
+  between the writer and receivers, so `root()` returns keys in canonical
+  (code-unit) order at every level: `JSON.stringify(root())` is comparable
+  across replicas holding the same state.
 - **G-EP7** (§14.1): replica state is a deterministic function of the set of
   accepted changes (`fromChanges`, `rebuildWithout`).
 - **SO-SEC1** (§8, §11): a Data Unit carries only changes of its signer's §8
