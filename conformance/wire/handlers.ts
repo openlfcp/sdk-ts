@@ -31,6 +31,7 @@ import {
   importSigningKey,
   type ResourceDEK,
   snapshotNonce,
+  verifyEd25519,
 } from "@openlfcp/crypto";
 import {
   type AnyMessage,
@@ -1566,6 +1567,22 @@ const snapshotNegative: Handler = (c, context) => {
   return negative(c, r.kind === "valid" ? null : r.wireCode);
 };
 
+/**
+ * LFCP-WIRE-01 §10.5.1, §106: the shared strict-Ed25519 cases through
+ * verifyEd25519 alone, without an LFCP object around the signature.
+ */
+const ed25519Signature: Handler = (c) =>
+  negative(
+    c,
+    verifyEd25519(
+      hexOf(c.inputs, "public_key"),
+      hexOf(c.inputs, "message"),
+      hexOf(c.inputs, "signature"),
+    )
+      ? null
+      : SIGNATURE_FAILURE,
+  );
+
 const principalNegative: Handler = (c) => {
   let actual: string | null = null;
   try {
@@ -1597,4 +1614,5 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   "validation/snapshot": snapshotNegative,
   "validation/principal": principalNegative,
   "validation/wire_message": wireMessageNegative,
+  "validation/ed25519_signature": ed25519Signature,
 };

@@ -10,6 +10,7 @@ import {
   type Json,
   type ReplicaIntent,
   resolveFieldConflict,
+  type ScalarField,
   SharedObjectsReplica,
   type Task,
 } from "@openlfcp/shared-objects";
@@ -81,18 +82,18 @@ function intentOf(branch: Branch, id: ObjectId): ReplicaIntent {
       return { intent: "task.delete", id };
     case "task.restore":
       return { intent: "task.restore", id };
-    case "task.resolve_status_conflict":
-      return resolveFieldConflict(id, "status", str("status"));
+    case "task.resolve_field_conflict": {
+      const [field, ...more] = Object.keys(w);
+      if (field === undefined || more.length > 0)
+        throw new Error(`a field-conflict resolution writes one field: ${JSON.stringify(w)}`);
+      return resolveFieldConflict(id, field as ScalarField, w[field] === null ? null : str(field));
+    }
     case "task.add_tag":
     case "task.remove_tag":
       return { intent: branch.intent, id, tag: String(branch.tag) };
-    case "task.assign":
-    case "task.unassign":
-      return {
-        intent: branch.intent === "task.assign" ? "task.add_assignee" : "task.remove_assignee",
-        id,
-        assignee: String(branch.principal) as never,
-      };
+    case "task.add_assignee":
+    case "task.remove_assignee":
+      return { intent: branch.intent, id, assignee: String(branch.principal) as never };
   }
   if (branch.operation === "create")
     return { intent: "task.create", task: branch.object as unknown as Task };
