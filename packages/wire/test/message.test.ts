@@ -545,7 +545,7 @@ describe("decodeFrame (§31, G-MSG7)", () => {
     });
   });
 
-  it("maps failures to §62 codes without closing", () => {
+  it("maps other failures to §62 codes without closing", () => {
     const unknown = raw([
       [0, 7],
       [1, ID],
@@ -556,12 +556,17 @@ describe("decodeFrame (§31, G-MSG7)", () => {
       errorCode: 1n,
       closesConnection: false,
     });
+    expect(decodeFrame({ kind: "binary", data: Uint8Array.of(0xa1) })).toMatchObject({
+      wireCode: "MALFORMED_MESSAGE",
+      closesConnection: false,
+    });
+  });
+
+  it("a message above the size limit is MESSAGE_TOO_LARGE and closes the connection (§31)", () => {
     expect(decodeFrame({ kind: "binary", data: ping }, { maxMessageBytes: 4 })).toMatchObject({
       wireCode: "MESSAGE_TOO_LARGE",
       errorCode: 19n,
-    });
-    expect(decodeFrame({ kind: "binary", data: Uint8Array.of(0xa1) })).toMatchObject({
-      wireCode: "MALFORMED_MESSAGE",
+      closesConnection: true,
     });
   });
 

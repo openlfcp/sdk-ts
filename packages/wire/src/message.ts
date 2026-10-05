@@ -986,8 +986,11 @@ export type FrameResult =
 /**
  * The receive side of §31 for one WebSocket message, without I/O: a text
  * frame is MALFORMED_MESSAGE and closes the connection (G-MSG7); a binary
- * frame is decoded with decodeMessage. Whether to answer with NACK (a
- * correlated request) or ERROR is the session's decision (LFCP-027).
+ * frame is decoded with decodeMessage. A message above the size limit is
+ * MESSAGE_TOO_LARGE and closes the connection too (§31): with the message
+ * dropped, the stream's framing can no longer be trusted. Whether to
+ * answer another failure with NACK (a correlated request) or ERROR is the
+ * session's decision (LFCP-027).
  */
 export function decodeFrame(frame: Frame, options: DecodeOptions = {}): FrameResult {
   const fail = (wireCode: WireErrorName, reason: string, closesConnection: boolean) =>
@@ -1010,11 +1013,8 @@ export function decodeFrame(frame: Frame, options: DecodeOptions = {}): FrameRes
     if (!(e instanceof LfcpError)) throw e;
     const descriptor =
       e.code === "INVALID_PRINCIPAL_DESCRIPTOR" || e.code === "PRINCIPAL_ID_MISMATCH";
-    return fail(
-      messageErrorWireCode(e, descriptor ? peekType(frame.data) : undefined),
-      e.message,
-      false,
-    );
+    const wireCode = messageErrorWireCode(e, descriptor ? peekType(frame.data) : undefined);
+    return fail(wireCode, e.message, wireCode === "MESSAGE_TOO_LARGE");
   }
 }
 
