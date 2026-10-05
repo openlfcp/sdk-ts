@@ -49,6 +49,12 @@ export {
   verifyGenesis,
 } from "./control.js";
 export {
+  type ControlSyncPlan,
+  type LocalControl,
+  localControlOf,
+  planControlSync,
+} from "./control-sync.js";
+export {
   COSE_ALG_EDDSA,
   objectId,
   parseSignedObject,
