@@ -35,7 +35,16 @@ export type LfcpErrorCode =
   /** A Principal Descriptor has the wrong shape, field set, key lengths or encoding (LFCP-WIRE-01 §7). */
   | "INVALID_PRINCIPAL_DESCRIPTOR"
   /** A Principal Descriptor's ID is not the §7 hash of its public keys. */
-  | "PRINCIPAL_ID_MISMATCH";
+  | "PRINCIPAL_ID_MISMATCH"
+  /**
+   * A signed object is not the canonical LFCP COSE_Sign1 shape (LFCP-WIRE-01 §10):
+   * tagged, wrong arity, extra or missing protected parameters, non-empty
+   * unprotected header, detached payload or a non-64-byte signature. Surfaces
+   * on the wire as MALFORMED_MESSAGE.
+   */
+  | "COSE_MALFORMED"
+  /** The signing key does not belong to the Principal Descriptor it is used with. */
+  | "COSE_SIGNER_MISMATCH";
 
 /** Error with a stable machine-readable `code`; the message is for humans only. */
 export class LfcpError extends Error {
