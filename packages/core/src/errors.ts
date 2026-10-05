@@ -138,7 +138,13 @@ export type LfcpErrorCode =
    * An opened DEK does not match the epoch's DEK commitment, or the
    * plaintext is not 32 bytes (§25.2). Client-local, no wire code (N5).
    */
-  | "DEK_COMMITMENT_MISMATCH";
+  | "DEK_COMMITMENT_MISMATCH"
+  /**
+   * An invitation URI or invitation secret that is not the §18.2 form, or
+   * a secret whose recomputed Invitation Principal is not the subject of
+   * the referenced invitation grant. Client-local, never sent.
+   */
+  | "INVALID_INVITATION";
 
 /** Error with a stable machine-readable `code`; the message is for humans only. */
 export class LfcpError extends Error {

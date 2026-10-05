@@ -155,6 +155,16 @@ export {
   unionHaves,
 } from "./have.js";
 export {
+  assembleInviteUri,
+  decodeInviteSecret,
+  encodeInviteSecret,
+  INVITE_SECRET_VERSION,
+  type Invitation,
+  invitationPrincipal,
+  parseInviteUri,
+  verifyInvitationSecret,
+} from "./invite.js";
+export {
   type KeyPackageCheck,
   type KeyPackageRecipient,
   keyPackageHpkeAad,
