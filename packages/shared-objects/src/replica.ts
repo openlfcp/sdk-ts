@@ -226,8 +226,23 @@ function plain(value: unknown): Json {
   return value as Json;
 }
 
-/** Collaborative Text: in Automerge 3 JS a Text property reads as a plain JS string. */
-const isText = (value: unknown): boolean => typeof value === "string";
+/**
+ * Whether any concurrent value of `map[key]` is collaborative Text (G-SC3).
+ *
+ * Not from the JS values: Automerge 3.5.0 reads a Text property as a plain
+ * JS string, and getConflicts returns a concurrent scalar ImmutableString as
+ * a plain JS string too (verified empirically), so `typeof` cannot tell them
+ * apart once a field is conflicted. The backend's getAll lists every
+ * concurrent value with its datatype: ["str", value, opId] for a scalar
+ * string and ["text", objId] for a Text object, conflicted or not.
+ */
+function hasTextValue(doc: Doc, map: AMap, key: string): boolean {
+  const obj = A.getObjectId(map);
+  if (obj === null) return false;
+  return A.getBackend(doc)
+    .getAll(obj, key, A.getHeads(doc))
+    .some((v) => v[0] === "text");
+}
 
 const byJson = (a: Json, b: Json): number => {
   const [x, y] = [JSON.stringify(a), JSON.stringify(b)];
@@ -255,13 +270,13 @@ const problem = (
 ): ProfileProblem => Object.freeze({ code: "PROFILE_INVALID", diagnostic, pointer, message });
 
 /** G-SC3 problems of one stored object: known string fields with a Text value. */
-function textProblems(object: AMap, key: string): ProfileProblem[] {
+function textProblems(doc: Doc, object: AMap, key: string): ProfileProblem[] {
   const fields =
     object.type !== undefined && plain(object.type) === "task"
       ? [...BASE_STRING_FIELDS, ...TASK_STRING_FIELDS]
       : BASE_STRING_FIELDS;
   return fields
-    .filter((f) => valuesOf(object, f).some(isText))
+    .filter((f) => hasTextValue(doc, object, f))
     .map((f) =>
       // §30 (G-SC3)
       problem(
@@ -610,7 +625,7 @@ export class SharedObjectsReplica {
     const base = validateRoot(this.root());
     const extraRoot: ProfileProblem[] = [];
     // §30 (G-SC3): the root profile value is a scalar string too.
-    if ("profile" in this.#doc && valuesOf(this.#doc, "profile").some(isText))
+    if ("profile" in this.#doc && hasTextValue(this.#doc, this.#doc, "profile"))
       extraRoot.push(
         problem(
           "INVALID_ROOT",
@@ -624,7 +639,7 @@ export class SharedObjectsReplica {
       const stored = objects[id];
       if (!isMap(stored as Json)) continue;
       const more = [
-        ...textProblems(stored as AMap, id),
+        ...textProblems(this.#doc, stored as AMap, id),
         ...conflictValueProblems(stored as AMap, id),
       ].filter(
         (p) => !problems.some((q) => q.pointer === p.pointer && q.diagnostic === p.diagnostic),
@@ -649,7 +664,7 @@ export class SharedObjectsReplica {
     const at = `/objects/${pointerToken(id)}`;
     const all = [
       ...objectProblems(plain(stored), id).filter((p) => p.pointer.startsWith(at)),
-      ...textProblems(stored, id),
+      ...textProblems(this.#doc, stored, id),
       ...conflictValueProblems(stored, id),
     ];
     // §74.1: one diagnostic per field, the first in table order over every value.
@@ -738,7 +753,9 @@ export class SharedObjectsReplica {
       ...(next.type === "task"
         ? objectProblems(next, id)
         : [problem("INVALID_FIELD_TYPE", `/objects/${pointerToken(id)}/type`, "not a Task (§25)")]),
-      ...textProblems(object, id).filter((p) => !touched.has(p.pointer.split("/").pop() as string)),
+      ...textProblems(this.#doc, object, id).filter(
+        (p) => !touched.has(p.pointer.split("/").pop() as string),
+      ),
     ];
     if (problems.length > 0) throw new ProfileError(problems);
     return this.#commit(intent.intent, [id], (d) =>

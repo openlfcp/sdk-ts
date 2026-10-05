@@ -349,6 +349,102 @@ describe("collaborative Text is not a profile string (G-SC3)", () => {
   });
 });
 
+describe("concurrent scalar strings are not Text (G-SC3, LFCP-070)", () => {
+  /** Alice and Bob each change `edit` concurrently; Alice receives Bob's change. */
+  function concurrent(edit: (r: Replica, side: "a" | "b") => void): Replica {
+    const { replica: a } = aliceWithTask();
+    const b = fork(a, BOB);
+    edit(a, "a");
+    edit(b, "b");
+    sync(a, b);
+    return a;
+  }
+  const raw = (
+    r: Replica,
+    actor: string,
+    fn: (o: Record<string, unknown>, d: Record<string, unknown>) => void,
+  ) =>
+    A.change(A.load<Record<string, unknown>>(r.save(), { actor }), { time: 0 }, (d) =>
+      fn((d.objects as Record<string, Record<string, unknown>>)[ID] as Record<string, unknown>, d),
+    );
+
+  it("a scalar conflict on title, status and due validates and accepts later writes", () => {
+    const a = concurrent((r, side) => {
+      r.apply(setTitle(taskOf(r), `from ${side}`).intent);
+      r.apply(setStatus(taskOf(r), side === "a" ? "in_progress" : "done").intent);
+      r.apply(setDue(taskOf(r), side === "a" ? "2026-11-01" : "2026-11-02").intent);
+    });
+    for (const f of ["title", "status", "due"] as const)
+      expect(a.task(ID)?.fields[f].conflicted).toBe(true);
+    expect(fieldValues(a, "title")).toEqual(expect.arrayContaining(["from a", "from b"]));
+    expect(a.validate().objects.get(ID) ?? []).toEqual([]);
+    expect(a.validate().valid).toBe(true);
+    a.apply(addTag(taskOf(a), "x").intent);
+    a.apply(setStatus(taskOf(a), "done").intent);
+    expect(a.validate().valid).toBe(true);
+  });
+
+  it("a conflict of two Text values is still INVALID_FIELD_TYPE", () => {
+    const { replica } = aliceWithTask();
+    const one = raw(replica, "ee".repeat(32), (o) => {
+      o.title = "text one";
+    });
+    const two = raw(replica, "ff".repeat(32), (o) => {
+      o.title = "text two";
+    });
+    const r = SharedObjectsReplica.fromSave(A.save(A.merge(one, two)), opts());
+    expect(r.task(ID)?.fields.title.conflicted).toBe(true);
+    expect(r.validate().problems.map((p) => `${p.diagnostic} ${p.pointer}`)).toEqual([
+      `INVALID_FIELD_TYPE /objects/${ID}/title`,
+    ]);
+  });
+
+  it("a conflict of a Text and a scalar string is invalid (every value must be valid)", () => {
+    const { replica } = aliceWithTask();
+    const scalar = raw(replica, "ee".repeat(32), (o) => {
+      o.title = new A.ImmutableString("scalar");
+    });
+    const text = raw(replica, "ff".repeat(32), (o) => {
+      o.title = "text";
+    });
+    for (const doc of [A.merge(scalar, text), A.merge(text, scalar)]) {
+      const r = SharedObjectsReplica.fromSave(A.save(doc), opts());
+      expect(r.task(ID)?.fields.title.conflicted).toBe(true);
+      expect(r.validate().problems.map((p) => `${p.diagnostic} ${p.pointer}`)).toEqual([
+        `INVALID_FIELD_TYPE /objects/${ID}/title`,
+      ]);
+      expect(() => r.apply({ intent: "task.set_status", id: ID, status: "done" })).toThrow(
+        ProfileError,
+      );
+    }
+  });
+
+  it("the root profile key: a scalar conflict is valid, Text in any value is INVALID_ROOT", () => {
+    const { replica } = aliceWithTask();
+    const set = (actor: string, value: unknown) =>
+      raw(replica, actor, (_o, d) => {
+        // Automerge skips writing an unchanged value: delete first, so each side puts.
+        delete d.profile;
+        d.profile = value;
+      });
+    const scalarA = set("ee".repeat(32), new A.ImmutableString(PROFILE_ID));
+    const scalarB = set("ff".repeat(32), new A.ImmutableString(PROFILE_ID));
+    const both = A.merge(A.clone(scalarA), scalarB);
+    expect(
+      A.getBackend(both)
+        .getAll("_root", "profile")
+        .map((v) => v[0]),
+    ).toEqual(["str", "str"]);
+    const clean = SharedObjectsReplica.fromSave(A.save(both), opts());
+    expect(clean.validate().valid).toBe(true);
+    const textB = set("ff".repeat(32), PROFILE_ID);
+    const mixed = SharedObjectsReplica.fromSave(A.save(A.merge(A.clone(scalarA), textB)), opts());
+    expect(mixed.validate().problems.map((p) => `${p.diagnostic} ${p.pointer}`)).toContain(
+      "INVALID_ROOT /profile",
+    );
+  });
+});
+
 describe("one diagnostic per field, in §74.1 table order (SOG-2)", () => {
   const write = (save: Uint8Array, actor: string, status: unknown) =>
     A.change(A.load<Record<string, unknown>>(save, { actor }), { time: 0 }, (d) => {
