@@ -3,12 +3,14 @@
 // the capability engine enforced. The expectations follow from the spec
 // text, not from the vectors:
 //
-// - §17.1: the owner holds every standard ability implicitly;
+// - §17.1: the owner holds every standard ability implicitly, except 9
+//   (owner/transfer-offer), which is reserved and confers nothing (§23.1);
 // - C1 (§17.2): OWNER grants BOB data/read, data/write, snapshot/publish;
 // - C2 (§17.2, §18): OWNER grants INVITE data/read, data/write,
 //   invite/claim with claim_limit 1;
 // - C3 (§18.1): INVITE's claim gives CAROL data/read, data/write and
-//   consumes the one claim;
+//   consumes the one claim, so C2 confers no invite/claim any more; its
+//   other abilities stay;
 // - C4 (§23.3): ownership moves OWNER -> BOB. OWNER holds no grant, so it
 //   keeps no authority; BOB holds everything as the owner.
 
@@ -30,7 +32,7 @@ const hex = (id: string, field: string): string => {
 const PRINCIPALS = ["OWNER", "BOB", "INVITE", "CAROL"] as const;
 const principal = (name: string) =>
   principalId(fromHex(hex(`principal_${name.toLowerCase()}`, "principal_id")));
-const ALL = [...ABILITY_NAMES.values()];
+const ALL = [...ABILITY_NAMES.values()].filter((a) => a !== "owner/transfer-offer");
 const names = (codes: readonly bigint[]) => codes.map((c) => ABILITY_NAMES.get(c));
 
 const AFTER_TRANSFER = {
@@ -38,7 +40,7 @@ const AFTER_TRANSFER = {
   abilities: {
     OWNER: [],
     BOB: ALL,
-    INVITE: ["data/read", "data/write", "invite/claim"],
+    INVITE: ["data/read", "data/write"],
     CAROL: ["data/read", "data/write"],
   },
 };
@@ -51,7 +53,7 @@ const MATRIX: Record<
     abilities: {
       OWNER: ALL,
       BOB: ["data/read", "data/write", "snapshot/publish"],
-      INVITE: ["data/read", "data/write", "invite/claim"],
+      INVITE: ["data/read", "data/write"],
       CAROL: ["data/read", "data/write"],
     },
   },

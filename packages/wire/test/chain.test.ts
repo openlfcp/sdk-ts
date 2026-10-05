@@ -347,6 +347,12 @@ describe("validateControlChain", () => {
     },
   );
 
+  it("refuses an extension record from a non-owner (§14, DV2)", () => {
+    const byCarla = sign(after(C5, 6n), extension(40n), CARLA);
+    const r = expectInvalid(validateControlChain(bytesOf([...CHAIN, byCarla])));
+    expect([r.problem, r.wireCode]).toEqual(["UNAUTHORIZED", "AUTHORIZATION_FAILED"]);
+  });
+
   it("keeps owner extensions in the chain, unapplied", () => {
     const ext = sign(after(C5, 6n), extension(40n), ALICE);
     const r = expectLinear(validateControlChain(bytesOf([...CHAIN, ext])));

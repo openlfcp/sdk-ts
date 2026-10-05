@@ -136,9 +136,15 @@ describe("ownership transfer (§23.3)", () => {
     const r = validateControlChain(transfer());
     if (r.kind !== "linear") throw new Error(refusal(r));
     expect(toHex(r.state.owner.principalId)).toBe(toHex(DORA.descriptor.principalId));
-    expect(abilitiesOf(r.state, DORA.descriptor.principalId)).toEqual([...ABILITY_NAMES.keys()]);
-    // The previous owner keeps no implicit authority (it holds no grant).
+    // Every standard ability except 9, which confers nothing (§17.1, §23.1).
+    expect(abilitiesOf(r.state, DORA.descriptor.principalId)).toEqual(
+      [...ABILITY_NAMES.keys()].filter((a) => a !== 9n),
+    );
+    // §23.3: "The former owner keeps no implicit authority; the Capability
+    // Grants it issued stay active."
     expect(abilitiesOf(r.state, ALICE.descriptor.principalId)).toEqual([]);
+    expect(abilitiesOf(r.state, BRUNO.descriptor.principalId)).toEqual([1n, 2n]);
+    expect(abilitiesOf(r.state, CARLA.descriptor.principalId)).toEqual([1n]);
     expect(r.unappliedRecords).toEqual([]);
   });
 
@@ -165,16 +171,26 @@ describe("ownership transfer (§23.3)", () => {
       { offerBy: BRUNO },
       /not signed by the current owner .*rule 1/,
     ],
+    [
+      "an accept signed by someone else",
+      { acceptBy: CARLA },
+      /accept is not signed by the new owner .*rule 4/,
+    ],
+  ] as [string, TransferOptions, RegExp][])(
+    "refuses %s (INVALID_SIGNATURE, §23.3)",
+    (_n, options, why) => {
+      const r = validateControlChain(transfer(options));
+      expect(refusal(r)).toMatch(/^SIGNATURE\/INVALID_SIGNATURE: /);
+      expect(refusal(r)).toMatch(why);
+    },
+  );
+
+  it.each([
     ["a stale offer head", { head: seq32(3) }, /current Control Head .*rule 2/],
     [
       "an accept naming someone else",
       { acceptNames: CARLA },
       /not by the Principal the offer names .*rule 3/,
-    ],
-    [
-      "an accept signed by someone else",
-      { acceptBy: CARLA },
-      /accept is not signed by the new owner .*rule 4/,
     ],
     [
       "a commit issued by someone other than the acceptor",
@@ -185,7 +201,7 @@ describe("ownership transfer (§23.3)", () => {
     ["an accept for another offer", { acceptOfferId: seq32(9) }, /does not name this offer/],
     ["an offer for another Resource", { offerResource: OTHER_R }, /another Resource/],
   ] as [string, TransferOptions, RegExp][])(
-    "refuses %s (AUTHORIZATION_FAILED)",
+    "refuses %s (AUTHORIZATION_FAILED, §23.3)",
     (_n, options, why) => {
       const r = validateControlChain(transfer(options));
       expect(refusal(r)).toMatch(/^UNAUTHORIZED\/AUTHORIZATION_FAILED: /);

@@ -39,10 +39,12 @@ import type { PrincipalDescriptor } from "./principal.js";
  *
  * A fork (two validly signed records naming the same previous record) is a
  * conflict, never resolved by time, ID order, arrival order or server
- * preference. Records MVP 0.1 does not implement (mvpSupported = false:
- * deferred core types and extensions) stay in the chain, since the links
- * run through them, but are not applied to the derived state; they are
- * listed in `unappliedRecords` for LFCP-021.
+ * preference (§13.2). A chain containing a Coordinator Recovery (7) or
+ * Resource Tombstone (8) record is refused with PROTOCOL_UNSUPPORTED
+ * (MVP-0.1-PROTOCOL-SCOPE §4, DV1). Extension records (32 and above) need
+ * owner authority (§14) and stay in the chain, since the links run through
+ * them, but are not applied to the derived state; they are listed in
+ * `unappliedRecords`.
  */
 
 /** The initial and current route (§15, §20). */
@@ -564,8 +566,18 @@ export function validateControlChain(
       }
       const decision = authorize(k.record, state);
       if (decision === false || (typeof decision === "object" && !decision.allowed)) {
-        const why = typeof decision === "object" && !decision.allowed ? decision.reason : "refused";
-        problems.push(problem("UNAUTHORIZED", at(k), `the record is not authorized: ${why}`));
+        const refusal = typeof decision === "object" && !decision.allowed ? decision : undefined;
+        // §23.3: a transfer offer or acceptance whose signature does not verify.
+        if (refusal?.code === "INVALID_SIGNATURE")
+          problems.push(problem("SIGNATURE", at(k), refusal.reason));
+        else
+          problems.push(
+            problem(
+              "UNAUTHORIZED",
+              at(k),
+              `the record is not authorized: ${refusal?.reason ?? "refused"}`,
+            ),
+          );
         continue;
       }
       valid.push(k);

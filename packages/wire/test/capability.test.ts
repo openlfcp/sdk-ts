@@ -40,6 +40,7 @@ const {
   KEY_DISTRIBUTE,
   KEY_ROTATE,
   ROUTE_UPDATE,
+  OWNER_TRANSFER_OFFER,
   INVITE_CLAIM,
 } = ABILITY;
 
@@ -135,8 +136,19 @@ describe("owner implicit authority (§17.1)", () => {
       KEY_ROTATE,
     ])
       expect(hasAbility(state, id(OWNER), a)).toBe(true);
-    expect(abilitiesOf(state, id(OWNER))).toEqual([...ABILITY_NAMES.keys()]);
+    expect(abilitiesOf(state, id(OWNER))).toEqual(
+      [...ABILITY_NAMES.keys()].filter((a) => a !== OWNER_TRANSFER_OFFER),
+    );
     expect(state.grants.size).toBe(0);
+  });
+
+  it("ability 9 (owner/transfer-offer) is reserved and confers nothing, even when granted (§17.1, §23.1)", () => {
+    const c = new Chain();
+    c.add(grant(BRUNO, [DATA_READ, OWNER_TRANSFER_OFFER]), OWNER);
+    const s = c.state();
+    expect(hasAbility(s, id(OWNER), OWNER_TRANSFER_OFFER)).toBe(false);
+    expect(hasAbility(s, id(BRUNO), OWNER_TRANSFER_OFFER)).toBe(false);
+    expect(abilitiesOf(s, id(BRUNO))).toEqual([DATA_READ]);
   });
 
   it("holds no unknown ability", () => {
@@ -187,14 +199,14 @@ describe("grants (§17.2)", () => {
     expect(outcome(t.c)).toMatch(/UNAUTHORIZED|UNRESOLVED_ISSUER/);
   });
 
-  it("requires capability/grant from a delegating non-owner (inferred rule)", () => {
+  it("requires capability/grant from a delegating non-owner (§17.2)", () => {
     const c = new Chain();
     const parent = c.add(grant(BRUNO, [DATA_READ], { delegable: [DATA_READ] }), OWNER);
     c.add(grant(CARLA, [DATA_READ], { parentGrantId: parent }), BRUNO);
     expect(outcome(c)).toMatch(/does not hold capability\/grant/);
   });
 
-  it("keeps unknown ability codes but confers nothing for them (provisional A1)", () => {
+  it("keeps unknown ability codes but confers nothing for them (§17.1)", () => {
     const c = new Chain();
     c.add(grant(BRUNO, [99n]), OWNER);
     const s = c.state();
@@ -204,7 +216,7 @@ describe("grants (§17.2)", () => {
 });
 
 describe("revocation (§17.3)", () => {
-  it("9. a revoked parent breaks the authority delegated from it (inferred rule)", () => {
+  it("9. a revoked parent deactivates every grant delegated from it (§17.2)", () => {
     const c = new Chain();
     const parent = c.add(
       grant(BRUNO, [DATA_READ, CAPABILITY_GRANT], { delegable: [DATA_READ] }),
@@ -243,7 +255,7 @@ describe("revocation (§17.3)", () => {
     expect(outcome(c)).toMatch(/does not exist/);
   });
 
-  it("lets a revoker revoke a grant it issued (provisional coverage rule)", () => {
+  it("lets a revoker revoke a grant it issued; an already revoked grant is AUTHORIZATION_FAILED (§17.3)", () => {
     const c = new Chain();
     const parent = c.add(
       grant(BRUNO, [DATA_READ, CAPABILITY_GRANT, CAPABILITY_REVOKE], { delegable: [DATA_READ] }),
@@ -253,7 +265,34 @@ describe("revocation (§17.3)", () => {
     c.add(revoke(child), BRUNO);
     expect(hasAbility(c.state(), id(CARLA), DATA_READ)).toBe(false);
     c.add(revoke(child), OWNER);
-    expect(outcome(c)).toMatch(/already revoked/);
+    expect(outcome(c)).toMatch(/^UNAUTHORIZED\/AUTHORIZATION_FAILED: .*already revoked/);
+  });
+
+  it("covers grants delegated from one the revoker issued, not grants it received (§17.3)", () => {
+    // OWNER -> BRUNO (P) -> CARLA (C, by BRUNO) -> DORA (D, by CARLA).
+    const build = () => {
+      const c = new Chain();
+      const p = c.add(
+        grant(BRUNO, [DATA_READ, CAPABILITY_GRANT, CAPABILITY_REVOKE], {
+          delegable: [DATA_READ, CAPABILITY_GRANT],
+        }),
+        OWNER,
+      );
+      const ch = c.add(
+        grant(CARLA, [DATA_READ, CAPABILITY_GRANT], { parentGrantId: p, delegable: [DATA_READ] }),
+        BRUNO,
+      );
+      const d = c.add(grant(DORA, [DATA_READ], { parentGrantId: ch }), CARLA);
+      return { c, p, ch, d };
+    };
+    let t = build();
+    t.c.add(revoke(t.d), BRUNO); // D descends from C, which BRUNO issued
+    expect(outcome(t.c)).toBe("allowed");
+    expect(hasAbility(t.c.state(), id(DORA), DATA_READ)).toBe(false);
+    expect(hasAbility(t.c.state(), id(CARLA), DATA_READ)).toBe(true);
+    t = build();
+    t.c.add(revoke(t.p), BRUNO); // P is the grant BRUNO received
+    expect(outcome(t.c)).toMatch(/does not cover the grant/);
   });
 });
 
@@ -322,9 +361,28 @@ describe("invitations and claims (§18, §18.1)", () => {
     t.c.add(claim(t.inv, DORA, [DATA_READ]), INVITE);
     t.c.add(claim(t.inv, CARLA, [DATA_READ]), INVITE);
     expect(t.c.state().grants.get(toHex(t.inv))?.claimsUsed).toBe(2n);
-    t = invited(undefined); // no claim_limit: nothing to claim
+    t = invited(undefined); // §18: no claim_limit, not claimable
     t.c.add(claim(t.inv, DORA, [DATA_READ]), INVITE);
-    expect(outcome(t.c)).toMatch(/no claims left/);
+    expect(outcome(t.c)).toMatch(/not claimable/);
+  });
+
+  it("an invitation whose claims are used up confers no invite/claim; its other abilities stay (§18.1, §25.2)", () => {
+    const { c, inv } = invited(1n);
+    const before = c.state();
+    expect(hasAbility(before, id(INVITE), INVITE_CLAIM)).toBe(true);
+    c.add(claim(inv, DORA, [DATA_READ]), INVITE);
+    const s = c.state();
+    expect(abilitiesOf(s, id(INVITE))).toEqual([DATA_READ, DATA_WRITE]);
+    // An invite-only grant (no data/read) no longer qualifies its subject for Key Packages.
+    const k = new Chain();
+    const only = k.add(grant(INVITE, [DATA_WRITE, INVITE_CLAIM], { claimLimit: 1n }), OWNER);
+    expect(canDistributeKey(k.state(), id(OWNER), id(INVITE), dataEpoch(0n))).toEqual({
+      allowed: true,
+    });
+    k.add(claim(only, DORA, [DATA_WRITE]), INVITE);
+    expect(canDistributeKey(k.state(), id(OWNER), id(INVITE), dataEpoch(0n))).toMatchObject({
+      allowed: false,
+    });
   });
 
   it("rejects a claim against a revoked invitation, and keeps an earlier claim when it is revoked", () => {
@@ -335,7 +393,7 @@ describe("invitations and claims (§18, §18.1)", () => {
     t = invited(1n);
     t.c.add(claim(t.inv, DORA, [DATA_READ]), INVITE);
     t.c.add(revoke(t.inv), OWNER);
-    expect(hasAbility(t.c.state(), id(DORA), DATA_READ)).toBe(true); // inferred: claim grants have no parent
+    expect(hasAbility(t.c.state(), id(DORA), DATA_READ)).toBe(true); // §18.1: a claim grant has no parent
   });
 });
 
