@@ -13,9 +13,15 @@
 //   automerge        an @automerge/* dependency or import outside
 //                    @openlfcp/shared-objects (LFCP-031: only the Shared
 //                    Objects Profile binds to the CRDT engine)
+//   node-only        a portable package that depends on or imports a
+//                    Node-only package (LFCP-035)
+//   unclassified     a package in ALLOWED that is neither PORTABLE nor
+//                    NODE_ONLY
 //
 // The portable packages must run in browsers and editors; Node-only code
-// belongs in future *-node packages, which still have to be listed in ALLOWED.
+// belongs in *-node packages (NODE_ONLY), where node:* imports and Node
+// globals are allowed. They are listed in ALLOWED like every package, and
+// no portable package may depend on them.
 //
 //   node scripts/check-boundaries.mjs              check this repository
 //   node scripts/check-boundaries.mjs --root DIR   check another workspace
@@ -37,12 +43,15 @@ export const ALLOWED = {
   storage: ["core"],
   "shared-objects": ["core", "crypto"],
   client: ["core", "wire", "storage", "crypto"],
+  "storage-node": ["core", "storage"],
 };
 // The only package allowed to use the @noble cryptography libraries and HPKE.
 const NOBLE_OWNER = "crypto";
 // The only package allowed to use Automerge.
 const AUTOMERGE_OWNER = "shared-objects";
 const PORTABLE = new Set(["core", "crypto", "wire", "storage", "shared-objects", "client"]);
+// Node-only packages (LFCP-035): headless Node, CLI, examples and tests.
+const NODE_ONLY = new Set(["storage-node"]);
 const NODE_GLOBALS = new Set([
   "process",
   "Buffer",
@@ -159,6 +168,10 @@ export function check(root) {
       );
     const allowed = new Set([name, ...(ALLOWED[name] ?? [])]);
     const portable = PORTABLE.has(name);
+    if (known && !portable && !NODE_ONLY.has(name))
+      problems.push(
+        `${rel(pkgPath)}:1 unclassified: @openlfcp/${name} is neither portable nor Node-only`,
+      );
 
     for (const dep of depNames(pkg)) {
       if (isObsidian(dep)) problems.push(`${rel(pkgPath)}:1 obsidian: dependency ${dep}`);
@@ -178,6 +191,10 @@ export function check(root) {
       const target = scopeName(dep);
       if (known && target && !allowed.has(target))
         problems.push(`${rel(pkgPath)}:1 graph: @openlfcp/${name} may not depend on ${dep}`);
+      if (portable && target && NODE_ONLY.has(target))
+        problems.push(
+          `${rel(pkgPath)}:1 node-only: portable @openlfcp/${name} may not depend on ${dep}`,
+        );
     }
 
     for (const file of walk(join(packagesDir, dir))) {
@@ -197,6 +214,8 @@ export function check(root) {
         const target = scopeName(spec);
         if (known && target && !allowed.has(target))
           problems.push(`${where} graph: @openlfcp/${name} may not import ${spec}`);
+        if (portable && target && NODE_ONLY.has(target))
+          problems.push(`${where} node-only: portable @openlfcp/${name} may not import ${spec}`);
         if (portable && isNodeBuiltin(spec))
           problems.push(`${where} node-import: ${spec} in portable @openlfcp/${name}`);
       }

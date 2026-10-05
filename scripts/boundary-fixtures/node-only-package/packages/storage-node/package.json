@@ -1,0 +1,8 @@
+{
+  "name": "@openlfcp/storage-node",
+  "version": "0.0.0",
+  "dependencies": {
+    "@openlfcp/core": "workspace:^",
+    "@openlfcp/storage": "workspace:^"
+  }
+}

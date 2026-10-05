@@ -1,0 +1,4 @@
+packages/wire/package.json:1 graph: @openlfcp/wire may not depend on @openlfcp/storage-node
+packages/wire/package.json:1 node-only: portable @openlfcp/wire may not depend on @openlfcp/storage-node
+packages/wire/src/index.ts:1 graph: @openlfcp/wire may not import @openlfcp/storage-node
+packages/wire/src/index.ts:1 node-only: portable @openlfcp/wire may not import @openlfcp/storage-node
