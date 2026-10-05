@@ -1,5 +1,6 @@
 import {
   type ActorSequence,
+  actorSequence,
   bytesEqual,
   type ControlRecordId,
   type DataEpoch,
@@ -248,9 +249,32 @@ export function dekResolver(
  * crash before the commit leaves only an abandoned sequence, never a
  * reused one; a retry sends the queued bytes, never a re-created unit.
  */
+/**
+ * §26.2 (G-DP1-GAP): the unit a writer's next unit names as `previous`:
+ * its last published unit, the highest-sequence unit of `actor` in this
+ * storage (its queued units are stored when queued, whatever happens to
+ * them later), or null before its first. After an abandoned sequence N the
+ * next unit therefore names N - 1. Stored, so it survives a restart.
+ */
+export async function lastPublishedUnit(
+  storage: Pick<LfcpStorage, "dataUnits">,
+  resource: ResourceId,
+  actor: PrincipalId,
+): Promise<DataUnitId | null> {
+  const mine = await storage.dataUnits.range(
+    resource,
+    actor,
+    actorSequence(1n),
+    actorSequence(2n ** 64n - 1n),
+  );
+  return mine.at(-1)?.unitId ?? null;
+}
+
 export async function createQueuedDataUnit<T>(
-  storage: Pick<LfcpStorage, "actorSequences" | "commit">,
-  options: Omit<CreateDataUnitOptions<T>, "sequences"> & {
+  storage: Pick<LfcpStorage, "actorSequences" | "commit" | "dataUnits">,
+  options: Omit<CreateDataUnitOptions<T>, "sequences" | "previousUnitId"> & {
+    /** The previous unit (§26.2); default the writer's last published unit (lastPublishedUnit). */
+    readonly previousUnitId?: DataUnitId | null;
     /**
      * Called once the unit is sealed, before the commit: e.g. the Data
      * Profile records which change the unit carries (recordLocal), so that
@@ -260,8 +284,20 @@ export async function createQueuedDataUnit<T>(
   },
   also: readonly StorageWrite[] | ((created: CreatedDataUnit) => readonly StorageWrite[]) = [],
 ): Promise<CreatedDataUnit> {
-  const { onCreated, ...create } = options;
-  const created = await createDataUnit({ ...create, sequences: storage.actorSequences });
+  const { onCreated, previousUnitId, ...create } = options;
+  const previous =
+    previousUnitId !== undefined
+      ? previousUnitId
+      : await lastPublishedUnit(
+          storage,
+          options.view.state.resourceId,
+          options.actor.descriptor.principalId,
+        );
+  const created = await createDataUnit({
+    ...create,
+    previousUnitId: previous,
+    sequences: storage.actorSequences,
+  });
   onCreated?.(created, options.value);
   const extra = typeof also === "function" ? also(created) : also;
   const row = dataUnitRow(created.bytes);

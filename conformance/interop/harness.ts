@@ -20,7 +20,6 @@ import {
   type WebSocketFactory,
 } from "@openlfcp/client";
 import {
-  actorSequence,
   type ControlRecordId,
   type DataUnitId,
   dataEpoch,
@@ -207,13 +206,6 @@ export class Side {
       this.resource,
     )(chain.state.epoch.epoch);
     if (dek === undefined) throw new Error("no DEK");
-    const mine = await this.storage.dataUnits.range(
-      this.resource,
-      this.me,
-      actorSequence(1n),
-      actorSequence(2n ** 64n - 1n),
-    );
-    const previous = mine.filter((u) => u.accepted).at(-1)?.unitId ?? null;
     const profile = this.profile;
     const checkpointer = this.checkpointer;
     const u = await createQueuedDataUnit(
@@ -224,7 +216,7 @@ export class Side {
         actor: this.who.signer,
         dek,
         profile: profile.codecFor({ resourceId: this.resource, actor: this.me }),
-        previousUnitId: previous as DataUnitId | null,
+        // previous: the SDK's default, the last published unit (§26.2, G-DP1-GAP).
         value: checkChange(local.change),
         onCreated: (created, value) => profile.recordLocal(created.unitId, value),
       },
