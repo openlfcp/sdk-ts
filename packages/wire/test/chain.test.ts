@@ -296,10 +296,14 @@ describe("validateControlChain", () => {
     const r = expectLinear(validateControlChain(bytesOf([...CHAIN, ext])));
     expect(r.unappliedRecords.map(toHex)).toEqual([toHex(C4.id), toHex(ext.id)]);
     expect(toHex(r.state.head)).toBe(toHex(ext.id));
-    // The tombstone and the extension move the head and change nothing else:
-    // the known Principals are still the owner and the two applied grants.
-    expect(r.state.principals.size).toBe(3);
-    expect(r.state.route.coordinatorUrl).toBe("wss://sync.example.test");
+    // Unapplied records move the head and change nothing else.
+    const before = r.stateAt(C5.id);
+    if (before === undefined) throw new Error("no state at C5");
+    expect({ ...r.state, head: before.head, seq: before.seq }).toEqual(before);
+    const beforeTombstone = r.stateAt(C3.id);
+    const afterTombstone = r.stateAt(C4.id);
+    expect(afterTombstone?.grants).toBe(beforeTombstone?.grants);
+    expect(afterTombstone?.route).toBe(beforeTombstone?.route);
   });
 
   it("reports an issuer no record describes, unless a resolver knows it", () => {

@@ -10,6 +10,7 @@ import {
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
+import { type Authorization, applyCapabilities, type Grant } from "./capability.js";
 import {
   type ControlRecord,
   controlRecordSigner,
@@ -54,10 +55,9 @@ export interface ControlEpoch {
  * Control state type: LFCP-021 (capabilities) and LFCP-023 (epochs and
  * cutoff) extend it here and in `applyRecord`, never with a parallel type.
  *
- * LFCP-020 fills the chain position and what Genesis establishes. Route
- * updates, Key Epoch rotation and capabilities need authority checks, so
- * applying them is LFCP-021/LFCP-023 work; until then `route` and `epoch`
- * keep their Genesis values.
+ * LFCP-020 fills the chain position and what Genesis establishes;
+ * LFCP-021 adds the grants and applies route updates; Key Epoch rotation
+ * (LFCP-023) still leaves `epoch` at its Genesis value.
  */
 export interface ControlState {
   readonly resourceId: ResourceId;
@@ -69,7 +69,11 @@ export interface ControlState {
   /** The owner (§15; ownership transfer is deferred from MVP 0.1). */
   readonly owner: PrincipalDescriptor;
   readonly route: ControlRoute;
+  /** §20 route version of `route`; Genesis counts as 0 (inferred). */
+  readonly routeVersion: bigint;
   readonly epoch: ControlEpoch;
+  /** Grants created through this head (§17.2, §18.1), by grant ID hex; see capability.ts. */
+  readonly grants: ReadonlyMap<string, Grant>;
   /**
    * Principal Descriptors carried by applied records (Genesis owner, grant
    * subjects, claimants), by Principal ID hex. Descriptors are
@@ -100,6 +104,12 @@ export type ChainResult =
       readonly records: readonly ControlRecord[];
       /** Records kept in the chain but not applied (mvpSupported = false), in chain order. */
       readonly unappliedRecords: readonly ControlRecordId[];
+      /**
+       * The validated state at any head of this chain (from the start, or
+       * Genesis), for evaluating authority at an older Control Head. States
+       * are kept by immutable head ID; undefined for a head not on the chain.
+       */
+      readonly stateAt: (head: Uint8Array) => ControlState | undefined;
     }
   | {
       readonly kind: "conflict";
@@ -132,11 +142,11 @@ export interface ChainOptions {
    */
   readonly resolvePrincipal?: (id: PrincipalId) => PrincipalDescriptor | undefined;
   /**
-   * Authorization hook for LFCP-021, called for every non-Genesis record
-   * with the state before it. Defaults to allow: LFCP-020 does not evaluate
-   * authority.
+   * Authorization, called for every non-Genesis record with the state
+   * before it (the previous head). authorizeControlRecord is the LFCP-021
+   * capability engine. A refusal makes the chain invalid (UNAUTHORIZED).
    */
-  readonly authorize?: (record: ControlRecord, state: ControlState) => boolean;
+  readonly authorize?: (record: ControlRecord, state: ControlState) => boolean | Authorization;
 }
 
 const WIRE: Readonly<Record<ChainProblem, string>> = {
@@ -248,16 +258,18 @@ function genesisState(record: ControlRecord): ControlState {
     dataProfile: body.dataProfile,
     owner: body.owner,
     route: Object.freeze({ endpoints: body.endpoints, coordinatorUrl: body.coordinatorUrl }),
+    routeVersion: 0n,
     epoch: Object.freeze({ epoch: dataEpoch(0n), dekCommitment: body.dekCommitment }),
+    grants: new Map(),
     principals: new Map([[toHex(body.owner.principalId), body.owner]]),
   });
 }
 
 /**
- * The state after a validated record. Applied records (mvpSupported) may
- * change derived state; LFCP-020 records descriptors only, and LFCP-021 and
- * LFCP-023 add their transitions here. Unapplied records move the head and
- * nothing else.
+ * The state after a validated record. Applied records (mvpSupported)
+ * change derived state: descriptors (LFCP-020), grants, revocations, claims
+ * and routes (LFCP-021); LFCP-023 adds epochs here. Unapplied records move
+ * the head and nothing else.
  */
 function applyRecord(state: ControlState, record: ControlRecord): ControlState {
   const next = { head: controlRecordId(record.signed.id), seq: record.payload.controlSeq };
@@ -268,7 +280,20 @@ function applyRecord(state: ControlState, record: ControlRecord): ControlState {
     principals.set(toHex(body.subject.principalId), body.subject);
   if (body.type === "CAPABILITY_CLAIM")
     principals.set(toHex(body.claimant.principalId), body.claimant);
-  return Object.freeze({ ...state, ...next, principals });
+  const route =
+    body.type === "ROUTE_UPDATE"
+      ? {
+          route: Object.freeze({ endpoints: body.endpoints, coordinatorUrl: body.coordinatorUrl }),
+          routeVersion: body.routeVersion,
+        }
+      : {};
+  return Object.freeze({
+    ...state,
+    ...next,
+    ...route,
+    principals,
+    grants: applyCapabilities(state.grants, record),
+  });
 }
 
 /**
@@ -388,6 +413,7 @@ export function validateControlChain(
   }
 
   const unapplied: ControlRecordId[] = [];
+  const states = new Map<string, ControlState>([[toHex(state.head), state]]);
   const visited = new Set<string>();
   const authorize = options.authorize ?? (() => true);
   for (;;) {
@@ -417,10 +443,10 @@ export function validateControlChain(
         );
         continue;
       }
-      if (!authorize(k.record, state)) {
-        problems.push(
-          problem("UNAUTHORIZED", at(k), "the authorization policy refuses the record"),
-        );
+      const decision = authorize(k.record, state);
+      if (decision === false || (typeof decision === "object" && !decision.allowed)) {
+        const why = typeof decision === "object" && !decision.allowed ? decision.reason : "refused";
+        problems.push(problem("UNAUTHORIZED", at(k), `the record is not authorized: ${why}`));
         continue;
       }
       valid.push(k);
@@ -438,6 +464,7 @@ export function validateControlChain(
     records.push(k.record);
     if (!k.record.mvpSupported) unapplied.push(rid(k.record));
     state = applyRecord(state, k.record);
+    states.set(toHex(state.head), state);
   }
 
   const unlinked = rest.filter((e) => !visited.has(e.key));
@@ -456,5 +483,6 @@ export function validateControlChain(
     state,
     records: Object.freeze(records),
     unappliedRecords: Object.freeze(unapplied),
+    stateAt: (head: Uint8Array) => states.get(toHex(head)),
   });
 }

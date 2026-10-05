@@ -2,6 +2,19 @@
 export const PACKAGE = "@openlfcp/wire";
 
 export {
+  ABILITY,
+  ABILITY_NAMES,
+  type Authorization,
+  abilitiesOf,
+  authorizeControlRecord,
+  type CapabilityState,
+  canDistributeKey,
+  type Grant,
+  hasAbility,
+  isGrantActive,
+  isStandardAbility,
+} from "./capability.js";
+export {
   type ChainOptions,
   type ChainProblem,
   type ChainResult,
