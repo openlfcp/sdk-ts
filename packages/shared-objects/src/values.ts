@@ -8,6 +8,7 @@ import {
   toBase64url,
 } from "@openlfcp/core";
 import { sha256 } from "@openlfcp/crypto";
+import { ProfileInvalidError } from "./profile-invalid.js";
 
 /**
  * Value-level rules of SHARED-OBJECTS-PROFILE-01: Principal references,
@@ -141,11 +142,12 @@ export function frameProfilePayload(bytes: Uint8Array): Uint8Array {
  * The inner bytes of a framed profile plaintext. §11: a receiver MUST
  * reject plaintext that is not valid CBOR, not a two-element array, or
  * uses an unsupported framing version; this also requires the
- * deterministic encoding and no trailing bytes. Throws PROFILE_FRAMING.
+ * deterministic encoding and no trailing bytes. Throws PROFILE_INVALID /
+ * INVALID_AUTOMERGE_BYTES (§74.1).
  */
 export function unframeProfilePayload(framed: Uint8Array): Uint8Array {
   const fail = (why: string): never => {
-    throw new LfcpError("PROFILE_FRAMING", `invalid profile framing: ${why}`);
+    throw new ProfileInvalidError("INVALID_AUTOMERGE_BYTES", `invalid profile framing: ${why}`);
   };
   if (!(framed instanceof Uint8Array) || framed.length < 3) return fail("too short");
   if (framed[0] !== 0x82) return fail("not a two-element array");

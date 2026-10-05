@@ -484,13 +484,13 @@ describe("profile framing (§11, §13)", () => {
     expect(unframeChange(create.plaintext).hash).toBe(create.hash);
   });
 
-  it("rejects invalid change plaintexts with PROFILE_FRAMING", () => {
+  it("rejects invalid change plaintexts with PROFILE_INVALID / INVALID_AUTOMERGE_BYTES (§74.1)", () => {
     const { replica, init, create } = aliceWithTask();
     const code = (f: () => unknown) => {
       try {
         f();
       } catch (e) {
-        return (e as LfcpError).code;
+        return `${(e as LfcpError).code}/${(e as { diagnostic?: string }).diagnostic}`;
       }
       return "accepted";
     };
@@ -508,12 +508,15 @@ describe("profile framing (§11, §13)", () => {
       "a bad checksum": frameProfilePayload(flipped),
     };
     for (const [what, plaintext] of Object.entries(cases))
-      expect([what, code(() => unframeChange(plaintext))]).toEqual([what, "PROFILE_FRAMING"]);
+      expect([what, code(() => unframeChange(plaintext))]).toEqual([
+        what,
+        "PROFILE_INVALID/INVALID_AUTOMERGE_BYTES",
+      ]);
     expect(
       code(() =>
         SharedObjectsReplica.empty(opts(BOB)).receive(cases["a bad checksum"] as Uint8Array),
       ),
-    ).toBe("PROFILE_FRAMING");
+    ).toBe("PROFILE_INVALID/INVALID_AUTOMERGE_BYTES");
   });
 
   it("round-trips a Snapshot and accepts later changes (§13, §14)", () => {

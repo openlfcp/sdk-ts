@@ -404,7 +404,9 @@ describe("LFCP-038 restart recovery (SQLite + file secrets)", () => {
       const cp = await s.storage.profileState.checkpoint(R);
       expect(() =>
         SharedObjectsDataProfile.restore(cp as never, { resource: R, principal: READER }),
-      ).toThrow(expect.objectContaining({ code: "PROFILE_FRAMING" }));
+      ).toThrow(
+        expect.objectContaining({ code: "PROFILE_INVALID", diagnostic: "INVALID_AUTOMERGE_BYTES" }),
+      );
       s.storage.close();
     } finally {
       removeTempDir(dir);

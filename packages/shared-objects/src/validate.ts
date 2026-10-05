@@ -1,4 +1,4 @@
-import { isObjectId, LfcpError } from "@openlfcp/core";
+import { isObjectId } from "@openlfcp/core";
 import {
   isLocalDate,
   isNamespacedValue,
@@ -34,7 +34,9 @@ export type ProfileDiagnostic =
   | "INVALID_TAG"
   | "IMMUTABLE_FIELD_MUTATED"
   /** §8, §11: a Data Unit's Automerge change is not of its signer's actor; it is not merged. */
-  | "CHANGE_ACTOR_MISMATCH";
+  | "CHANGE_ACTOR_MISMATCH"
+  /** §11, §13: a plaintext's framing or Automerge bytes are invalid (chunk type, checksum, parse, load); nothing is merged. */
+  | "INVALID_AUTOMERGE_BYTES";
 
 /** One profile validation failure: PROFILE_INVALID with its §74.1 diagnostic. */
 export interface ProfileProblem {
@@ -61,6 +63,7 @@ export const DIAGNOSTIC_ORDER: readonly ProfileDiagnostic[] = Object.freeze([
   "INVALID_TAG",
   "IMMUTABLE_FIELD_MUTATED",
   "CHANGE_ACTOR_MISMATCH",
+  "INVALID_AUTOMERGE_BYTES",
 ]);
 
 /**
@@ -87,16 +90,7 @@ export function firstPerField(
   return problems.filter((p) => !isField(p.pointer) || rank(p) === best.get(p.pointer));
 }
 
-/** PROFILE_INVALID thrown for a rejected profile plaintext, with its §74.1 diagnostic. */
-export class ProfileInvalidError extends LfcpError {
-  readonly diagnostic: ProfileDiagnostic;
-
-  constructor(diagnostic: ProfileDiagnostic, message: string) {
-    super("PROFILE_INVALID", message);
-    this.name = "ProfileInvalidError";
-    this.diagnostic = diagnostic;
-  }
-}
+export { ProfileInvalidError } from "./profile-invalid.js";
 
 export type Json =
   | null

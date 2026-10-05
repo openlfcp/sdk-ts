@@ -65,7 +65,7 @@ describe("SharedObjectsDataProfile", () => {
     expect(() => bob.encode(checkChange(init.change))).toThrow(mismatch);
     expect(() => bob.decode(init.plaintext)).toThrow(ProfileInvalidError);
     expect(() => alice.decode(frameProfilePayload(Uint8Array.of(1)))).toThrow(
-      expect.objectContaining({ code: "PROFILE_FRAMING" }),
+      expect.objectContaining({ code: "PROFILE_INVALID", diagnostic: "INVALID_AUTOMERGE_BYTES" }),
     );
   });
 

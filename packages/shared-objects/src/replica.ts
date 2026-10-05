@@ -14,6 +14,7 @@ import {
   unframeChange,
   unframeSnapshot,
 } from "./automerge-bytes.js";
+import { ProfileInvalidError } from "./profile-invalid.js";
 import { ProfileError, parseTask, type Task, type TaskIntent } from "./task.js";
 import {
   firstPerField,
@@ -400,7 +401,7 @@ const actorHex = (opts: ReplicaOptions): string =>
 
 function loadFailure(e: unknown, what: string): never {
   if (e instanceof LfcpError) throw e;
-  throw new LfcpError("PROFILE_FRAMING", `${what}: ${(e as Error).message}`);
+  throw new ProfileInvalidError("INVALID_AUTOMERGE_BYTES", `${what}: ${(e as Error).message}`);
 }
 
 export class SharedObjectsReplica {
@@ -453,7 +454,7 @@ export class SharedObjectsReplica {
     return new SharedObjectsReplica(A.init({ actor: actorHex(opts) }), opts);
   }
 
-  /** Loads an Automerge full save (persisted state, or a Snapshot image, §13). Throws PROFILE_FRAMING. */
+  /** Loads an Automerge full save (persisted state, or a Snapshot image, §13). Throws PROFILE_INVALID / INVALID_AUTOMERGE_BYTES. */
   static fromSave(save: Uint8Array, opts: ReplicaOptions): SharedObjectsReplica {
     checkSaveHeader(save);
     let doc: Doc;
@@ -514,7 +515,7 @@ export class SharedObjectsReplica {
    * This replica merged with an Automerge full save (a loaded Snapshot,
    * §13): the save's document plus every change of this replica, so local
    * work the Snapshot does not hold is kept. The §9 sequence carries over.
-   * Throws PROFILE_FRAMING when the save does not load.
+   * Throws PROFILE_INVALID / INVALID_AUTOMERGE_BYTES when the save does not load.
    */
   mergeSave(save: Uint8Array): BuiltReplica {
     const merged = SharedObjectsReplica.fromSave(save, {
@@ -797,7 +798,7 @@ export class SharedObjectsReplica {
     });
   }
 
-  /** §11: receives a Data Unit plaintext [1, change]. Throws PROFILE_FRAMING for invalid bytes. */
+  /** §11: receives a Data Unit plaintext [1, change]. Throws PROFILE_INVALID / INVALID_AUTOMERGE_BYTES for invalid bytes. */
   receive(plaintext: Uint8Array): ReceiveResult {
     return this.#receive(unframeChange(plaintext));
   }
@@ -828,8 +829,8 @@ export class SharedObjectsReplica {
     try {
       [next] = A.applyChanges(this.#doc, [change.bytes]);
     } catch (e) {
-      throw new LfcpError(
-        "PROFILE_FRAMING",
+      throw new ProfileInvalidError(
+        "INVALID_AUTOMERGE_BYTES",
         `Automerge rejected the change (§11): ${(e as Error).message}`,
       );
     }

@@ -100,8 +100,6 @@ export type LfcpErrorCode =
    * never an LFCP Wire error code.
    */
   | "PROFILE_INVALID"
-  /** A profile plaintext that is not the §11/§13 framing [1, bstr]. Profile-level, client-local. */
-  | "PROFILE_FRAMING"
   /**
    * A Resource whose Data Profile this client does not implement (§27):
    * its plaintext is never applied. PROFILE_UNSUPPORTED on the wire (§62).

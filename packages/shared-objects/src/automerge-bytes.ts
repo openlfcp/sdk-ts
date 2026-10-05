@@ -1,5 +1,6 @@
 import * as A from "@automerge/automerge";
-import { LfcpError, toHex } from "@openlfcp/core";
+import { toHex } from "@openlfcp/core";
+import { ProfileInvalidError } from "./profile-invalid.js";
 import { frameProfilePayload, unframeProfilePayload } from "./values.js";
 
 /**
@@ -20,8 +21,9 @@ const CHUNK_CHANGE = 1;
 const CHUNK_COMPRESSED_CHANGE = 2;
 const HEADER = 9; // magic, checksum, chunk type
 
+/** §11, §13, §74.1: PROFILE_INVALID / INVALID_AUTOMERGE_BYTES. */
 const reject = (why: string): never => {
-  throw new LfcpError("PROFILE_FRAMING", why);
+  throw new ProfileInvalidError("INVALID_AUTOMERGE_BYTES", why);
 };
 
 function chunkType(bytes: Uint8Array, what: string): number {
@@ -44,7 +46,7 @@ export interface CheckedChange {
 
 /**
  * Checks that `bytes` is exactly one valid Automerge change (§11, §12) and
- * returns it decoded. Rejects with PROFILE_FRAMING: a chunk that is not a
+ * returns it decoded. Rejects with PROFILE_INVALID / INVALID_AUTOMERGE_BYTES: a chunk that is not a
  * change (a document chunk is a full save, §13), bytes Automerge cannot
  * parse, trailing bytes such as a second concatenated change, and a
  * checksum that does not match the change hash. Automerge JS 3.5.0 parses
@@ -88,7 +90,7 @@ export function frameChange(change: Uint8Array): Uint8Array {
   return frameProfilePayload(change);
 }
 
-/** §11: the one Automerge change a Data Unit plaintext carries, checked. Throws PROFILE_FRAMING. */
+/** §11: the one Automerge change a Data Unit plaintext carries, checked. Throws PROFILE_INVALID / INVALID_AUTOMERGE_BYTES. */
 export function unframeChange(plaintext: Uint8Array): CheckedChange {
   return checkChange(unframeProfilePayload(plaintext));
 }
@@ -99,7 +101,7 @@ export function frameSnapshot(save: Uint8Array): Uint8Array {
   return frameProfilePayload(save);
 }
 
-/** §13: the Automerge full save a Snapshot plaintext carries (header checked). Throws PROFILE_FRAMING. */
+/** §13: the Automerge full save a Snapshot plaintext carries (header checked). Throws PROFILE_INVALID / INVALID_AUTOMERGE_BYTES. */
 export function unframeSnapshot(plaintext: Uint8Array): Uint8Array {
   const save = unframeProfilePayload(plaintext);
   checkSaveHeader(save);

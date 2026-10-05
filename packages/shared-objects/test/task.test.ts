@@ -376,7 +376,7 @@ describe("values", () => {
             Uint8Array.from(bad.match(/../g) ?? [], (h) => Number.parseInt(h, 16)),
           ),
         ),
-      ).toBe("PROFILE_FRAMING");
+      ).toBe("PROFILE_INVALID");
     }
   });
 });
