@@ -1,0 +1,378 @@
+{
+  "suite": "LFCP-TEST-VECTORS-01",
+  "note": "Cases or parts of cases that sdk-ts cannot check yet, with the task that implements them (LFCP-017). Remove an entry when its task lands: the runner fails on stale entries.",
+  "cases": {
+    "dek_commitments": {
+      "task": "LFCP-018",
+      "reason": "DEK commitment (§11) is Data Epoch key material."
+    },
+    "C0_genesis": {
+      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
+      "parts": {
+        "payload_cbor/typed-body": "LFCP-019"
+      }
+    },
+    "C1_grant_bob": {
+      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
+      "parts": {
+        "payload_cbor/typed-body": "LFCP-019"
+      }
+    },
+    "C2_invite_grant": {
+      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
+      "parts": {
+        "payload_cbor/typed-body": "LFCP-019"
+      }
+    },
+    "C3_invite_claim_carol": {
+      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
+      "parts": {
+        "payload_cbor/typed-body": "LFCP-019"
+      }
+    },
+    "C4_owner_transfer_commit": {
+      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
+      "parts": {
+        "payload_cbor/typed-body": "DEFERRED (.github docs/MVP-0.1-PROTOCOL-SCOPE.md §4, ownership transfer)"
+      }
+    },
+    "C5_route_update": {
+      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
+      "parts": {
+        "payload_cbor/typed-body": "LFCP-019"
+      }
+    },
+    "C6_key_epoch_1": {
+      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
+      "parts": {
+        "payload_cbor/typed-body": "LFCP-019"
+      }
+    },
+    "owner_transfer": {
+      "reason": "COSE, signatures, IDs and re-signing run here; the offer and accept payload types belong to ownership transfer, deferred from MVP 0.1.",
+      "parts": {
+        "offer_payload_cbor/typed": "DEFERRED (.github docs/MVP-0.1-PROTOCOL-SCOPE.md §4, ownership transfer)",
+        "accept_payload_cbor/typed": "DEFERRED (.github docs/MVP-0.1-PROTOCOL-SCOPE.md §4, ownership transfer)"
+      }
+    },
+    "KP0_bob_epoch0": {
+      "reason": "Payload, COSE, signature against the sender and package ID run here; HPKE does not.",
+      "parts": {
+        "hpke_info_cbor/construct": "LFCP-024",
+        "hpke_aad_cbor/construct": "LFCP-024",
+        "hpke_enc/derive": "LFCP-024",
+        "hpke_shared_secret/derive": "LFCP-024",
+        "hpke_key/derive": "LFCP-024",
+        "hpke_base_nonce/derive": "LFCP-024",
+        "hpke_ciphertext/seal": "LFCP-024"
+      }
+    },
+    "KPI_invite_epoch0": {
+      "reason": "Payload, COSE, signature against the sender and package ID run here; HPKE does not.",
+      "parts": {
+        "hpke_info_cbor/construct": "LFCP-024",
+        "hpke_aad_cbor/construct": "LFCP-024",
+        "hpke_enc/derive": "LFCP-024",
+        "hpke_shared_secret/derive": "LFCP-024",
+        "hpke_key/derive": "LFCP-024",
+        "hpke_base_nonce/derive": "LFCP-024",
+        "hpke_ciphertext/seal": "LFCP-024"
+      }
+    },
+    "KPC_carol_epoch1": {
+      "reason": "Payload, COSE, signature against the sender and package ID run here; HPKE does not.",
+      "parts": {
+        "hpke_info_cbor/construct": "LFCP-024",
+        "hpke_aad_cbor/construct": "LFCP-024",
+        "hpke_enc/derive": "LFCP-024",
+        "hpke_shared_secret/derive": "LFCP-024",
+        "hpke_key/derive": "LFCP-024",
+        "hpke_base_nonce/derive": "LFCP-024",
+        "hpke_ciphertext/seal": "LFCP-024"
+      }
+    },
+    "D1_bob_epoch0_seq1": {
+      "reason": "Payload, COSE, signature against the actor and unit ID run here; key derivation and AEAD do not.",
+      "parts": {
+        "actor_key/derive": "LFCP-018",
+        "nonce/derive": "LFCP-018",
+        "aad_cbor/construct": "LFCP-025",
+        "ciphertext/encrypt": "LFCP-025"
+      }
+    },
+    "D2_bob_epoch0_seq2": {
+      "reason": "Payload, COSE, signature against the actor and unit ID run here; key derivation and AEAD do not.",
+      "parts": {
+        "actor_key/derive": "LFCP-018",
+        "nonce/derive": "LFCP-018",
+        "aad_cbor/construct": "LFCP-025",
+        "ciphertext/encrypt": "LFCP-025"
+      }
+    },
+    "D3_bob_epoch0_seq3_stale": {
+      "reason": "Payload, COSE, signature against the actor and unit ID run here; key derivation and AEAD do not.",
+      "parts": {
+        "actor_key/derive": "LFCP-018",
+        "nonce/derive": "LFCP-018",
+        "aad_cbor/construct": "LFCP-025",
+        "ciphertext/encrypt": "LFCP-025"
+      }
+    },
+    "D4_carol_epoch1_seq1": {
+      "reason": "Payload, COSE, signature against the actor and unit ID run here; key derivation and AEAD do not.",
+      "parts": {
+        "actor_key/derive": "LFCP-018",
+        "nonce/derive": "LFCP-018",
+        "aad_cbor/construct": "LFCP-025",
+        "ciphertext/encrypt": "LFCP-025"
+      }
+    },
+    "SNAPSHOT-01": {
+      "reason": "Payload, canonical frontier, COSE, signature against the publisher and Snapshot ID run here; Snapshot encryption does not.",
+      "parts": {
+        "aad_cbor/construct": "LFCP-029",
+        "snapshot_key/derive": "LFCP-029",
+        "nonce/derive": "LFCP-029",
+        "ciphertext/encrypt": "LFCP-029"
+      }
+    },
+    "SNAPSHOT-02": {
+      "reason": "Payload, canonical frontier, COSE, signature against the publisher and Snapshot ID run here; Snapshot encryption does not.",
+      "parts": {
+        "aad_cbor/construct": "LFCP-029",
+        "snapshot_key/derive": "LFCP-029",
+        "nonce/derive": "LFCP-029",
+        "ciphertext/encrypt": "LFCP-029"
+      }
+    },
+    "invite_uri": {
+      "reason": "Deterministic secret CBOR and the base64url fields run here; the invite-secret structure and the lfcp://join URI do not.",
+      "parts": {
+        "secret_cbor/typed": "LFCP-053",
+        "uri/assemble": "LFCP-053"
+      }
+    },
+    "HELLO": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "CHALLENGE": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "AUTH": {
+      "reason": "Deterministic CBOR and the auth proof's COSE signature run here; the message codec and the handshake binding do not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026",
+        "auth_transcript_cbor/construct": "LFCP-027",
+        "auth_proof_cose_sign1/session-binding": "LFCP-027"
+      }
+    },
+    "READY": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "RESOURCE_OPEN": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "DATA_HAVE_with_hole": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "DATA_PUT_D1_D2": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "RESOURCE_HOST": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "RESOURCE_HOSTED": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "RESOURCE_OPENED": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "RESOURCE_CLOSE": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "CONTROL_HAVE": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "CONTROL_GET": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "CONTROL_BATCH": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "CONTROL_PUT": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "DATA_GET": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "DATA_BATCH": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "KEY_PACKAGE_GET": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "KEY_PACKAGE_BATCH": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "KEY_PACKAGE_PUT": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "SNAPSHOT_GET": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "SNAPSHOT": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "SNAPSHOT_PUT": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "NACK_STALE_DATA_EPOCH": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "ERROR_AUTH_FAILED": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "PING": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "PONG": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "ACK_DATA_PUT_D1_D2": {
+      "reason": "Deterministic CBOR runs here; the message codec does not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "actor_equivocation": {
+      "reason": "The conflicting unit parses and verifies; detecting equivocation needs the actor chain.",
+      "parts": {
+        "outcome": "LFCP-025"
+      }
+    },
+    "stale_epoch": {
+      "reason": "No signed object in the inputs; the outcome is epoch cutoff.",
+      "parts": {
+        "outcome": "LFCP-023"
+      }
+    },
+    "noncanonical_aad_D1": {
+      "reason": "The unit parses and verifies and the input AAD is confirmed non-deterministic; the AEAD outcome is client-local (N3).",
+      "parts": {
+        "outcome": "LFCP-025"
+      }
+    },
+    "aead_failure_D1": {
+      "reason": "The unit parses and verifies; the AEAD outcome is client-local (N3).",
+      "parts": {
+        "outcome": "LFCP-025"
+      }
+    },
+    "stale_control_head_put": {
+      "task": "LFCP-026",
+      "reason": "A CONTROL_PUT message: message codec (LFCP-026); the stale-head result itself is LFCP-022."
+    },
+    "control_fork_C6": {
+      "reason": "The competing record parses, verifies and has the published ID; fork detection needs the chain.",
+      "parts": {
+        "outcome": "LFCP-020"
+      }
+    },
+    "actor_seq1_prev_not_null_D1": {
+      "reason": "Structurally valid; §26.2 asks for a report to the sync engine (G4: LFCP-025/LFCP-028).",
+      "parts": {
+        "outcome": "LFCP-025"
+      }
+    },
+    "hpke_recipient_mismatch_KP0": {
+      "reason": "The package parses and verifies against the sender; the HPKE outcome is client-local (N5).",
+      "parts": {
+        "outcome": "LFCP-024"
+      }
+    },
+    "stale_epoch_absent_actor": {
+      "reason": "The unit parses and verifies; the outcome is the epoch cutoff frontier.",
+      "parts": {
+        "outcome": "LFCP-023"
+      }
+    }
+  }
+}

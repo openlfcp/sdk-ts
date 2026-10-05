@@ -1,0 +1,20 @@
+{
+  "note": "CDDL rules of wire/fixtures/manifest.json that sdk-ts cannot decode yet, with the task that implements them (LFCP-017). Remove a rule when its task lands: the run fails on stale entries.",
+  "rules": {
+    "invite-secret": "LFCP-053",
+    "typed-control-record-payload": "LFCP-019",
+    "genesis-record-payload": "LFCP-019",
+    "owner-transfer-offer-payload": "DEFERRED (.github docs/MVP-0.1-PROTOCOL-SCOPE.md §4, ownership transfer)",
+    "owner-transfer-offer": "DEFERRED (.github docs/MVP-0.1-PROTOCOL-SCOPE.md §4, ownership transfer)",
+    "owner-transfer-accept-payload": "DEFERRED (.github docs/MVP-0.1-PROTOCOL-SCOPE.md §4, ownership transfer)",
+    "owner-transfer-accept": "DEFERRED (.github docs/MVP-0.1-PROTOCOL-SCOPE.md §4, ownership transfer)",
+    "key-package-hpke-info": "LFCP-024",
+    "key-package-hpke-aad": "LFCP-024",
+    "data-unit-aad": "LFCP-025",
+    "snapshot-aad": "LFCP-029",
+    "lfcp-message": "LFCP-026",
+    "typed-lfcp-message": "LFCP-026",
+    "auth-transcript": "LFCP-027",
+    "auth-proof": "LFCP-027"
+  }
+}
