@@ -270,6 +270,44 @@ describe("OutboundQueue (LFCP-036)", () => {
     ]);
   });
 
+  it("retransmits after a request timeout on a live connection, with bounded backoff (§70)", async () => {
+    const { storage, R, units } = await writer();
+    const policy = recordingPolicy();
+    const q = new OutboundQueue({
+      storage,
+      retry: policy,
+      requestTimeout: { baseMs: 1000, maxMs: 3000 },
+    });
+    const at = (ms: number) => new Date(Date.parse(T0) + ms).toISOString();
+    const [first] = (await q.next(R, T0)) as OutboundMessage[];
+    // The request or its ACK is lost; the connection stays up.
+    expect(await q.next(R, at(999))).toEqual([]);
+    const [second] = (await q.next(R, at(1000))) as OutboundMessage[];
+    expect(policy.calls).toEqual(["timeout", "timeout"]); // once per item of the flight
+    expect(toHex(second?.bytes ?? new Uint8Array())).not.toBe(
+      toHex(first?.bytes ?? new Uint8Array()),
+    );
+    expect(second?.message.type === "DATA_PUT" && second.message.body.objects.map(toHex)).toEqual(
+      units.map((u) => toHex(u.bytes)),
+    ); // a new message around the very same unit bytes
+    // The next wait doubles (2 s), then is capped (3 s).
+    expect(await q.next(R, at(1000 + 1999))).toEqual([]);
+    const [third] = (await q.next(R, at(3000))) as OutboundMessage[];
+    expect(third).toBeDefined();
+    expect(await q.next(R, at(3000 + 2999))).toEqual([]);
+    expect(await q.next(R, at(6000))).toHaveLength(1);
+    // A late ACK of the first message still removes the items it names.
+    const r = await q.onAck(
+      ack(
+        first as OutboundMessage,
+        units.map((u) => u.unitId),
+      ),
+      at(6001),
+    );
+    expect(r.acked).toHaveLength(2);
+    expect(await storage.outbound.list(R)).toEqual([]);
+  });
+
   it("4, 11. a restarted queue resends the stored bytes; no unit or sequence is created again", async () => {
     const { storage, R, units } = await writer();
     await new OutboundQueue({ storage }).next(R, T0); // sent, then the process "dies"

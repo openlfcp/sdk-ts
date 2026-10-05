@@ -66,7 +66,9 @@ export type RetryReason =
   /** A NACK with a transient or unknown code. */
   | "transient"
   /** An ACK of its message that did not name it, or named it below the required durability. */
-  | "not-acked";
+  | "not-acked"
+  /** No answer within the request timeout on a live connection (a lost request or reply). */
+  | "timeout";
 
 export interface RetryPolicy {
   /**
@@ -204,12 +206,22 @@ export interface OutboundQueueOptions {
   readonly minimumDurability?: bigint;
   /** How many recently ACKed IDs the sync state keeps per Resource (default 256). */
   readonly recentAckLimit?: number;
+  /**
+   * How long a sent message waits for its answer on a live connection
+   * before its items are due again (a lost request or reply, §70
+   * at-least-once): `baseMs`, doubling per attempt of the item, at most
+   * `maxMs`. Default 10 s to 60 s. A re-put is harmless: the server answers
+   * a repeated object with the same ACK (§47, §70).
+   */
+  readonly requestTimeout?: { readonly baseMs: number; readonly maxMs: number };
 }
 
 interface Flight {
   readonly resourceId: ResourceId;
   readonly type: CoreMessageType;
   readonly itemIds: readonly Hash32[];
+  /** When the answer is overdue (ms, caller's clock). */
+  readonly deadline: number;
 }
 
 const AT_ONCE: RetryPolicy = { nextAttempt: () => null };
@@ -220,6 +232,7 @@ export class OutboundQueue {
   readonly #maxObjects: number;
   readonly #minimumDurability: bigint;
   readonly #recentAckLimit: number;
+  readonly #timeout: { readonly baseMs: number; readonly maxMs: number };
   /** Session parameters from READY. */
   #durability = 0n;
   #maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES;
@@ -238,6 +251,27 @@ export class OutboundQueue {
     this.#maxObjects = Math.max(1, options.maxObjectsPerMessage ?? 64);
     this.#minimumDurability = options.minimumDurability ?? 0n;
     this.#recentAckLimit = options.recentAckLimit ?? 256;
+    this.#timeout = options.requestTimeout ?? { baseMs: 10_000, maxMs: 60_000 };
+  }
+
+  /**
+   * Messages whose answer is overdue: their items leave flight and are due
+   * again, after the RetryPolicy's delay for a "timeout". A late answer
+   * still removes the items it names (onAck matches by object ID).
+   */
+  async #expire(now: string): Promise<void> {
+    const at = Date.parse(now);
+    const overdue: Hash32[] = [];
+    for (const [key, flight] of this.#flights) {
+      if (flight.deadline > at) continue;
+      this.#flights.delete(key);
+      for (const id of flight.itemIds)
+        if (this.#inFlight.get(toHex(id)) === key) {
+          this.#inFlight.delete(toHex(id));
+          overdue.push(id);
+        }
+    }
+    if (overdue.length > 0) await this.#retryLater(overdue, "timeout", now);
   }
 
   /** READY: the server's durability level and maximum message size for this session (§37). */
@@ -260,6 +294,7 @@ export class OutboundQueue {
    * for any message is blocked ("too-large") instead.
    */
   async next(resource: ResourceId, now: string): Promise<OutboundMessage[]> {
+    await this.#expire(now);
     const due = (await this.#storage.outbound.list(resource)).filter(
       (o) =>
         o.blocked === null &&
@@ -329,7 +364,16 @@ export class OutboundQueue {
     await this.#commit(writes);
     for (const m of out) {
       const key = toHex(m.message.messageId);
-      this.#flights.set(key, { resourceId: resource, type: m.message.type, itemIds: m.itemIds });
+      const attempts = Math.max(
+        ...m.itemIds.map((id) => (due.find((o) => bytesEqual(o.itemId, id))?.attempts ?? 0) + 1),
+      );
+      const wait = Math.min(this.#timeout.maxMs, this.#timeout.baseMs * 2 ** (attempts - 1));
+      this.#flights.set(key, {
+        resourceId: resource,
+        type: m.message.type,
+        itemIds: m.itemIds,
+        deadline: Date.parse(now) + wait,
+      });
       for (const id of m.itemIds) this.#inFlight.set(toHex(id), key);
     }
     return out;
