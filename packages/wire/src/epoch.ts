@@ -89,10 +89,10 @@ export type EpochClassification =
  * The epoch-eligibility of a Data Unit (§26.3 steps 4-5).
  *
  * - The unit's referenced Control Head must be on the chain, and its epoch
- *   recognized at that head. PROVISIONAL (G-EP2): otherwise MISSING_DEPENDENCY
- *   (the receiver lacks Control records, or the unit claims a future epoch).
- * - PROVISIONAL (G-EP1): the cutoff is evaluated against the LATEST known
- *   state. Once a Key Epoch closing the unit's epoch is known, the unit is
+ *   recognized at that head. Otherwise MISSING_DEPENDENCY (§26.3, G-EP2):
+ *   the receiver lacks Control records, or the unit claims a future epoch.
+ * - The cutoff is evaluated against the LATEST known state (§19.1, §26.3,
+ *   G-EP1). Once a Key Epoch closing the unit's epoch is known, the unit is
  *   held to its final frontier, whichever head the unit referenced (vector
  *   §12.5: D3 is stale "after C6 is known").
  *

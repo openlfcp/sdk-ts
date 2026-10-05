@@ -85,8 +85,8 @@ const reject = (
  * all at the package's referenced Control Head:
  *
  * - the head is on the chain and the package's epoch is known there.
- *   Packages of closed epochs stay valid (PROVISIONAL G-EP6): they are
- *   needed to read history. Otherwise MISSING_DEPENDENCY (G-EP2);
+ *   Packages of closed epochs stay valid (§25.2, G-EP6): they are needed
+ *   to read history. Otherwise MISSING_DEPENDENCY (§25.2, §26.3);
  * - the sender resolves to a descriptor on the chain: MISSING_DEPENDENCY
  *   (§10.5);
  * - the package is signed by its sender (kid = sender): INVALID_SIGNATURE;

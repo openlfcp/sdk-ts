@@ -193,7 +193,7 @@ const WIRE: Readonly<Record<ChainProblem, string>> = {
   SIGNATURE: "INVALID_SIGNATURE",
   // §13.1: an issuer the receiver cannot resolve to a Principal Descriptor.
   UNRESOLVED_ISSUER: "MISSING_DEPENDENCY",
-  // PROVISIONAL (G-EP3): a Key Epoch that is not current + 1 breaks the chain.
+  // §19 (G-EP3): a Key Epoch that is not current + 1 breaks the chain.
   EPOCH: "INVALID_CONTROL_CHAIN",
   UNAUTHORIZED: "AUTHORIZATION_FAILED",
   // MVP-0.1-PROTOCOL-SCOPE §4 (DV1): Coordinator Recovery and Resource Tombstone records.
@@ -355,7 +355,7 @@ function applyRecord(state: ControlState, record: ControlRecord): ControlState {
 /**
  * §19: a committed Key Epoch record closes the current epoch with its final
  * frontier and opens the next one with its DEK commitment. Its succession
- * (new = current + 1) is checked before it is applied (G-EP3).
+ * (new = current + 1) is checked before it is applied (§19, G-EP3).
  */
 function rotate(
   state: ControlState,

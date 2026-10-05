@@ -310,7 +310,7 @@ describe("receiveSnapshot (§29, §29.1.4, §29.2)", () => {
     );
   });
 
-  it("PROVISIONAL G-EP4: after epoch 0 closes, a Snapshot may cover only its final frontier", async () => {
+  it("§29 (G-EP4): after epoch 0 closes, a Snapshot may cover only its final frontier", async () => {
     expect(kindOf(await receive(snap({ frontier: frontierOf([B, 2n]) }).bytes, AFTER))).toBe(
       "accepted",
     );

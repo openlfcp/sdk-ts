@@ -178,7 +178,7 @@ describe("createSnapshot (§29)", () => {
     expect(sequences.calls).toBe(0);
   });
 
-  it("PROVISIONAL G-EP4: a Snapshot of a closed epoch may not go beyond its final frontier", async () => {
+  it("§29 (G-EP4): a Snapshot of a closed epoch may not go beyond its final frontier", async () => {
     const rotation = rotateEpoch(VIEW.state, OWNER, {
       reason: 0n,
       finalFrontier: [{ principalId: P, contiguous: 4n, extras: [] }],

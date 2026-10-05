@@ -47,9 +47,10 @@ export interface CreatedSnapshot {
 /**
  * Creates a Snapshot. Before a sequence is reserved, it checks the head,
  * the profile, snapshot/publish at the head (§29.2), the DEK against the
- * head's current epoch, and (PROVISIONAL G-EP4) that a closed epoch's
- * Snapshot covers nothing beyond its final frontier. The frontier is
- * normalized into canonical form before it is encrypted and signed.
+ * head's current epoch, and that a closed epoch's Snapshot covers nothing
+ * beyond its final frontier (§29, G-EP4; refused locally with
+ * INVALID_STRUCTURE, the receiver's code is STALE_DATA_EPOCH). The frontier
+ * is normalized into canonical form before it is encrypted and signed.
  */
 export async function createSnapshot<T>(
   options: CreateSnapshotOptions<T>,

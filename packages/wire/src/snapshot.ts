@@ -54,8 +54,8 @@ import type { PrincipalDescriptor } from "./principal.js";
  *  6. the publisher held snapshot/publish at that head (§29.2) →
  *     AUTHORIZATION_FAILED;
  *  7. the epoch is known at that head → MISSING_DEPENDENCY;
- *  8. PROVISIONAL (G-EP4): when the epoch has since been closed, the
- *     frontier covers no unit beyond its final frontier → STALE_DATA_EPOCH;
+ *  8. when the epoch has since been closed, the frontier covers no unit
+ *     beyond its final frontier → STALE_DATA_EPOCH (§29, G-EP4);
  *  9. the DEK, the exact AAD rebuilt from the received fields, AEAD
  *     (one layout only, §29.1.4) → client-local failure, no wire code;
  * 10. the Data Profile's Snapshot codec accepts the plaintext.
@@ -251,11 +251,11 @@ export function checkSnapshot(
 }
 
 /**
- * PROVISIONAL (G-EP4): once a Key Epoch closes the Snapshot's epoch, the
- * Snapshot may cover only units within that epoch's final frontier; units
- * beyond it are quarantined (§19.1), so a Snapshot that includes them would
- * merge stale work. Evaluated against the latest known state (as G-EP1
- * does for Data Units). Returns why, or undefined when within.
+ * §29 (G-EP4): once a Key Epoch closes the Snapshot's epoch, the Snapshot
+ * may cover only units within that epoch's final frontier; units beyond it
+ * are quarantined (§19.1), so a Snapshot that includes them would merge
+ * stale work. Evaluated against the latest known state, as §19.1 does for
+ * Data Units. Returns why, or undefined when within.
  */
 export function beyondCutoff(
   view: ControlView,
