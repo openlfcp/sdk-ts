@@ -14,6 +14,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./cbor": {
+      "types": "./dist/cbor/index.d.ts",
+      "import": "./dist/cbor/index.js"
     }
   },
   "files": [
