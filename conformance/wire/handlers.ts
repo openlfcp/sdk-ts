@@ -11,6 +11,7 @@ import {
   dataEpoch,
   fromBase64url,
   fromHex,
+  LfcpError,
   type PrincipalId,
   resourceId,
   toBase64url,
@@ -1657,6 +1658,85 @@ const ed25519Signature: Handler = (c) =>
       : SIGNATURE_FAILURE,
   );
 
+/**
+ * LFCP-WIRE-01 §26.2 (G-DP1-GAP, baseline.5): the `accepted_*` units are
+ * received in order and must be accepted, then `cose_sign1` must reach the
+ * expected outcome: accepted across a sequence gap, or held (`report`).
+ */
+const actorChain: Handler = async (c, context) => {
+  const receiver = dataReceiver(context);
+  const checks: Check[] = [];
+  for (const name of Object.keys(c.inputs ?? {})
+    .filter((k) => k.startsWith("accepted_"))
+    .sort()) {
+    const r = await receiver.receive(hexOf(c.inputs, name));
+    checks.push(check(`inputs.${name}/accepted`, () => r.kind === "accepted" || `got ${r.kind}`));
+  }
+  const r = await receiver.receive(hexOf(c.inputs, "cose_sign1"));
+  const e = c.expected as { valid?: unknown; disposition?: unknown };
+  checks.push(
+    e.valid === true
+      ? check(
+          "outcome",
+          () => r.kind === "accepted" || `expected acceptance, got ${dataUnitOutcome(r)}`,
+        )
+      : check(
+          "outcome",
+          () =>
+            dataUnitDisposition(r) === e.disposition ||
+            `expected ${String(e.disposition)}, got ${dataUnitOutcome(r)}`,
+        ),
+  );
+  return { checks };
+};
+
+/**
+ * LFCP-WIRE-01 §18.2 (baseline.5): an invitation URI parses, ignoring
+ * undefined query parameters, or is rejected client-locally (no wire code).
+ */
+const inviteUriParse: Handler = (c, context) => {
+  const uri = String((c.inputs as { uri?: unknown }).uri);
+  let parsed: ReturnType<typeof parseInviteUri> | undefined;
+  let failure = "";
+  try {
+    parsed = parseInviteUri(uri);
+  } catch (e) {
+    failure = e instanceof LfcpError ? e.code : String(e);
+  }
+  if ((c.expected as { valid?: unknown }).valid !== true)
+    return {
+      checks: [
+        check(
+          "outcome",
+          () =>
+            failure === "INVALID_INVITATION" ||
+            `expected INVALID_INVITATION, got ${failure || "acceptance"}`,
+        ),
+      ],
+    };
+  // A valid variant names the same Resource, endpoints, grant and secret as invite_uri.
+  const base = context.caseById("invite_uri");
+  if (base === undefined) throw new Error("the suite has no invite_uri case");
+  const reference = parseInviteUri(String((base.expected as { uri?: unknown }).uri));
+  return {
+    checks: [
+      check("outcome", () => parsed !== undefined || `rejected: ${failure}`),
+      check(
+        "parts",
+        () =>
+          (parsed !== undefined &&
+            bytesEqual(parsed.resourceId, reference.resourceId) &&
+            bytesEqual(parsed.grantId, reference.grantId) &&
+            JSON.stringify(parsed.endpoints) === JSON.stringify(reference.endpoints) &&
+            parsed.secret !== undefined &&
+            reference.secret !== undefined &&
+            bytesEqual(encodeInviteSecret(parsed.secret), encodeInviteSecret(reference.secret))) ||
+          "the parts differ from invite_uri",
+      ),
+    ],
+  };
+};
+
 const principalNegative: Handler = (c) => {
   let actual: string | null = null;
   try {
@@ -1685,4 +1765,6 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   "validation/principal": principalNegative,
   "validation/wire_message": wireMessageNegative,
   "validation/ed25519_signature": ed25519Signature,
+  "validation/actor_chain": actorChain,
+  "validation/invite_uri": inviteUriParse,
 };

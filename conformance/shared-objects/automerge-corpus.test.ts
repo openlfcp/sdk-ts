@@ -144,23 +144,29 @@ describe(`Automerge reference corpus negatives at ${spec.lock.tag}`, () => {
       const signer = id(negative.signer);
       expect(toHex(deriveActorId(options.resource, signer))).toBe(negative.signer_actor_hex);
       const plaintext = fromHex(negative.plaintext_hex);
-      expect(toHex(frameChange(fromHex(negative.change.change_hex)))).toBe(negative.plaintext_hex);
-
       const base = corpusScenario(negative.base_scenario).changes.map((c) => fromHex(c.change_hex));
       const profile = new SharedObjectsDataProfile(Replica.fromChanges(base, options).replica);
       const before = profile.replica.root();
-      // The change itself is valid: its own actor's codec decodes it.
-      const author = Object.entries(corpus.actors).find(
-        ([, hex]) => hex === negative.change.actor_hex,
-      )?.[0];
-      expect(author).toBe(negative.change.actor);
-      const own = profile.codecFor({ resourceId: options.resource, actor: id(author as string) });
-      expect(own.decode(plaintext).hash).toBe(negative.change.hash);
+      // Where the plaintext frames the negative's change exactly (SO-SEC1), the change itself
+      // is valid: its own actor's codec decodes it. The SO-BYTES negatives frame corrupted
+      // bytes (change is the original before corruption) or no change at all.
+      const change = negative.change;
+      if (
+        change !== undefined &&
+        toHex(frameChange(fromHex(change.change_hex))) === negative.plaintext_hex
+      ) {
+        const author = Object.entries(corpus.actors).find(
+          ([, hex]) => hex === change.actor_hex,
+        )?.[0];
+        expect(author).toBe(change.actor);
+        const own = profile.codecFor({ resourceId: options.resource, actor: id(author as string) });
+        expect(own.decode(plaintext).hash).toBe(change.hash);
+      }
       const codec = profile.codecFor({ resourceId: options.resource, actor: signer });
       expect(() => codec.decode(plaintext)).toThrow(
         expect.objectContaining({ code, ...(diagnostic !== undefined ? { diagnostic } : {}) }),
       );
-      expect(profile.replica.hasChange(negative.change.hash)).toBe(false);
+      if (change !== undefined) expect(profile.replica.hasChange(change.hash)).toBe(false);
       expect(profile.replica.root()).toEqual(before);
     });
   }

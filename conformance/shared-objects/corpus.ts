@@ -44,7 +44,9 @@ export interface CorpusNegative {
   /** The fixture Principal that signs the Data Unit carrying the plaintext. */
   readonly signer: string;
   readonly signer_actor_hex: string;
-  readonly change: CorpusChange;
+  /** The change the plaintext carries, or (SO-BYTES) the change before its bytes were corrupted; absent when there is none. */
+  readonly change?: CorpusChange;
+  readonly note?: string;
   readonly plaintext_hex: string;
   readonly expected: {
     readonly valid: false;
