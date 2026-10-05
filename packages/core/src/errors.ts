@@ -84,7 +84,15 @@ export type LfcpErrorCode =
   /** A signed object whose kid or signature is wrong for its expected signer (G1/N2). INVALID_SIGNATURE on the wire. */
   | "INVALID_SIGNATURE"
   /** A record the authorization policy (LFCP-021) refuses. AUTHORIZATION_FAILED on the wire. */
-  | "AUTHORIZATION_FAILED";
+  | "AUTHORIZATION_FAILED"
+  /**
+   * Shared Objects state that violates SHARED-OBJECTS-PROFILE-01 (§74.1):
+   * reported with one §74.1 diagnostic per failure. A profile-level code,
+   * never an LFCP Wire error code.
+   */
+  | "PROFILE_INVALID"
+  /** A profile plaintext that is not the §11/§13 framing [1, bstr]. Profile-level, client-local. */
+  | "PROFILE_FRAMING";
 
 /** Error with a stable machine-readable `code`; the message is for humans only. */
 export class LfcpError extends Error {
