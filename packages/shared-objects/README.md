@@ -42,16 +42,21 @@ With the slim build it must `await initializeBase64Wasm(...)` or
 Obsidian plugin's choice belongs to the Obsidian tasks. This package does
 not choose a build at run time.
 
-## Provisional rules
+## Rules decided in baseline.4
 
-These follow the reference corpus generator and are marked
-`// PROVISIONAL (<id>)` in the source until the project owner decides them:
+These followed the reference corpus generator as provisional rules and are
+normative since `mvp-0.1-baseline.4` (ADR 0003). The source cites them by
+section and decision ID:
 
-- **G-SC3**: every profile string is an Automerge scalar string
+- **G-SC3** (§30): every profile string is an Automerge scalar string
   (`ImmutableString`), never collaborative Text. A known field stored as Text
   is `PROFILE_INVALID` / `INVALID_FIELD_TYPE`.
-- **G-SC4**: an intent that writes a value already present deletes it first,
-  so it is a real concurrent write: a re-add wins over a concurrent removal,
-  and a restore conflicts with a concurrent delete.
-- **G-EP7**: replica state is a deterministic function of the set of accepted
-  changes (`fromChanges`, `rebuildWithout`).
+- **G-SC4** (§58): an intent that writes a value already present deletes it
+  first, so it is a real concurrent write: a re-add wins over a concurrent
+  removal, and a restore conflicts with a concurrent delete.
+- **G-EP7** (§14.1): replica state is a deterministic function of the set of
+  accepted changes (`fromChanges`, `rebuildWithout`).
+- **SO-SEC1** (§8, §11): a Data Unit carries only changes of its signer's §8
+  actor; any other is `PROFILE_INVALID` / `CHANGE_ACTOR_MISMATCH`.
+- **SOG-2** (§74.1): one diagnostic per field value, the first in the table's
+  order, with `IMMUTABLE_FIELD_MUTATED` last (`firstPerField`).

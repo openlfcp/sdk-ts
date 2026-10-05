@@ -485,7 +485,7 @@ describe("actor state safety (§9)", () => {
   });
 });
 
-// PROVISIONAL (G-EP7)
+// §14.1 (G-EP7)
 describe("rebuild from an accepted change set (G-EP7)", () => {
   it("rebuilds without a change to the state built from the others", () => {
     const { replica: base } = aliceWithTask();

@@ -46,12 +46,12 @@ import { deriveActorId, frameProfilePayload, PROFILE_ID } from "./values.js";
  * authorization come first (§95, LFCP-033).
  */
 
-// PROVISIONAL (G-SC3): every profile string is an Automerge scalar string
+// §30 (G-SC3): every profile string is an Automerge scalar string
 // (ImmutableString), never collaborative Text. Automerge 3 JS stores a plain
 // JS string as Text, so writes wrap every string, and a known field found as
 // Text is PROFILE_INVALID / INVALID_FIELD_TYPE.
 
-// PROVISIONAL (G-SC4): Automerge drops an assignment of the value already
+// §58 (G-SC4): Automerge drops an assignment of the value already
 // present, so an intent that writes deletes the property first when the value
 // is unchanged: the intent is then a real concurrent write (add-wins, conflicts)
 // exactly as in the reference corpus generator.
@@ -138,7 +138,7 @@ export interface ObjectChange {
   readonly fields: readonly string[];
   readonly conflictsAppeared: readonly string[];
   readonly conflictsDisappeared: readonly string[];
-  /** "rebuild": the state was rebuilt without some changes (PROVISIONAL G-EP7). */
+  /** "rebuild": the state was rebuilt without some changes (§14.1, G-EP7). */
   readonly origin: "local" | "remote" | "rebuild";
 }
 
@@ -263,7 +263,7 @@ function textProblems(object: AMap, key: string): ProfileProblem[] {
   return fields
     .filter((f) => valuesOf(object, f).some(isText))
     .map((f) =>
-      // PROVISIONAL (G-SC3)
+      // §30 (G-SC3)
       problem(
         "INVALID_FIELD_TYPE",
         `/objects/${pointerToken(key)}/${pointerToken(f)}`,
@@ -365,14 +365,14 @@ function perform(object: AMap, writes: readonly Write[]): void {
     if (w.op === "delete") {
       if (w.field in object) delete object[w.field];
     } else if (w.op === "put") {
-      // PROVISIONAL (G-SC4): an unchanged value is deleted first so the intent writes.
+      // §58 (G-SC4): an unchanged value is deleted first so the intent writes.
       if (w.field in object && JSON.stringify(plain(object[w.field])) === JSON.stringify(w.value))
         delete object[w.field];
       object[w.field] = scalarize(w.value);
     } else {
       const set = object[w.set] as AMap;
       if (w.op === "add") {
-        // PROVISIONAL (G-SC4): a re-add is a fresh write, so it wins over a concurrent remove (§41, §43).
+        // §58 (G-SC4): a re-add is a fresh write, so it wins over a concurrent remove (§41, §43).
         if (w.key in set) delete set[w.key];
         set[w.key] = true;
       } else if (w.key in set) delete set[w.key];
@@ -460,7 +460,7 @@ export class SharedObjectsReplica {
    * on the set, not on the order. Changes whose dependencies are not in the
    * set are returned as unapplied.
    */
-  // PROVISIONAL (G-EP7): replica state is a deterministic function of the set
+  // §14.1 (G-EP7): replica state is a deterministic function of the set
   // of accepted changes, so a unit quarantined after it was merged can be taken
   // out by rebuilding (rebuildWithout). LFCP-033 drives it.
   static fromChanges(changes: Iterable<Uint8Array>, opts: ReplicaOptions): BuiltReplica {
@@ -480,7 +480,7 @@ export class SharedObjectsReplica {
   }
 
   /**
-   * PROVISIONAL (G-EP7): this replica rebuilt from its own changes minus
+   * §14.1 (G-EP7): this replica rebuilt from its own changes minus
    * `exclude` (change hashes). Changes that depend on an excluded change are
    * unapplied too. If an excluded change is this actor's own, the rebuilt
    * replica refuses local writes (§9): its sequences are already used.
@@ -580,7 +580,7 @@ export class SharedObjectsReplica {
   validate(): ReplicaValidation {
     const base = validateRoot(this.root());
     const extraRoot: ProfileProblem[] = [];
-    // PROVISIONAL (G-SC3): the root profile value is a scalar string too.
+    // §30 (G-SC3): the root profile value is a scalar string too.
     if ("profile" in this.#doc && valuesOf(this.#doc, "profile").some(isText))
       extraRoot.push(
         problem(

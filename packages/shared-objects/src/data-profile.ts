@@ -23,7 +23,7 @@ import { deriveActorId, PROFILE_ID } from "./values.js";
  *   every buffered change it unblocks merges with it;
  * - one object becoming profile-invalid is a diagnostic, never a refusal:
  *   the other objects stay usable (§77);
- * - exclude (PROVISIONAL G-EP7): rebuilds the replica without given units.
+ * - exclude (§14.1, G-EP7): rebuilds the replica without given units.
  */
 
 /** An accepted unit as the applier passes it (structurally the client's ProfileUnit). */
@@ -236,7 +236,7 @@ export class SharedObjectsDataProfile {
   }
 
   /**
-   * PROVISIONAL (G-EP7): the state without `unitIds`, rebuilt from the
+   * §14.1 (G-EP7): the state without `unitIds`, rebuilt from the
    * remaining changes. Merged units whose changes build on an excluded one
    * go back to the buffer and are reported as pending.
    */

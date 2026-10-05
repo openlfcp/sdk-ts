@@ -114,7 +114,7 @@ describe("SharedObjectsDataProfile", () => {
     expect(r2.apply(setStatus(taskOf(r2, ID_B), "done").intent)).not.toBeNull();
   });
 
-  // PROVISIONAL (G-EP7)
+  // §14.1 (G-EP7)
   it("excludes merged units by rebuilding, re-buffers their dependents and notifies", () => {
     const { init, a, b } = source();
     const profile = new SharedObjectsDataProfile(SharedObjectsReplica.empty(opts(BOB)));
