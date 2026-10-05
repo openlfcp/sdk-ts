@@ -43,6 +43,7 @@ import {
   parseSignedObject,
   parseSnapshot,
   sigStructureBytes,
+  snapshotAad,
 } from "@openlfcp/wire";
 import { type CborValue, cborMap, decodeDeterministic, encode } from "@openlfcp/wire/cbor";
 import { describe, expect, it } from "vitest";
@@ -141,6 +142,22 @@ const RULES: Readonly<Record<string, (bytes: Uint8Array) => unknown>> = {
     if (!bytesEqual(rebuilt, b)) throw new Error("not the §26.1 AAD");
   },
   "data-unit-payload": decodeDataUnitPayload,
+  // §29.1.3: the item must be exactly what snapshotAad builds from its fields.
+  "snapshot-aad": (b) => {
+    const v = decodeDeterministic(b) as CborValue[];
+    if (!Array.isArray(v) || v.length !== 7 || v[0] !== "LFCP-SNAPSHOT-v1")
+      throw new Error('not ["LFCP-SNAPSHOT-v1", ...] with seven elements');
+    const [, resource, epoch, publisher, seq, head, frontier] = v;
+    const rebuilt = snapshotAad({
+      resourceId: resourceId(resource as Uint8Array),
+      dataEpoch: dataEpoch(epoch as number),
+      publisher: principalId(publisher as Uint8Array),
+      snapshotSeq: BigInt(seq as number),
+      controlHead: controlRecordId(head as Uint8Array),
+      frontier: canonicalFrontierFromCbor(frontier as CborValue),
+    });
+    if (!bytesEqual(rebuilt, b)) throw new Error("not the §29.1.3 AAD");
+  },
   "data-unit": parseDataUnit,
   "canonical-frontier": (b) => canonicalFrontierFromCbor(decodeDeterministic(b)),
   "snapshot-payload": decodeSnapshotPayload,

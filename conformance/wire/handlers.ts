@@ -4,7 +4,7 @@
 // today and names, as pending parts, what later tasks implement (the owner
 // of each part is in pending.json). Values come only from the loaded suite.
 
-import { createDataUnit } from "@openlfcp/client";
+import { createDataUnit, createSnapshot } from "@openlfcp/client";
 import {
   bytesEqual,
   dataEpoch,
@@ -19,10 +19,12 @@ import {
 import {
   dataUnitNonce,
   decryptDataUnit,
+  decryptSnapshot,
   dekCommitment,
   deriveActorDataKey,
   deriveSnapshotKey,
   encryptDataUnit,
+  encryptSnapshot,
   exportSecretKeyBytes,
   importAgreementKey,
   importResourceDEK,
@@ -37,6 +39,7 @@ import {
   type ControlPutBody,
   type ControlRecord,
   canonicalFrontierFromCbor,
+  checkSnapshot,
   clientReceive,
   type DataProfileCodec,
   dataUnitAad,
@@ -78,11 +81,13 @@ import {
   proposeControlPut,
   type ReceivedDataUnit,
   receiveDataUnit,
+  receiveSnapshot,
   type Signer,
   serverReceive,
   signControlRecord,
   signObject,
   sigStructureBytes,
+  snapshotAad,
   startClientHandshake,
   startServerSession,
   validateControlChain,
@@ -850,7 +855,16 @@ const dataUnit: Handler = async (c, context) => {
   return { checks };
 };
 
-const snapshot: Handler = (c, context) => {
+/**
+ * LFCP-029. Besides the payload, frontier, key, nonce, COSE and ID checks:
+ * the AAD rebuilt from the payload (§29.1.3), the ciphertext encrypted
+ * from inputs.plaintext_hex and decrypted back (§29.1.4), and the whole
+ * Snapshot re-created by createSnapshot from the vector inputs (a
+ * reservation fixed to inputs.snapshot_sequence, the published frontier)
+ * to the exact cose_sign1 and snapshot_id; then receiveSnapshot accepts
+ * the published bytes on the published chain.
+ */
+const snapshot: Handler = async (c, context) => {
   const e = c.expected;
   const payload = hexOf(e, "payload_cbor");
   const cose = hexOf(e, "cose_sign1");
@@ -870,8 +884,61 @@ const snapshot: Handler = (c, context) => {
     if (entry === undefined) throw new Error("payload has no field 5");
     return encode(entry[1] as CborValue);
   };
+  const p = decodeSnapshotPayload(payload);
+  const plaintext = hexOf(c.inputs, "plaintext_hex");
+  const dek = dekForEpoch(context, p.dataEpoch);
+  const key = deriveSnapshotKey(dek, p.resourceId, p.dataEpoch, p.publisher);
+  const view = publishedView(context);
+  const profile = opaqueProfile(view.state.dataProfile);
+  let created: Awaited<ReturnType<typeof createSnapshot>> | string;
+  try {
+    const publisher = principals(context).get(String(c.inputs?.signer));
+    if (publisher === undefined)
+      throw new Error(`inputs.signer ${String(c.inputs?.signer)} is unknown`);
+    created = await createSnapshot({
+      view,
+      controlHead: hexOf(c.inputs, "control_head"),
+      publisher,
+      dek,
+      sequences: {
+        reserveNext: () => Promise.resolve(BigInt(Number(c.inputs?.snapshot_sequence))),
+      },
+      frontier: liveHavesOf(canonicalFrontierFromCbor(decodeStrict(frontier))),
+      profile,
+      value: plaintext,
+    });
+  } catch (err) {
+    created = describeError(err);
+  }
+  const received = await receiveSnapshot(view, cose, {
+    dek: (e) => dekForEpoch(context, e),
+    profile,
+  });
   return {
     checks: [
+      check("inputs.dek", () => {
+        const named = hexOf(resourceFixture(context), String(c.inputs?.dek));
+        return bytesEqual(named, exportSecretKeyBytes(dek)) || "inputs.dek is not the epoch's DEK";
+      }),
+      sameBytes("aad_cbor/construct", hexOf(e, "aad_cbor"), () => snapshotAad(p)),
+      sameBytes("ciphertext/encrypt", hexOf(e, "ciphertext"), () =>
+        encryptSnapshot(key, p.snapshotSeq, hexOf(e, "aad_cbor"), plaintext),
+      ),
+      sameBytes("ciphertext/decrypt", plaintext, () =>
+        decryptSnapshot(key, p.snapshotSeq, snapshotAad(p), p.ciphertext),
+      ),
+      typeof created === "string"
+        ? { name: "cose_sign1/create", ok: false, message: created }
+        : bytesCheck("cose_sign1/create", cose, created.bytes),
+      ...(typeof created === "string"
+        ? []
+        : [bytesCheck("snapshot_id/create", hexOf(e, "snapshot_id"), created.snapshotId)]),
+      check(
+        "cose_sign1/receive",
+        () =>
+          (received.kind === "accepted" && bytesEqual(received.value as Uint8Array, plaintext)) ||
+          `the published Snapshot is ${received.kind}`,
+      ),
       deterministic("frontier_cbor/deterministic", frontier),
       check("frontier_cbor/canonical", () =>
         Array.isArray(canonicalFrontierFromCbor(decodeStrict(frontier))),
@@ -915,7 +982,6 @@ const snapshot: Handler = (c, context) => {
       ...signed.checks,
       bytesCheck("snapshot_id", hexOf(e, "snapshot_id"), objectId(cose)),
     ],
-    pending: ["aad_cbor/construct", "ciphertext/encrypt"],
   };
 };
 
@@ -1486,6 +1552,20 @@ const wireMessageNegative: Handler = (c) => {
   return negative(c, actual);
 };
 
+const snapshotStructure = signedNegative(parseSnapshot, (p) => expectedSignerOf(p.payload));
+
+/**
+ * LFCP-029: a received Snapshot through checkSnapshot on the published
+ * chain (structure, publisher signature, snapshot/publish at its head, the
+ * epoch, G-EP4); a suite without a chain runs structure and signature only.
+ */
+const snapshotNegative: Handler = (c, context) => {
+  if (validateControlChain(publishedChain(context)).kind !== "linear")
+    return snapshotStructure(c, context);
+  const r = checkSnapshot(publishedView(context), hexOf(c.inputs, "cose_sign1"));
+  return negative(c, r.kind === "valid" ? null : r.wireCode);
+};
+
 const principalNegative: Handler = (c) => {
   let actual: string | null = null;
   try {
@@ -1514,7 +1594,7 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
     (p) => expectedSignerOf(p.payload),
     keyPackageOpen,
   ),
-  "validation/snapshot": signedNegative(parseSnapshot, (p) => expectedSignerOf(p.payload)),
+  "validation/snapshot": snapshotNegative,
   "validation/principal": principalNegative,
   "validation/wire_message": wireMessageNegative,
 };

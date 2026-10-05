@@ -2,20 +2,6 @@
   "suite": "LFCP-TEST-VECTORS-01",
   "note": "Cases or parts of cases that sdk-ts cannot check yet, with the task that implements them (LFCP-017). Remove an entry when its task lands: the runner fails on stale entries.",
   "cases": {
-    "SNAPSHOT-01": {
-      "reason": "Payload, canonical frontier, COSE, signature against the publisher, Snapshot ID, Snapshot key and nonce run here; the AAD and encryption do not.",
-      "parts": {
-        "aad_cbor/construct": "LFCP-029",
-        "ciphertext/encrypt": "LFCP-029"
-      }
-    },
-    "SNAPSHOT-02": {
-      "reason": "Payload, canonical frontier, COSE, signature against the publisher, Snapshot ID, Snapshot key and nonce run here; the AAD and encryption do not.",
-      "parts": {
-        "aad_cbor/construct": "LFCP-029",
-        "ciphertext/encrypt": "LFCP-029"
-      }
-    },
     "invite_uri": {
       "reason": "Deterministic secret CBOR and the base64url fields run here; the invite-secret structure and the lfcp://join URI do not.",
       "parts": {
