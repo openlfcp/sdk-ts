@@ -54,6 +54,17 @@ describe("base64url", () => {
     expect(codeOf(() => fromBase64url(text))).toBe("INVALID_BASE64URL");
   });
 
+  it("names the position of a bad character, never the character (the input may be a secret)", () => {
+    let message = "";
+    try {
+      fromBase64url("AAA$");
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain("at 3");
+    expect(message).not.toContain("$");
+  });
+
   it("accepts canonical short forms", () => {
     expect(fromBase64url("")).toEqual(new Uint8Array(0));
     expect(fromBase64url("AA")).toEqual(Uint8Array.from([0]));

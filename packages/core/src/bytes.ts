@@ -63,11 +63,15 @@ export function fromBase64url(text: string): Uint8Array {
   const rem = text.length % 4;
   if (rem === 1) fail("length is 1 modulo 4");
   const values: number[] = [];
+  // The input may be a secret (a stored key, an invitation fragment): an
+  // error names the position of a bad character, never the character.
+  let i = 0;
   for (const c of text) {
     const v = B64URL_VALUE.get(c);
     if (v === undefined)
-      fail(c === "=" ? "padding is not allowed" : `character ${JSON.stringify(c)}`);
+      fail(c === "=" ? "padding is not allowed" : `a character outside the alphabet at ${i}`);
     values.push(v as number);
+    i += 1;
   }
   // The last character of a 2- or 3-character group carries 4 or 2 bits that
   // are not part of any byte; they must be zero (RFC 4648 §3.5).
