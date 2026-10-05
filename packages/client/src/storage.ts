@@ -1,9 +1,11 @@
 import {
   type ActorSequence,
+  bytesEqual,
   type ControlRecordId,
   type DataEpoch,
   type DataUnitId,
   hash32,
+  LfcpError,
   type PrincipalId,
   type ResourceId,
   toHex,
@@ -115,11 +117,26 @@ export async function loadControlChain(
   const chain: Uint8Array[] = [];
   for (let at: ControlRecordId | null = head.head; at !== null; ) {
     const r = byId.get(toHex(at));
-    if (r === undefined) throw new Error(`stored Control Record ${toHex(at)} is missing`);
+    if (r === undefined)
+      throw new LfcpError(
+        "INVALID_CONTROL_CHAIN",
+        `stored Control Record ${toHex(at)} is missing (local corruption)`,
+      );
     chain.unshift(r.bytes);
     at = r.prevControlId;
   }
-  return validateControlChain(chain);
+  const result = validateControlChain(chain);
+  // Fail closed on local corruption: the records must validate to exactly the
+  // stored head and sequence; an older or different state is never used silently.
+  if (
+    result.kind === "linear" &&
+    (!bytesEqual(result.state.head, head.head) || result.state.seq !== head.controlSeq)
+  )
+    throw new LfcpError(
+      "INVALID_CONTROL_CHAIN",
+      `the stored Control Records validate to sequence ${result.state.seq}, not the stored head at ${head.controlSeq} (local corruption)`,
+    );
+  return result;
 }
 
 /**
