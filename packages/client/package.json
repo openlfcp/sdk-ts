@@ -24,7 +24,8 @@
   },
   "dependencies": {
     "@openlfcp/core": "workspace:^",
-    "@openlfcp/wire": "workspace:^",
-    "@openlfcp/storage": "workspace:^"
+    "@openlfcp/crypto": "workspace:^",
+    "@openlfcp/storage": "workspace:^",
+    "@openlfcp/wire": "workspace:^"
   }
 }

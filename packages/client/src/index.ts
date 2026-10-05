@@ -1,2 +1,4 @@
-/** Name of this package. Placeholder until its first implementation task. */
+/** Name of this package. */
 export const PACKAGE = "@openlfcp/client";
+
+export { type CreateDataUnitOptions, type CreatedDataUnit, createDataUnit } from "./data-unit.js";
