@@ -75,10 +75,15 @@ import {
   isCborMap,
   isDeterministic,
 } from "@openlfcp/wire/cbor";
+import {
+  AEAD_ChaCha20Poly1305,
+  KDF_HKDF_SHA256,
+  KEM_DHKEM_X25519_HKDF_SHA256,
+} from "@panva/hpke-noble";
+import { CipherSuite, type KEMFactory } from "hpke";
 import { bytesCheck, check, describeError, equalCheck, outcomeCheck } from "../checks.js";
 import type { Check, Handler, HandlerContext, VectorCase, VectorSuite } from "../runner.js";
 import { SIGNATURE_FAILURE, wireCodeOf } from "./error-map.js";
-import { aeadSeal, sealWithRawSkE } from "./hpke-raw-ske.js";
 
 type Fields = Readonly<Record<string, unknown>> | undefined;
 
@@ -313,10 +318,20 @@ function referenced(context: HandlerContext, ref: unknown): Uint8Array {
  * A received Control Record against the published chain: CONTROL_CONFLICT
  * for a fork, the chain's wire code when invalid, null when it extends the
  * chain. The diagnostics are checked against the vector's context.
+ *
+ * The receiver knows the descriptor of the Principal the vector names in
+ * inputs.signer (G-RS3), as it would from the sender's session, so a
+ * record whose issuer no earlier record describes (extension_type_non_owner_C1:
+ * BOB at C0) reaches its authority rule instead of stopping at
+ * MISSING_DEPENDENCY (§13.1).
  */
 const controlRecordNegative: Handler = (c, context) => {
   const cose = hexOf(c.inputs, "cose_sign1");
-  const result = validateControlChain([...publishedChain(context), cose]);
+  const named = principals(context).get(String(c.inputs?.signer))?.descriptor;
+  const result = validateControlChain([...publishedChain(context), cose], {
+    resolvePrincipal: (id) =>
+      named !== undefined && bytesEqual(id, named.principalId) ? named : undefined,
+  });
   const checks: Check[] = [];
   if (has(c.inputs, "record_id"))
     checks.push(bytesCheck("inputs.record_id", hexOf(c.inputs, "record_id"), objectId(cose)));
@@ -358,20 +373,29 @@ const controlRecordNegative: Handler = (c, context) => {
 /**
  * LFCP-022: a CONTROL_PUT against the coordinator's state at the vector's
  * current head. Only the §47 body is decoded (field 4 of the envelope,
- * read with generic CBOR); the envelope codec itself is LFCP-026.
+ * read with generic CBOR); the envelope codec itself is LFCP-026. A body
+ * that does not decode (a null expected head, §47) fails before any state
+ * is needed.
  */
 const controlPutNegative: Handler = (c, context) => {
   const message = decodeStrict(hexOf(c.inputs, "message_cbor"));
   const field = (k: number): CborValue | undefined =>
     isCborMap(message) ? message.entries.find(([key]) => key === k)?.[1] : undefined;
   const checks: Check[] = [equalCheck("inputs.message_cbor/type", 23, field(0))]; // §33: 23 = CONTROL_PUT
+  let body: ReturnType<typeof controlPutBodyFromCbor>;
+  try {
+    body = controlPutBodyFromCbor(field(4) as CborValue);
+  } catch (e) {
+    const outcome = negative(c, wireCodeOf(e));
+    return { checks: [...checks, ...outcome.checks], pending: outcome.pending };
+  }
   const ctx = c.context as { current_control_head?: unknown } | undefined;
   const chain = validateControlChain(publishedChain(context));
   if (chain.kind !== "linear") throw new Error("the published Control Chain does not validate");
   const head = referenced(context, ctx?.current_control_head);
   const state = chain.stateAt(head);
   if (state === undefined) throw new Error("the context head is not on the published chain");
-  const result = proposeControlPut(state, controlPutBodyFromCbor(field(4) as CborValue));
+  const result = proposeControlPut(state, body);
   if (result.kind === "head-mismatch")
     checks.push(bytesCheck("context.current_control_head", head, result.currentHead));
   const actual =
@@ -498,13 +522,57 @@ function recipientKeys(context: HandlerContext, id: Uint8Array): KeyPackageRecip
 }
 
 /**
- * LFCP-024. Every HPKE field is checked: info and AAD built from the
- * payload (§25.1); enc = X25519(skE); the shared secret, enc and
- * ciphertext reproduced through the library from the published skE
- * (test-only wrapper, hpke-raw-ske.ts); the published key and base_nonce
- * produce the ciphertext through the suite AEAD; the package opens for its
- * recipient to the epoch DEK with the chain's commitment; and the package
- * is authorized at its head (§25.2).
+ * TEST ONLY: the library's X25519 KEM with its ephemeral key derived from
+ * the published ikmE (RFC 9180 §7.1.3 DeriveKeyPair, G-KP2), so a seal is
+ * reproducible. Only GenerateKeyPair is replaced; Encap, the key schedule
+ * and the AEAD stay the library's. The SDK never does this: sealDek always
+ * draws a fresh ephemeral key.
+ */
+const ikmEKem =
+  (ikmE: Uint8Array): KEMFactory =>
+  () => {
+    const kem = KEM_DHKEM_X25519_HKDF_SHA256();
+    return { ...kem, GenerateKeyPair: (extractable) => kem.DeriveKeyPair(ikmE, extractable) };
+  };
+
+/** A Base-mode seal of `plaintext` to `recipientPublicKey` with skE = DeriveKeyPair(ikmE). */
+async function sealWithIkmE(
+  ikmE: Uint8Array,
+  recipientPublicKey: Uint8Array,
+  plaintext: Uint8Array,
+  info: Uint8Array,
+  aad: Uint8Array,
+) {
+  const kemFactory = ikmEKem(ikmE);
+  const suite = new CipherSuite(kemFactory, KDF_HKDF_SHA256, AEAD_ChaCha20Poly1305);
+  const pkR = await suite.DeserializePublicKey(recipientPublicKey);
+  const ephemeral = await suite.DeriveKeyPair(ikmE, true);
+  const { shared_secret } = await kemFactory().Encap(pkR);
+  const sealed = await suite.Seal(pkR, plaintext, { info, aad });
+  return {
+    skE: await suite.SerializePrivateKey(ephemeral.privateKey),
+    enc: sealed.encapsulatedSecret,
+    sharedSecret: shared_secret,
+    ciphertext: sealed.ciphertext,
+  };
+}
+
+/** The recipient side of the KEM: the shared secret from enc and the recipient's X25519 secret. */
+async function decapShared(enc: Uint8Array, recipientSecret: Uint8Array): Promise<Uint8Array> {
+  const kem = KEM_DHKEM_X25519_HKDF_SHA256();
+  const skR = await kem.DeserializePrivateKey(recipientSecret, false);
+  return kem.Decap(enc, skR, undefined);
+}
+
+/**
+ * LFCP-024, G-KP2. Every HPKE field is checked: info and AAD built from
+ * the payload (§25.1); skE = DeriveKeyPair(inputs.hpke_ephemeral_ikm) and
+ * enc = its public key; the shared secret from both the sender (Encap) and
+ * the recipient (Decap) side; enc and ciphertext reproduced through the
+ * library seal; the published key and base_nonce produce the ciphertext
+ * through the suite AEAD; the package opens for its recipient to the epoch
+ * DEK with the chain's commitment; and the package is authorized at its
+ * head (§25.2).
  */
 const keyPackage: Handler = async (c, context) => {
   const e = c.expected;
@@ -521,12 +589,16 @@ const keyPackage: Handler = async (c, context) => {
   const p = decodeKeyPackagePayload(payload);
   const info = keyPackageHpkeInfo(p.resourceId, p.dataEpoch, p.recipient);
   const aad = keyPackageHpkeAad(p.resourceId, p.dataEpoch, p.controlHead);
-  const skE = hexOf(c.inputs, "hpke_ephemeral_private");
+  const ikmE = hexOf(c.inputs, "hpke_ephemeral_ikm");
   const recipient = recipientKeys(context, p.recipient);
   const dek = dekForEpoch(context, p.dataEpoch);
   const dekBytes = exportSecretKeyBytes(dek);
-  const seal = await sealWithRawSkE(skE, recipient.descriptor.x25519PublicKey, dekBytes, info, aad);
-  const published = await aeadSeal(
+  const seal = await sealWithIkmE(ikmE, recipient.descriptor.x25519PublicKey, dekBytes, info, aad);
+  const decapped = await decapShared(
+    hexOf(e, "hpke_enc"),
+    exportSecretKeyBytes(recipient.agreement),
+  );
+  const published = await AEAD_ChaCha20Poly1305().Seal(
     hexOf(e, "hpke_key"),
     hexOf(e, "hpke_base_nonce"),
     aad,
@@ -538,10 +610,16 @@ const keyPackage: Handler = async (c, context) => {
     bytesCheck("hpke_info_cbor/construct", hexOf(e, "hpke_info_cbor"), info),
     deterministic("hpke_aad_cbor/deterministic", hexOf(e, "hpke_aad_cbor")),
     bytesCheck("hpke_aad_cbor/construct", hexOf(e, "hpke_aad_cbor"), aad),
+    bytesCheck("hpke_ephemeral_private/derive", hexOf(e, "hpke_ephemeral_private"), seal.skE),
     sameBytes("hpke_enc/payload-field", hexOf(e, "hpke_enc"), () => p.hpkeEnc),
-    bytesCheck("hpke_enc/derive", hexOf(e, "hpke_enc"), importAgreementKey(skE).publicKey),
+    bytesCheck(
+      "hpke_enc/derive",
+      hexOf(e, "hpke_enc"),
+      importAgreementKey(hexOf(e, "hpke_ephemeral_private")).publicKey,
+    ),
     bytesCheck("hpke_enc/seal", hexOf(e, "hpke_enc"), seal.enc),
-    bytesCheck("hpke_shared_secret/derive", hexOf(e, "hpke_shared_secret"), seal.sharedSecret),
+    bytesCheck("hpke_shared_secret/encap", hexOf(e, "hpke_shared_secret"), seal.sharedSecret),
+    bytesCheck("hpke_shared_secret/decap", hexOf(e, "hpke_shared_secret"), decapped),
     bytesCheck("hpke_key/aead", hexOf(e, "hpke_ciphertext"), published),
     bytesCheck("hpke_base_nonce/aead", hexOf(e, "hpke_ciphertext"), published),
     sameBytes("hpke_ciphertext/payload-field", hexOf(e, "hpke_ciphertext"), () => p.hpkeCiphertext),

@@ -244,6 +244,20 @@
       "parts": {
         "outcome": "LFCP-025"
       }
+    },
+    "NACK_CONTROL_HEAD_MISMATCH": {
+      "reason": "Deterministic CBOR runs here; the message codec, and the NACK details carrying the current head (§47, G-MSG5), do not.",
+      "parts": {
+        "message_cbor/typed": "LFCP-026"
+      }
+    },
+    "unknown_message_type": {
+      "task": "LFCP-026",
+      "reason": "§33 (G-MSG1): an unassigned message type is PROTOCOL_UNSUPPORTED; the envelope decoder that reads the type is the message codec."
+    },
+    "data_have_reversed_range": {
+      "task": "LFCP-028",
+      "reason": "§48 (G-MSG6, G-HV1): live Have entries are normalized, and a reversed range or sequence 0 is MALFORMED_MESSAGE; live Have decoding and normalization are not implemented (have.ts covers persistent canonical Haves only)."
     }
   }
 }
