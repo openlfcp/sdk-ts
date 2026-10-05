@@ -61,3 +61,12 @@ export {
   saveControlChain,
   saveControlConflict,
 } from "./storage.js";
+export {
+  defaultReconnect,
+  type ReconnectPolicy,
+  type ResourceBinding,
+  SyncClient,
+  type SyncClientOptions,
+  type SyncEvent,
+  startSyncDriver,
+} from "./sync-client.js";
