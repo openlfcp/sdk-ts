@@ -10,7 +10,6 @@ import {
   dataEpoch,
   fromBase64url,
   fromHex,
-  LfcpError,
   type PrincipalId,
   resourceId,
   toBase64url,
@@ -82,6 +81,7 @@ import {
   proposeControlPut,
   type ReceivedDataUnit,
   receiveDataUnit,
+  receiveKeyPackage,
   receiveSnapshot,
   type Signer,
   serverReceive,
@@ -1393,31 +1393,53 @@ function signedNegative<P>(
 }
 
 /**
- * LFCP-024: a received Key Package opened with the recipient key its
- * vector's context names (hpke_recipient_mismatch_KP0: CAROL's key for a
- * package sealed to BOB). Opening failures are client-local (N5), so the
- * outcome has no wire code: the vector requires failure only.
+ * LFCP-024: a received Key Package through receiveKeyPackage, opened with
+ * the recipient key its vector's context names. hpke_recipient_mismatch_KP0
+ * (KP-1, ADR 0003) names CAROL at C3, where every §25.2 check passes, and
+ * is sealed to BOB, so only the HPKE open may fail. Opening failures are
+ * client-local (N5): they have no wire code, and a §25.2 rejection would
+ * show up as one.
  */
 const keyPackageOpen: AfterReceive<KeyPackagePayload> = async (context, parsed, vector) => {
   const ref = (vector.context as { recipient_x25519_private?: unknown } | undefined)
     ?.recipient_x25519_private;
   if (ref === undefined) return null;
-  const chain = validateControlChain(publishedChain(context));
-  if (chain.kind !== "linear") return null;
-  const commitment = chain.state.epochs.get(String(parsed.payload.dataEpoch))?.dekCommitment;
-  if (commitment === undefined) return "MISSING_DEPENDENCY";
+  if (validateControlChain(publishedChain(context)).kind !== "linear") return null;
   const descriptor = principals(context).get(toHex(parsed.payload.recipient))?.descriptor;
   if (descriptor === undefined) return "CLIENT_LOCAL:UNKNOWN_RECIPIENT";
-  try {
-    await openKeyPackage(
-      parsed,
-      { descriptor, agreement: importAgreementKey(referenced(context, ref)) },
-      commitment,
-    );
-    return null;
-  } catch (e) {
-    return `CLIENT_LOCAL:${e instanceof LfcpError ? e.code : String(e)}`;
-  }
+  const r = await receiveKeyPackage(publishedView(context), parsed.signed.bytes, {
+    descriptor,
+    agreement: importAgreementKey(referenced(context, ref)),
+  });
+  if (r.kind === "opened") return null;
+  return r.kind === "rejected" ? r.wireCode : `CLIENT_LOCAL:${r.code}`;
+};
+
+const keyPackageReceive = signedNegative(
+  parseKeyPackage,
+  (p) => expectedSignerOf(p.payload),
+  keyPackageOpen,
+);
+
+/** A codeless Key Package negative must fail client-locally (N5), never with a §25.2 wire code. */
+const keyPackageNegative: Handler = async (c, context) => {
+  const result = await keyPackageReceive(c, context);
+  const e = c.expected as { valid?: unknown; error?: unknown };
+  if (e.valid === true || e.error !== undefined || !has(c.inputs, "cose_sign1")) return result;
+  const parsed = parseKeyPackage(hexOf(c.inputs, "cose_sign1"));
+  const actual = await keyPackageOpen(context, parsed, c);
+  return {
+    ...result,
+    checks: [
+      ...result.checks,
+      check(
+        "outcome/client-local",
+        () =>
+          actual?.startsWith("CLIENT_LOCAL:") === true ||
+          `expected a client-local failure, actual ${actual}`,
+      ),
+    ],
+  };
 };
 
 /** The vector outcome of a received Data Unit: null when accepted, else a code or a client-local marker. */
@@ -1606,11 +1628,7 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   "validation/data_unit": dataUnitNegative,
   "validation/control_record": controlRecordNegative,
   "validation/control_put": controlPutNegative,
-  "validation/key_package": signedNegative(
-    parseKeyPackage,
-    (p) => expectedSignerOf(p.payload),
-    keyPackageOpen,
-  ),
+  "validation/key_package": keyPackageNegative,
   "validation/snapshot": snapshotNegative,
   "validation/principal": principalNegative,
   "validation/wire_message": wireMessageNegative,
