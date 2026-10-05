@@ -7,3 +7,8 @@ export {
   nextActorSequence,
   SequenceReuseGuard,
 } from "./sequence.js";
+export {
+  InMemorySnapshotSequenceReservation,
+  SnapshotSequenceGuard,
+  type SnapshotSequenceReservation,
+} from "./snapshot-sequence.js";
