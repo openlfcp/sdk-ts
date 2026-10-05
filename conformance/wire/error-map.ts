@@ -1,13 +1,16 @@
 // SDK error code -> LFCP-WIRE-01 §62 code for a received persistent object
 // outside HELLO/AUTH, as decided in ADR 0001 (N1, N4, N6, N7, CB1-CB3, P1,
-// P2) and documented on each code in packages/core/src/errors.ts.
+// P2) and ADR 0002 (W1, G-CP3, P3), and documented on each code in
+// packages/core/src/errors.ts.
 
 import { LfcpError } from "@openlfcp/core";
 
 const WIRE_CODE: Readonly<Record<string, string>> = {
   COSE_MALFORMED: "MALFORMED_MESSAGE",
   INVALID_STRUCTURE: "MALFORMED_MESSAGE",
-  UNSUPPORTED_VALUE: "MALFORMED_MESSAGE",
+  // §14: an unknown core Control Record type; §13.1: a misplaced Genesis.
+  UNSUPPORTED_VALUE: "INVALID_CONTROL_CHAIN",
+  INVALID_CONTROL_CHAIN: "INVALID_CONTROL_CHAIN",
   INVALID_PRINCIPAL_DESCRIPTOR: "MALFORMED_MESSAGE",
   // AUTH_FAILED inside HELLO/AUTH (P2); no vector here is a handshake message.
   PRINCIPAL_ID_MISMATCH: "MALFORMED_MESSAGE",

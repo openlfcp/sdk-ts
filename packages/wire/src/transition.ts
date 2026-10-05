@@ -98,8 +98,16 @@ export function proposeControlTransition(
     const error = e instanceof LfcpError ? e : new LfcpError("INVALID_STRUCTURE", String(e));
     return Object.freeze({
       kind: "invalid",
-      problem: error.code === "UNSUPPORTED_VALUE" ? "UNSUPPORTED_TYPE" : "MALFORMED",
-      wireCode: "MALFORMED_MESSAGE",
+      problem:
+        error.code === "UNSUPPORTED_VALUE"
+          ? "UNSUPPORTED_TYPE"
+          : error.code === "INVALID_CONTROL_CHAIN"
+            ? "SEQUENCE"
+            : "MALFORMED",
+      wireCode:
+        error.code === "UNSUPPORTED_VALUE" || error.code === "INVALID_CONTROL_CHAIN"
+          ? "INVALID_CONTROL_CHAIN"
+          : "MALFORMED_MESSAGE",
       error,
     });
   }

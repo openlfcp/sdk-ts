@@ -116,11 +116,11 @@ export type ControlBodyType = ControlBody["type"];
 const CODE: Readonly<Record<Exclude<ControlBodyType, "EXTENSION">, bigint>> = CONTROL_TYPE;
 
 /**
- * §14 core types MVP 0.1 implements; the others decode but must not be
- * applied. OWNER_TRANSFER_COMMIT is verified and applied (user decision on
- * LFCP-021; the next spec patch amends MVP-0.1-PROTOCOL-SCOPE §4 to
- * "ownership transfer verification is in MVP 0.1; the transfer UI/flow
- * remains deferred"). Coordinator recovery and tombstones stay deferred.
+ * §14 core types MVP 0.1 implements; the others decode but are not
+ * applied. OWNER_TRANSFER_COMMIT is verified and applied
+ * (MVP-0.1-PROTOCOL-SCOPE §4: "ownership transfer verification is in MVP
+ * 0.1"). A chain containing Coordinator Recovery or Resource Tombstone is
+ * refused (DV1, chain.ts); extensions are kept unapplied.
  */
 const MVP_SUPPORTED: ReadonlySet<ControlBodyType> = new Set([
   "GENESIS",
@@ -178,8 +178,9 @@ function abilityList(f: Fields, key: number, nonEmpty: boolean): readonly bigint
 
 /**
  * Decodes the body of a Control Record of §14 type `type`. Core types 0-8
- * get their closed-map structure; 9-31 are UNSUPPORTED_VALUE; 32 and up
- * are kept as opaque EXTENSION bodies.
+ * get their closed-map structure; 9-31 are UNSUPPORTED_VALUE (§14:
+ * INVALID_CONTROL_CHAIN on the wire); 32 and up are kept as opaque
+ * EXTENSION bodies.
  */
 export function controlBodyFromCbor(type: bigint, value: CborValue): ControlBody {
   switch (type) {
@@ -293,12 +294,10 @@ export function decodeControlRecord(bytes: Uint8Array): ControlRecord {
 
 /**
  * The Principal whose key must have signed a Control Record: its issuer
- * (payload field 4). Open gap "issuer-as-signer": §13 does not say so in
- * one sentence, but §15 (Genesis signed by its owner), §18.1 (claim issuer
- * is the Invitation Principal, signed by it) and §23.3 (commit signed by
- * the new owner, who issues it) imply it, and every published vector has
- * kid = issuer. Resolving the issuer to a descriptor (and checking its
- * authority) is LFCP-020/021.
+ * (payload field 4). §13: "the protected-header kid MUST equal field 4,
+ * and a record whose kid is any other Principal is rejected with
+ * INVALID_SIGNATURE." Resolving the issuer to a descriptor (and checking
+ * its authority) is LFCP-020/021.
  */
 export const controlRecordSigner = (record: Parsed<ControlRecordPayload>): PrincipalId =>
   record.payload.issuer;
@@ -465,7 +464,7 @@ export interface SignedControlRecord extends SignedBytes {
 /**
  * Signs a Control Record: typed payload -> deterministic CBOR -> canonical
  * untagged COSE_Sign1 (signObject) -> exact bytes -> SHA-256 = record ID.
- * The issuer is the signer's Principal (open gap "issuer-as-signer", see
+ * The issuer is the signer's Principal (§13: kid = issuer, see
  * controlRecordSigner).
  */
 export function signControlRecord(

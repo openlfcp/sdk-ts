@@ -285,7 +285,7 @@ describe("typed bodies", () => {
     }
   });
 
-  it("rejects reserved core types 9-31 with UNSUPPORTED_VALUE (§14)", () => {
+  it("rejects reserved core types 9-31 with UNSUPPORTED_VALUE (§14: INVALID_CONTROL_CHAIN on the wire)", () => {
     expect(codeOf(() => controlBodyFromCbor(9n, cborMap([])))).toBe("UNSUPPORTED_VALUE");
     expect(codeOf(() => controlBodyFromCbor(31n, cborMap([])))).toBe("UNSUPPORTED_VALUE");
   });

@@ -39,8 +39,10 @@ import { type ActorHave, canonicalFrontierFromCbor } from "./have.js";
  *
  * Errors and their wire mapping (ADR 0001):
  * - COSE_MALFORMED, CBOR_* and INVALID_STRUCTURE → MALFORMED_MESSAGE;
- * - UNSUPPORTED_VALUE (reserved core Control Record type, §14) →
- *   MALFORMED_MESSAGE until §14 names a code;
+ * - UNSUPPORTED_VALUE (reserved core Control Record type) →
+ *   INVALID_CONTROL_CHAIN (§14);
+ * - INVALID_CONTROL_CHAIN (a Genesis not at control_seq 0 with a null
+ *   link, §13.1) → INVALID_CONTROL_CHAIN;
  * - a failed `verifySignedObject` against the expected signer → INVALID_SIGNATURE.
  */
 
@@ -127,8 +129,9 @@ const ALL_FIELDS = [0, 1, 2, 3, 4, 5, 6];
 /**
  * Structural rules: the §13 field set, a §14 type that is not reserved
  * (UNSUPPORTED_VALUE otherwise), and a Genesis record (type 0) at
- * control_seq 0 with a null link (§13.1). Sequence continuity and
- * prev_control_id linkage are chain validation (LFCP-020).
+ * control_seq 0 with a null link (§13.1: INVALID_CONTROL_CHAIN otherwise).
+ * Sequence continuity and prev_control_id linkage are chain validation
+ * (LFCP-020).
  */
 export function controlRecordPayloadFromCbor(value: CborValue): ControlRecordPayload {
   const f = new Fields(value, "control-record-payload", ALL_FIELDS.slice(0, 6));
@@ -144,7 +147,10 @@ export function controlRecordPayloadFromCbor(value: CborValue): ControlRecordPay
     );
   }
   if (controlType === CONTROL_TYPE.GENESIS && (controlSeq !== 0n || prev !== null))
-    f.fail(1, "and field 2 must be 0 and null in a Genesis record (§13.1)");
+    throw new LfcpError(
+      "INVALID_CONTROL_CHAIN",
+      "a Genesis record must have control_seq 0 and a null prev_control_id (§13.1)",
+    );
   return Object.freeze({
     kind: "control-record",
     resourceId: rid,

@@ -55,9 +55,8 @@ export type LfcpErrorCode =
   | "INVALID_STRUCTURE"
   /**
    * A well-formed value that LFCP reserves but this version does not define:
-   * a core Control Record type 9–31 (§14, "MUST cause validation failure").
-   * §14 names no wire code; until the spec does, it surfaces as
-   * MALFORMED_MESSAGE.
+   * a core Control Record type 9–31. §14: "Unknown core Control Record types
+   * MUST cause validation failure, with INVALID_CONTROL_CHAIN."
    */
   | "UNSUPPORTED_VALUE"
   /**
@@ -75,12 +74,22 @@ export type LfcpErrorCode =
   /**
    * A Control Chain that is not one valid linear chain (LFCP-WIRE-01 §13,
    * §13.1): no Genesis, a sequence that is not previous + 1, a link that is
-   * not the previous record ID, a different Resource, a record that links
-   * to nothing, or an issuer whose descriptor cannot be resolved. Surfaces
-   * on the wire as INVALID_CONTROL_CHAIN (the unresolved-issuer case
-   * provisionally; MISSING_DEPENDENCY is the alternative).
+   * not the previous record ID, a different Resource, or a record that
+   * links to nothing. INVALID_CONTROL_CHAIN on the wire (§13.1).
    */
   | "INVALID_CONTROL_CHAIN"
+  /**
+   * A record whose issuer cannot be resolved to a Principal Descriptor, or
+   * an object that references a Control Head the receiver does not have.
+   * MISSING_DEPENDENCY on the wire (§13.1); the receiver may fetch and retry.
+   */
+  | "MISSING_DEPENDENCY"
+  /**
+   * Something this implementation does not support by scope: a Control
+   * Chain containing a Coordinator Recovery (7) or Resource Tombstone (8)
+   * record (MVP-0.1-PROTOCOL-SCOPE §4, DV1). PROTOCOL_UNSUPPORTED on the wire.
+   */
+  | "PROTOCOL_UNSUPPORTED"
   /** A signed object whose kid or signature is wrong for its expected signer (G1/N2). INVALID_SIGNATURE on the wire. */
   | "INVALID_SIGNATURE"
   /** A record the authorization policy (LFCP-021) refuses. AUTHORIZATION_FAILED on the wire. */

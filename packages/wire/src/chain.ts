@@ -90,7 +90,7 @@ export interface ControlState {
   /** The owner: the Genesis owner, or the new owner after a verified transfer (§15, §23.3). */
   readonly owner: PrincipalDescriptor;
   readonly route: ControlRoute;
-  /** §20 route version of `route`; Genesis counts as 0 (inferred). */
+  /** §20 route version of `route`; Genesis implies route version 0 (§15). */
   readonly routeVersion: bigint;
   /** The current Data Epoch. */
   readonly epoch: ControlEpoch;
@@ -119,7 +119,8 @@ export type ChainProblem =
   | "SIGNATURE"
   | "UNRESOLVED_ISSUER"
   | "EPOCH"
-  | "UNAUTHORIZED";
+  | "UNAUTHORIZED"
+  | "DEFERRED_TYPE";
 
 export type ChainResult =
   | {
@@ -127,7 +128,7 @@ export type ChainResult =
       readonly state: ControlState;
       /** The validated records in chain order (from the start, Genesis included when no start was given). */
       readonly records: readonly ControlRecord[];
-      /** Records kept in the chain but not applied (mvpSupported = false), in chain order. */
+      /** Extension records kept in the chain but not applied (mvpSupported = false), in chain order. */
       readonly unappliedRecords: readonly ControlRecordId[];
       /**
        * The validated state at any head of this chain (from the start, or
@@ -177,19 +178,24 @@ export interface ChainOptions {
 
 const WIRE: Readonly<Record<ChainProblem, string>> = {
   MALFORMED: "MALFORMED_MESSAGE",
-  // Provisional (W1): §14 names no code for an unknown core type.
-  UNSUPPORTED_TYPE: "MALFORMED_MESSAGE",
+  // §14: "Unknown core Control Record types MUST cause validation failure, with INVALID_CONTROL_CHAIN."
+  UNSUPPORTED_TYPE: "INVALID_CONTROL_CHAIN",
+  // §13.1: a broken chain structure is INVALID_CONTROL_CHAIN.
   NO_GENESIS: "INVALID_CONTROL_CHAIN",
+  // §15: a Genesis whose issuer or kid is not its owner.
   GENESIS_SIGNER: "INVALID_SIGNATURE",
   RESOURCE: "INVALID_CONTROL_CHAIN",
   SEQUENCE: "INVALID_CONTROL_CHAIN",
   PREVIOUS: "INVALID_CONTROL_CHAIN",
+  // §13: kid MUST equal the issuer, and the signature must verify; §23.3 transfer signatures.
   SIGNATURE: "INVALID_SIGNATURE",
-  // Provisional: MISSING_DEPENDENCY is the alternative (open question).
-  UNRESOLVED_ISSUER: "INVALID_CONTROL_CHAIN",
+  // §13.1: an issuer the receiver cannot resolve to a Principal Descriptor.
+  UNRESOLVED_ISSUER: "MISSING_DEPENDENCY",
   // PROVISIONAL (G-EP3): a Key Epoch that is not current + 1 breaks the chain.
   EPOCH: "INVALID_CONTROL_CHAIN",
   UNAUTHORIZED: "AUTHORIZATION_FAILED",
+  // MVP-0.1-PROTOCOL-SCOPE §4 (DV1): Coordinator Recovery and Resource Tombstone records.
+  DEFERRED_TYPE: "PROTOCOL_UNSUPPORTED",
 };
 
 const SDK_CODE: Readonly<Record<ChainProblem, LfcpErrorCode>> = {
@@ -201,9 +207,10 @@ const SDK_CODE: Readonly<Record<ChainProblem, LfcpErrorCode>> = {
   SEQUENCE: "INVALID_CONTROL_CHAIN",
   PREVIOUS: "INVALID_CONTROL_CHAIN",
   SIGNATURE: "INVALID_SIGNATURE",
-  UNRESOLVED_ISSUER: "INVALID_CONTROL_CHAIN",
+  UNRESOLVED_ISSUER: "MISSING_DEPENDENCY",
   EPOCH: "INVALID_CONTROL_CHAIN",
   UNAUTHORIZED: "AUTHORIZATION_FAILED",
+  DEFERRED_TYPE: "PROTOCOL_UNSUPPORTED",
 };
 
 interface Entry {
@@ -309,8 +316,8 @@ function genesisState(record: ControlRecord): ControlState {
 /**
  * The state after a validated record. Applied records (mvpSupported)
  * change derived state: descriptors (LFCP-020), grants, revocations, claims
- * and routes (LFCP-021); LFCP-023 adds epochs here. Unapplied records move
- * the head and nothing else.
+ * and routes (LFCP-021); LFCP-023 adds epochs here. Unapplied (extension)
+ * records move the head and nothing else.
  */
 function applyRecord(state: ControlState, record: ControlRecord): ControlState {
   const next = { head: controlRecordId(record.signed.id), seq: record.payload.controlSeq };
@@ -400,7 +407,11 @@ export function validateControlChain(
       }
       early.push(
         problem(
-          error.code === "UNSUPPORTED_VALUE" ? "UNSUPPORTED_TYPE" : "MALFORMED",
+          error.code === "UNSUPPORTED_VALUE"
+            ? "UNSUPPORTED_TYPE"
+            : error.code === "INVALID_CONTROL_CHAIN"
+              ? "SEQUENCE"
+              : "MALFORMED",
           { index, recordId, seq: -1n },
           error.message,
           error,
@@ -408,6 +419,20 @@ export function validateControlChain(
       );
     }
   });
+  // DV1 (MVP-0.1-PROTOCOL-SCOPE §4): "An MVP 0.1 implementation MUST refuse
+  // a Control Chain that contains" a COORDINATOR_RECOVERY (7) or a
+  // RESOURCE_TOMBSTONE (8) record, "with PROTOCOL_UNSUPPORTED".
+  for (const e of entries) {
+    const type = e.record.body.type;
+    if (type === "COORDINATOR_RECOVERY" || type === "RESOURCE_TOMBSTONE")
+      early.push(
+        problem(
+          "DEFERRED_TYPE",
+          at(e),
+          `a ${type} record: MVP 0.1 refuses a chain containing one (scope §4, DV1)`,
+        ),
+      );
+  }
   if (early.length > 0) return invalid(early);
 
   // The same record delivered twice is one record.
@@ -427,7 +452,8 @@ export function validateControlChain(
         return invalid(
           others.map((g) => problem("RESOURCE", at(g), "a Genesis of another Resource")),
         );
-      // Open gap: two Genesis records for one Resource; provisionally a root conflict.
+      // §13.2: "Two different validly signed Genesis Records for one Resource
+      // ID are a fork at the root": neither is accepted (CONTROL_CONFLICT).
       return conflict(null, 0n, [start.genesisId, ...others.map((g) => rid(g.record))], null);
     }
     rest = rest.filter((e) => e.key !== toHex(start.head));
@@ -460,7 +486,8 @@ export function validateControlChain(
         return invalid(
           geneses.map((g) => problem("RESOURCE", at(g), "Genesis records of different Resources")),
         );
-      // Open gap: two Genesis records for one Resource; provisionally a root conflict.
+      // §13.2: "Two different validly signed Genesis Records for one Resource
+      // ID are a fork at the root": neither is accepted (CONTROL_CONFLICT).
       return conflict(
         null,
         0n,
@@ -507,7 +534,7 @@ export function validateControlChain(
         );
         continue;
       }
-      // Open gap "issuer-as-signer": the issuer is the expected signer (see controlRecordSigner).
+      // §13: the issuer signs, and kid MUST equal it (see controlRecordSigner).
       const issuer = controlRecordSigner(k.record);
       const descriptor =
         state.principals.get(toHex(issuer)) ??

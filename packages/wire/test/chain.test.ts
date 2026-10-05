@@ -76,12 +76,17 @@ const raw = (fields: [number, unknown][], signer: Signer): Built => {
 };
 
 // G <- C1 (grant BRUNO, by ALICE) <- C2 (route, by BRUNO) <- C3 (grant CARLA, by ALICE)
-//   <- C4 (tombstone, deferred) <- C5 (route, by CARLA)
+//   <- C4 (extension, by the owner ALICE: kept, unapplied) <- C5 (route, by CARLA)
 const G = sign(after(null, 0n), genesisBody(), ALICE);
 const C1 = sign(after(G, 1n), grant(BRUNO), ALICE);
 const C2 = sign(after(C1, 2n), route(2n), BRUNO);
 const C3 = sign(after(C2, 3n), grant(CARLA), ALICE);
-const C4 = sign(after(C3, 4n), { type: "RESOURCE_TOMBSTONE", reason: 0n }, ALICE);
+const extension = (code: bigint): ControlBody => ({
+  type: "EXTENSION",
+  code,
+  body: cborMap([[0, "x"]]),
+});
+const C4 = sign(after(C3, 4n), extension(32n), ALICE);
 const C5 = sign(after(C4, 5n), route(3n), CARLA);
 const CHAIN = [G, C1, C2, C3, C4, C5];
 const bytesOf = (list: readonly Built[]) => list.map((b) => b.bytes);
@@ -269,7 +274,7 @@ describe("validateControlChain", () => {
     expect([...kinds].sort()).toEqual(["conflict", "invalid", "linear"]);
   }, 30_000);
 
-  it("rejects an unknown core type mid-chain as UNSUPPORTED_VALUE", () => {
+  it("rejects an unknown core type mid-chain as INVALID_CONTROL_CHAIN (§14)", () => {
     const unknown = raw(
       [
         [0, R],
@@ -285,16 +290,65 @@ describe("validateControlChain", () => {
     expect([r.problem, r.error.code, r.wireCode]).toEqual([
       "UNSUPPORTED_TYPE",
       "UNSUPPORTED_VALUE",
-      "MALFORMED_MESSAGE",
+      "INVALID_CONTROL_CHAIN",
     ]);
   });
 
-  it("keeps deferred types and extensions in the chain, unapplied", () => {
-    const ext = sign(
-      after(C5, 6n),
-      { type: "EXTENSION", code: 40n, body: cborMap([[0, "x"]]) },
-      CARLA,
+  it("rejects a Genesis that is not at control_seq 0 with a null link as INVALID_CONTROL_CHAIN (§13.1)", () => {
+    const late = raw(
+      [
+        [0, R],
+        [1, 1],
+        [2, null],
+        [3, 0],
+        [4, ALICE.descriptor.principalId],
+        [5, cborMap([])],
+      ],
+      ALICE,
     );
+    const r = expectInvalid(validateControlChain(bytesOf([G]).concat(late.bytes)));
+    expect([r.problem, r.error.code, r.wireCode]).toEqual([
+      "SEQUENCE",
+      "INVALID_CONTROL_CHAIN",
+      "INVALID_CONTROL_CHAIN",
+    ]);
+  });
+
+  it.each([
+    [
+      "COORDINATOR_RECOVERY",
+      {
+        type: "COORDINATOR_RECOVERY",
+        routeVersion: 1n,
+        endpoints: [{ url: "wss://c.example.test", priority: 0n }],
+        coordinatorUrl: "wss://c.example.test",
+        reason: "lost",
+      },
+    ],
+    ["RESOURCE_TOMBSTONE", { type: "RESOURCE_TOMBSTONE", reason: 0n }],
+  ] as [string, ControlBody][])(
+    "refuses a chain containing %s with PROTOCOL_UNSUPPORTED (DV1)",
+    (_, body) => {
+      const deferred = sign(after(C5, 6n), body, ALICE);
+      const r = expectInvalid(
+        validateControlChain(bytesOf([...CHAIN, deferred]), { authorize: () => true }),
+      );
+      expect([r.problem, r.error.code, r.wireCode, toHex(r.recordId as ControlRecordId)]).toEqual([
+        "DEFERRED_TYPE",
+        "PROTOCOL_UNSUPPORTED",
+        "PROTOCOL_UNSUPPORTED",
+        toHex(deferred.id),
+      ]);
+      // Wherever it is: also when it does not link to the chain at all.
+      const loose = sign(after(null, 0n, R2), genesisBody(), ALICE);
+      expect(expectInvalid(validateControlChain(bytesOf([G, C1, deferred, loose]))).problem).toBe(
+        "DEFERRED_TYPE",
+      );
+    },
+  );
+
+  it("keeps owner extensions in the chain, unapplied", () => {
+    const ext = sign(after(C5, 6n), extension(40n), ALICE);
     const r = expectLinear(validateControlChain(bytesOf([...CHAIN, ext])));
     expect(r.unappliedRecords.map(toHex)).toEqual([toHex(C4.id), toHex(ext.id)]);
     expect(toHex(r.state.head)).toBe(toHex(ext.id));
@@ -302,16 +356,21 @@ describe("validateControlChain", () => {
     const before = r.stateAt(C5.id);
     if (before === undefined) throw new Error("no state at C5");
     expect({ ...r.state, head: before.head, seq: before.seq }).toEqual(before);
-    const beforeTombstone = r.stateAt(C3.id);
-    const afterTombstone = r.stateAt(C4.id);
-    expect(afterTombstone?.grants).toBe(beforeTombstone?.grants);
-    expect(afterTombstone?.route).toBe(beforeTombstone?.route);
+    const beforeExtension = r.stateAt(C3.id);
+    const afterExtension = r.stateAt(C4.id);
+    expect(afterExtension?.grants).toBe(beforeExtension?.grants);
+    expect(afterExtension?.route).toBe(beforeExtension?.route);
   });
 
   it("reports an issuer no record describes, unless a resolver knows it", () => {
     const byStranger = sign(after(C1, 2n), route(2n), CARLA);
     const r = expectInvalid(validateControlChain(bytesOf([G, C1, byStranger])));
-    expect([r.problem, r.wireCode]).toEqual(["UNRESOLVED_ISSUER", "INVALID_CONTROL_CHAIN"]);
+    // §13.1: an issuer the receiver cannot resolve is MISSING_DEPENDENCY.
+    expect([r.problem, r.wireCode, r.error.code]).toEqual([
+      "UNRESOLVED_ISSUER",
+      "MISSING_DEPENDENCY",
+      "MISSING_DEPENDENCY",
+    ]);
     const resolve = (id: PrincipalId) =>
       toHex(id) === toHex(CARLA.descriptor.principalId) ? CARLA.descriptor : undefined;
     // With the descriptor resolved the signature verifies; CARLA holds no
@@ -343,15 +402,10 @@ describe("validateControlChain", () => {
     const r = validateControlChain(bytesOf(CHAIN), {
       authorize: (record) => {
         seen.push(record.body.type);
-        return record.body.type !== "RESOURCE_TOMBSTONE";
+        return record.body.type !== "EXTENSION";
       },
     });
-    expect(seen).toEqual([
-      "CAPABILITY_GRANT",
-      "ROUTE_UPDATE",
-      "CAPABILITY_GRANT",
-      "RESOURCE_TOMBSTONE",
-    ]);
+    expect(seen).toEqual(["CAPABILITY_GRANT", "ROUTE_UPDATE", "CAPABILITY_GRANT", "EXTENSION"]);
     expect([expectInvalid(r).problem, expectInvalid(r).wireCode]).toEqual([
       "UNAUTHORIZED",
       "AUTHORIZATION_FAILED",
@@ -373,7 +427,7 @@ describe("validateControlChain", () => {
 
   it("handles Genesis problems", () => {
     expect(expectInvalid(validateControlChain(bytesOf([C1, C2]))).problem).toBe("NO_GENESIS");
-    // Two Genesis records for one Resource: a root conflict (open gap).
+    // §13.2: two Genesis records for one Resource are a root fork (CONTROL_CONFLICT).
     const G2 = sign(after(null, 0n), genesisBody(BRUNO), BRUNO);
     const r = validateControlChain(bytesOf([G, G2, C1]));
     expect(r.kind === "conflict" && r.commonHead === null && r.seq === 0n).toBe(true);

@@ -307,7 +307,7 @@ describe("payload structure", () => {
     );
   });
 
-  it("control-record: reserved core types 9-31 are UNSUPPORTED_VALUE; 32+ are kept as extensions (§14)", () => {
+  it("control-record: reserved core types 9-31 are UNSUPPORTED_VALUE (INVALID_CONTROL_CHAIN, §14); 32+ are kept as extensions", () => {
     for (const t of [9, 31])
       expect(codeOf(() => controlRecordPayloadFromCbor(control({ 3: t })))).toBe(
         "UNSUPPORTED_VALUE",
@@ -319,13 +319,13 @@ describe("payload structure", () => {
     expect(controlRecordPayloadFromCbor(control({ 3: 8 })).extension).toBe(false);
   });
 
-  it("control-record: Genesis must be at control_seq 0 with a null link (§13.1)", () => {
+  it("control-record: Genesis must be at control_seq 0 with a null link (§13.1: INVALID_CONTROL_CHAIN)", () => {
     expect(controlRecordPayloadFromCbor(control({ 1: 0, 2: null, 3: 0 })).controlSeq).toBe(0n);
     expect(codeOf(() => controlRecordPayloadFromCbor(control({ 1: 1, 2: null, 3: 0 })))).toBe(
-      "INVALID_STRUCTURE",
+      "INVALID_CONTROL_CHAIN",
     );
     expect(codeOf(() => controlRecordPayloadFromCbor(control({ 1: 0, 3: 0 })))).toBe(
-      "INVALID_STRUCTURE",
+      "INVALID_CONTROL_CHAIN",
     );
   });
 });
