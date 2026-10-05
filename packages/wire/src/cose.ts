@@ -10,7 +10,7 @@ import { type SigningKeyPair, sha256, verifyEd25519 } from "@openlfcp/crypto";
 import {
   type CborValue,
   cborMap,
-  decodeStrict,
+  decodeDeterministic,
   encode,
   isCborMap,
   isDeterministic,
@@ -133,14 +133,6 @@ function malformed(why: string): never {
   throw new LfcpError("COSE_MALFORMED", `not a canonical LFCP COSE_Sign1: ${why}`);
 }
 
-/** Strict decode plus the §5.2 re-encode comparison. */
-function decodeDeterministic(bytes: Uint8Array, what: string): CborValue {
-  const value = decodeStrict(bytes);
-  if (!bytesEqual(encode(value), bytes))
-    throw new LfcpError("CBOR_NON_CANONICAL", `${what} is not deterministic CBOR`);
-  return value;
-}
-
 /**
  * Parses received signed-object bytes without verifying the signature. It
  * checks the canonical shape and that the object, its protected header and
@@ -150,12 +142,12 @@ function decodeDeterministic(bytes: Uint8Array, what: string): CborValue {
 export function parseSignedObject(bytes: Uint8Array): SignedObject {
   if (bytes.length > 0 && (bytes[0] as number) >> 5 === 6)
     malformed("tagged objects are not allowed (§10)");
-  const value = decodeDeterministic(bytes, "the signed object");
+  const value = decodeDeterministic(bytes);
   if (!Array.isArray(value) || value.length !== 4) malformed("not a four-element array");
   const [protectedBytes, unprotected, payloadBytes, signature] = value as CborValue[];
 
   if (!(protectedBytes instanceof Uint8Array)) malformed("protected header is not a byte string");
-  const header = decodeDeterministic(protectedBytes, "the protected header");
+  const header = decodeDeterministic(protectedBytes);
   if (!isCborMap(header) || header.entries.length !== 2)
     malformed("protected header must be exactly {1: -8, 4: kid}");
   const fields = new Map<unknown, CborValue>(header.entries);
@@ -168,8 +160,7 @@ export function parseSignedObject(bytes: Uint8Array): SignedObject {
     malformed("unprotected header must be the empty map");
   if (!(payloadBytes instanceof Uint8Array))
     malformed("payload must be a present byte string (no detached payload)");
-  if (!isDeterministic(payloadBytes))
-    throw new LfcpError("CBOR_NON_CANONICAL", "the payload is not deterministic CBOR");
+  decodeDeterministic(payloadBytes);
   if (!(signature instanceof Uint8Array) || signature.length !== SIGNATURE_LENGTH) {
     malformed(`signature must be ${SIGNATURE_LENGTH} bytes`);
   }

@@ -248,6 +248,18 @@ describe("synthetic malformed objects", () => {
     );
   });
 
+  it("reports the specific CBOR error of a malformed payload", () => {
+    // {1: 1, 1: 1}: a duplicate key; and a payload with trailing bytes.
+    const duplicate = Uint8Array.from([0xa2, 0x01, 0x01, 0x01, 0x01]);
+    expect(codeOf(() => parseSignedObject(build([prot, unprot, duplicate, signature])))).toBe(
+      "CBOR_DUPLICATE_KEY",
+    );
+    const trailing = Uint8Array.from([...payload, 0x00]);
+    expect(codeOf(() => parseSignedObject(build([prot, unprot, trailing, signature])))).toBe(
+      "CBOR_TRAILING_BYTES",
+    );
+  });
+
   it("rejects trailing bytes and a non-array", () => {
     expect(codeOf(() => parseSignedObject(Uint8Array.from([...fromHex(V.D1_COSE), 0])))).toBe(
       "CBOR_TRAILING_BYTES",

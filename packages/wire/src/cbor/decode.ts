@@ -145,6 +145,19 @@ export function decodeStrict(bytes: Uint8Array): CborValue {
  * the same bytes. Signature and object-ID checks still use the received
  * bytes; this only decides whether they are the deterministic encoding.
  */
+/**
+ * Strict decode plus the §5.2 re-encode comparison (N7): the bytes must be
+ * well-formed (CBOR_* errors from `decodeStrict` otherwise) and exactly the
+ * deterministic encoding of their value (CBOR_NON_CANONICAL otherwise). The
+ * re-encoding is only compared, never returned.
+ */
+export function decodeDeterministic(bytes: Uint8Array): CborValue {
+  const value = decodeStrict(bytes);
+  if (!bytesEqual(encode(value), bytes))
+    throw new LfcpError("CBOR_NON_CANONICAL", "the bytes are not the deterministic encoding");
+  return value;
+}
+
 export function isDeterministic(bytes: Uint8Array): boolean {
   let value: CborValue;
   try {
