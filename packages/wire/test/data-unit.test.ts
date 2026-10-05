@@ -350,21 +350,72 @@ describe("receiveDataUnit: the actor hash chain (§26.2, G-DP1)", () => {
     expect(kindOf(await r.receive(u2.bytes))).toBe("held:PREV_MISMATCH");
   });
 
-  it("holds a previous unit at sequence 1 and a null previous after it", async () => {
+  it("holds a previous unit at sequence 1, and a null previous once a unit is accepted", async () => {
     const atOne = handmade({
       dataEpoch: dataEpoch(0n),
       actorSeq: actorSequence(1n),
       prevDataUnitId: dataUnitId(seq32(5)),
       controlHead: C1,
     });
-    const nullAfter = handmade({
+    expect(kindOf(await receiver().receive(atOne.bytes))).toBe("held:PREV_AT_SEQ1");
+    // G-DP1-GAP: a null previous at sequence 2 is the actor's first published unit (1 was
+    // abandoned) while nothing is accepted, and held once a unit of the actor is.
+    const nullAtTwo = handmade({
       dataEpoch: dataEpoch(0n),
       actorSeq: actorSequence(2n),
       prevDataUnitId: null,
       controlHead: C1,
     });
-    expect(kindOf(await receiver().receive(atOne.bytes))).toBe("held:PREV_AT_SEQ1");
-    expect(kindOf(await receiver().receive(nullAfter.bytes))).toBe("held:NULL_PREV_AFTER_1");
+    expect(kindOf(await receiver().receive(nullAtTwo.bytes))).toBe("accepted");
+    const r = receiver();
+    await r.receive(unit({ seq: 1n }).bytes);
+    expect(kindOf(await r.receive(nullAtTwo.bytes))).toBe("held:NULL_PREV_AFTER_ACCEPTED");
+  });
+});
+
+describe("receiveDataUnit: actor chains across abandoned sequences (§26.2, G-DP1-GAP)", () => {
+  it("links a unit to the latest accepted one across a gap, and keeps the hole", async () => {
+    const u1 = unit({ seq: 1n });
+    const u2 = unit({ seq: 2n, prev: u1.unitId });
+    const u4 = unit({ seq: 4n, prev: u2.unitId }); // 3 was reserved and abandoned
+    const r = receiver();
+    for (const u of [u1, u2]) await r.receive(u.bytes);
+    expect(kindOf(await r.receive(u4.bytes))).toBe("accepted");
+    const accepted = await r.seen.acceptedIn(
+      R,
+      BRUNO.descriptor.principalId,
+      actorSequence(1n),
+      actorSequence(9n),
+    );
+    expect(accepted.map((a) => a.seq)).toEqual([1n, 2n, 4n]);
+  });
+
+  it("holds a link to a unit not accepted yet, and resolves 4-before-3", async () => {
+    const u1 = unit({ seq: 1n });
+    const u2 = unit({ seq: 2n, prev: u1.unitId });
+    const u3 = unit({ seq: 3n, prev: u2.unitId });
+    const u4 = unit({ seq: 4n, prev: u3.unitId });
+    const r = receiver();
+    for (const u of [u1, u2]) await r.receive(u.bytes);
+    expect(kindOf(await r.receive(u4.bytes))).toBe("held:GAP");
+    expect(kindOf(await r.receive(u3.bytes))).toBe("accepted");
+    expect(kindOf(await r.receive(u4.bytes))).toBe("accepted");
+  });
+
+  it("holds a unit below the latest accepted one, and a link to an older accepted unit", async () => {
+    const u1 = unit({ seq: 1n });
+    const u2 = unit({ seq: 2n, prev: u1.unitId });
+    const u4 = unit({ seq: 4n, prev: u2.unitId });
+    const r = receiver();
+    for (const u of [u1, u2, u4]) await r.receive(u.bytes);
+    // 3 turns up after 4 linked across it: 4 is the latest, so 3 does not link.
+    expect(kindOf(await r.receive(unit({ seq: 3n, prev: u2.unitId }).bytes))).toBe(
+      "held:PREV_MISMATCH",
+    );
+    // 5 naming 2 instead of the latest (4).
+    expect(kindOf(await r.receive(unit({ seq: 5n, prev: u2.unitId }).bytes))).toBe(
+      "held:PREV_MISMATCH",
+    );
   });
 });
 

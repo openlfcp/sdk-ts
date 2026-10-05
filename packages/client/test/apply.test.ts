@@ -104,6 +104,39 @@ async function units(...values: string[]) {
 }
 
 describe("DataUnitApplier (profile-agnostic)", () => {
+  it("releases a unit held across an abandoned sequence once its previous unit is accepted (§26.2, G-DP1-GAP)", async () => {
+    const merged: string[] = [];
+    const storage = new InMemoryLfcpStorage();
+    const applier = new DataUnitApplier({
+      storage,
+      dek: () => DEK0,
+      handlers: [textHandler(merged) as DataProfileHandler<unknown>],
+    });
+    // The writer abandons sequence 3, so sequence 4 links to 2.
+    const sequences = new InMemoryActorSequenceReservation();
+    const make = (value: string, previousUnitId: DataUnitId | null) =>
+      createDataUnit({
+        view: VIEW,
+        controlHead: VIEW.state.head,
+        actor: OWNER,
+        dek: DEK0,
+        sequences,
+        previousUnitId,
+        profile: TEXT,
+        value,
+      });
+    const u1 = await make("one", null);
+    const u2 = await make("two", u1.unitId);
+    await sequences.reserveNext(VIEW.state.resourceId, OWNER.descriptor.principalId); // 3
+    const u4 = await make("four", u2.unitId);
+    expect(u4.seq).toBe(4n);
+    await applier.receive(VIEW, u1.bytes);
+    expect(await applier.receive(VIEW, u4.bytes)).toMatchObject({ kind: "held", reason: "GAP" });
+    const second = await applier.receive(VIEW, u2.bytes);
+    expect(second.kind === "applied" && second.released.map((r) => r.kind)).toEqual(["applied"]);
+    expect(merged).toEqual(["one", "two", "four"]);
+  });
+
   it("dispatches accepted units to the Resource's profile once, and replays are duplicates", async () => {
     const merged: string[] = [];
     const storage = new InMemoryLfcpStorage();

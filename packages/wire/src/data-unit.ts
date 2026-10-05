@@ -175,6 +175,16 @@ export interface SeenUnits {
     seq: ActorSequence,
     unitId: DataUnitId,
   ): Promise<SeenRecord>;
+  /**
+   * The actor's accepted (merged) units with `from <= seq <= to`, by
+   * sequence (for §26.2: the latest accepted unit of an actor).
+   */
+  acceptedIn(
+    resource: ResourceId,
+    actor: PrincipalId,
+    from: ActorSequence,
+    to: ActorSequence,
+  ): Promise<readonly { readonly seq: ActorSequence; readonly unitId: DataUnitId }[]>;
   /** The ID of the actor's accepted (merged) unit at `seq`, if any. */
   acceptedAt(
     resource: ResourceId,
@@ -233,6 +243,22 @@ export class InMemorySeenUnits implements SeenUnits {
     seq: ActorSequence,
   ): Promise<DataUnitId | undefined> {
     return Promise.resolve(this.#accepted.get(tupleKey(resource, actor, seq)));
+  }
+
+  acceptedIn(
+    resource: ResourceId,
+    actor: PrincipalId,
+    from: ActorSequence,
+    to: ActorSequence,
+  ): Promise<readonly { readonly seq: ActorSequence; readonly unitId: DataUnitId }[]> {
+    const prefix = `${toHex(resource)}:${toHex(actor)}:`;
+    const out: { seq: ActorSequence; unitId: DataUnitId }[] = [];
+    for (const [key, unitId] of this.#accepted) {
+      if (!key.startsWith(prefix)) continue;
+      const seq = BigInt(key.slice(prefix.length));
+      if (seq >= from && seq <= to) out.push({ seq: actorSequence(seq), unitId });
+    }
+    return Promise.resolve(out.sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0)));
   }
 
   markAccepted(
@@ -436,16 +462,19 @@ export async function checkDataUnit(
   });
 }
 
-/** Why a cryptographically valid unit is held, not merged (§26.2, G-DP1). */
+/**
+ * Why a cryptographically valid unit is held, not merged (§26.2, G-DP1,
+ * G-DP1-GAP): it does not link to the actor's latest accepted unit.
+ */
 export type DataUnitHoldReason =
-  /** The receiver has not accepted the actor's unit at seq - 1. */
+  /** `previous` names a unit the receiver has not accepted (yet). */
   | "GAP"
-  /** `previous` names a unit other than the accepted one at seq - 1. */
+  /** `previous` names an accepted unit that is not the actor's latest, or the latest is not below this unit. */
   | "PREV_MISMATCH"
   /** `previous` is not null at sequence 1. */
   | "PREV_AT_SEQ1"
-  /** `previous` is null at a sequence above 1. */
-  | "NULL_PREV_AFTER_1";
+  /** `previous` is null although the receiver has accepted a unit of the actor. */
+  | "NULL_PREV_AFTER_ACCEPTED";
 
 export type ReceivedDataUnit<T> =
   | {
@@ -579,13 +608,34 @@ export async function receiveDataUnit<T>(
 }
 
 /** §26.2: why the unit cannot link to the actor's accepted unit at seq - 1, or undefined when it links. */
+const MAX_SEQ = actorSequence(2n ** 64n - 1n);
+
+/**
+ * §26.2 (G-DP1-GAP): a unit links when its `previous` names the actor's
+ * latest accepted unit, or is null while none is accepted, across any
+ * sequence gap (abandoned sequences are holes that never block). Checked
+ * cheapest first: units at or above this one, then seq - 1, and only for
+ * an actual gap the accepted units further down.
+ */
 async function holdReason(
   seen: SeenUnits,
   p: DataUnitPayload,
 ): Promise<DataUnitHoldReason | undefined> {
-  if (p.actorSeq === 1n) return p.prevDataUnitId === null ? undefined : "PREV_AT_SEQ1";
-  if (p.prevDataUnitId === null) return "NULL_PREV_AFTER_1";
-  const before = await seen.acceptedAt(p.resourceId, p.actor, actorSequence(p.actorSeq - 1n));
-  if (before === undefined) return "GAP";
-  return bytesEqual(before, p.prevDataUnitId) ? undefined : "PREV_MISMATCH";
+  const prev = p.prevDataUnitId;
+  if (p.actorSeq === 1n) return prev === null ? undefined : "PREV_AT_SEQ1";
+  // The latest accepted unit is at or above this one: nothing below can link.
+  if ((await seen.acceptedIn(p.resourceId, p.actor, p.actorSeq, MAX_SEQ)).length > 0)
+    return prev === null ? "NULL_PREV_AFTER_ACCEPTED" : "PREV_MISMATCH";
+  const below = actorSequence(p.actorSeq - 1n);
+  const atBelow = await seen.acceptedAt(p.resourceId, p.actor, below);
+  if (atBelow !== undefined) {
+    if (prev === null) return "NULL_PREV_AFTER_ACCEPTED";
+    return bytesEqual(atBelow, prev) ? undefined : "PREV_MISMATCH";
+  }
+  // A gap below this unit: the latest accepted unit is further down, if any.
+  const accepted = await seen.acceptedIn(p.resourceId, p.actor, actorSequence(1n), below);
+  const latest = accepted.at(-1);
+  if (prev === null) return latest === undefined ? undefined : "NULL_PREV_AFTER_ACCEPTED";
+  if (latest !== undefined && bytesEqual(latest.unitId, prev)) return undefined;
+  return accepted.some((a) => bytesEqual(a.unitId, prev)) ? "PREV_MISMATCH" : "GAP";
 }

@@ -90,6 +90,17 @@ export class StoredSeenUnits implements SeenUnits {
     return this.#storage.dataUnits.acceptedAt(resource, actor, seq);
   }
 
+  async acceptedIn(
+    resource: ResourceId,
+    actor: PrincipalId,
+    from: ActorSequence,
+    to: ActorSequence,
+  ): Promise<readonly { readonly seq: ActorSequence; readonly unitId: DataUnitId }[]> {
+    return (await this.#storage.dataUnits.range(resource, actor, from, to))
+      .filter((u) => u.accepted)
+      .map((u) => ({ seq: u.actorSeq, unitId: u.unitId }));
+  }
+
   async markAccepted(
     _resource: ResourceId,
     _actor: PrincipalId,

@@ -362,15 +362,22 @@ export class DataUnitApplier {
         (unitId): StorageWrite => ({ op: "set-data-unit-status", unitId, status: "merged" }),
       ),
     ]);
-    // §26.2, G-DP1: a held unit of this actor at seq + 1 may link now.
-    const next = await this.#storage.dataUnits.at(
+    // §26.2 (G-DP1, G-DP1-GAP): a held unit of this actor above it may link now, across a gap.
+    const next = await this.#storage.dataUnits.range(
       view.state.resourceId,
       r.actor,
       actorSequence(r.seq + 1n),
+      actorSequence(2n ** 64n - 1n),
     );
     const released: ApplyOutcome[] = [];
-    for (const held of next.filter((u) => u.status === "held"))
+    // Only a held unit whose previous names the unit just accepted can link now.
+    for (const held of next.filter((u) => u.status === "held")) {
+      const previous = parseDataUnit(held.bytes).payload.prevDataUnitId;
+      if (previous === null || !bytesEqual(previous, r.unitId)) continue;
+      // A retry above may already have released it.
+      if ((await this.#storage.dataUnits.get(held.unitId))?.status !== "held") continue;
       released.push(await this.receive(view, held.bytes));
+    }
     const base = {
       unitId: r.unitId,
       dataProfile,
@@ -556,15 +563,22 @@ export class DataUnitApplier {
       },
       { op: "set-accepted", unitId: c.unitId, accepted: true },
     ]);
-    // §26.2, G-DP1: a held unit of this actor at seq + 1 may link now.
-    const next = await this.#storage.dataUnits.at(
+    // §26.2 (G-DP1, G-DP1-GAP): a held unit of this actor above it may link now, across a gap.
+    const next = await this.#storage.dataUnits.range(
       p.resourceId,
       p.actor,
       actorSequence(p.actorSeq + 1n),
+      actorSequence(2n ** 64n - 1n),
     );
     const released: ApplyOutcome[] = [];
-    for (const held of next.filter((u) => u.status === "held"))
+    // Only a held unit whose previous names the unit just accepted can link now.
+    for (const held of next.filter((u) => u.status === "held")) {
+      const previous = parseDataUnit(held.bytes).payload.prevDataUnitId;
+      if (previous === null || !bytesEqual(previous, c.unitId)) continue;
+      // A retry above may already have released it.
+      if ((await this.#storage.dataUnits.get(held.unitId))?.status !== "held") continue;
       released.push(await this.receive(view, held.bytes));
+    }
     return Object.freeze({
       kind: "covered",
       unitId: c.unitId,
