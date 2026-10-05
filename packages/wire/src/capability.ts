@@ -237,17 +237,20 @@ export function authorizeControlRecord(record: ControlRecord, state: ControlStat
       return ALLOW;
     }
     case "CAPABILITY_REVOKE": {
+      // §17.3, in order: the target exists, the issuer's authority covers
+      // it, it is not already revoked. Each failure is AUTHORIZATION_FAILED.
       const target = state.grants.get(key(body.grantId));
       if (target === undefined) return deny("the revoked grant does not exist (§17.3)");
-      // §17.3: "Revoking a grant that is already revoked is rejected with AUTHORIZATION_FAILED."
+      // "The owner may revoke any grant." Otherwise the issuer MUST "possess
+      // capability/revoke authority that covers the target grant".
+      if (!isOwner(state, issuer)) {
+        if (!hasAbility(state, issuer, ABILITY.CAPABILITY_REVOKE))
+          return deny("the issuer does not hold capability/revoke (§17.3)");
+        if (!covers(state, target, issuer))
+          return deny("the issuer's capability/revoke authority does not cover the grant (§17.3)");
+      }
       if (target.revokedBy !== null) return deny("the grant is already revoked (§17.3)");
-      // §17.3: "The owner may revoke any grant." Otherwise the issuer MUST
-      // "possess capability/revoke authority that covers the target grant".
-      if (isOwner(state, issuer)) return ALLOW;
-      if (!hasAbility(state, issuer, ABILITY.CAPABILITY_REVOKE))
-        return deny("the issuer does not hold capability/revoke (§17.3)");
-      if (covers(state, target, issuer)) return ALLOW;
-      return deny("the issuer's capability/revoke authority does not cover the grant (§17.3)");
+      return ALLOW;
     }
     case "CAPABILITY_CLAIM": {
       // §18.1 validation rules 1-5 (rule 6, coordinator serialization, is LFCP-022).

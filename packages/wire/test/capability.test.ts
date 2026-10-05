@@ -268,6 +268,17 @@ describe("revocation (§17.3)", () => {
     expect(outcome(c)).toMatch(/^UNAUTHORIZED\/AUTHORIZATION_FAILED: .*already revoked/);
   });
 
+  it("checks authority before already-revoked (§17.3 order)", () => {
+    const c = new Chain();
+    const g = c.add(grant(BRUNO, [DATA_WRITE]), OWNER);
+    c.add(grant(CARLA, [DATA_READ]), OWNER);
+    c.add(revoke(g), OWNER);
+    c.add(revoke(g), CARLA); // already revoked, and CARLA has no capability/revoke
+    expect(outcome(c)).toMatch(
+      /^UNAUTHORIZED\/AUTHORIZATION_FAILED: .*does not hold capability\/revoke/,
+    );
+  });
+
   it("covers grants delegated from one the revoker issued, not grants it received (§17.3)", () => {
     // OWNER -> BRUNO (P) -> CARLA (C, by BRUNO) -> DORA (D, by CARLA).
     const build = () => {
