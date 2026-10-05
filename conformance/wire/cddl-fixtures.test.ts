@@ -11,14 +11,19 @@
 import { bytesEqual, fromHex } from "@openlfcp/core";
 import {
   canonicalFrontierFromCbor,
+  controlBodyFromCbor,
+  decodeControlRecord,
   decodeControlRecordPayload,
   decodeDataUnitPayload,
   decodeKeyPackagePayload,
   decodePrincipalDescriptor,
   decodeSnapshotPayload,
-  parseControlRecord,
+  ownerTransferAcceptPayloadFromCbor,
+  ownerTransferOfferPayloadFromCbor,
   parseDataUnit,
   parseKeyPackage,
+  parseOwnerTransferAccept,
+  parseOwnerTransferOffer,
   parseSignedObject,
   parseSnapshot,
   sigStructureBytes,
@@ -51,7 +56,24 @@ const RULES: Readonly<Record<string, (bytes: Uint8Array) => unknown>> = {
   "lfcp-protected-header": (b) =>
     parseSignedObject(encode([b, cborMap([]), Uint8Array.of(0xa0), new Uint8Array(64)])),
   "control-record-payload": decodeControlRecordPayload,
-  "control-record": parseControlRecord,
+  // typed-control-record-payload admits only the core types 0-8 (§14 also allows
+  // extensions 32+, which this decoder keeps; queued as spec gap G2).
+  "typed-control-record-payload": (b) => {
+    const p = decodeControlRecordPayload(b);
+    if (p.controlType > 8n) throw new Error("not a core Control Record type");
+    controlBodyFromCbor(p.controlType, p.body);
+  },
+  "genesis-record-payload": (b) => {
+    const p = decodeControlRecordPayload(b);
+    if (p.controlType !== 0n) throw new Error("not a Genesis record");
+    controlBodyFromCbor(p.controlType, p.body);
+  },
+  "control-record": decodeControlRecord,
+  "owner-transfer-offer-payload": (b) => ownerTransferOfferPayloadFromCbor(decodeDeterministic(b)),
+  "owner-transfer-offer": parseOwnerTransferOffer,
+  "owner-transfer-accept-payload": (b) =>
+    ownerTransferAcceptPayloadFromCbor(decodeDeterministic(b)),
+  "owner-transfer-accept": parseOwnerTransferAccept,
   "sig-structure": (b) => {
     const v = decodeDeterministic(b) as CborValue[];
     const [label, prot, aad, payload] = v;

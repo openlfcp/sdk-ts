@@ -27,13 +27,16 @@ import {
   snapshotNonce,
 } from "@openlfcp/crypto";
 import {
+  type ControlRecord,
   canonicalFrontierFromCbor,
+  decodeControlRecord,
   decodeControlRecordPayload,
   decodeDataUnitPayload,
   decodeKeyPackagePayload,
   decodePrincipalDescriptor,
   decodeSnapshotPayload,
   derivePrincipalId,
+  encodeControlRecordPayload,
   encodePrincipalDescriptor,
   expectedSignerOf,
   objectId,
@@ -41,12 +44,16 @@ import {
   parseControlRecord,
   parseDataUnit,
   parseKeyPackage,
+  parseOwnerTransferAccept,
+  parseOwnerTransferOffer,
   parseSignedObject,
   parseSnapshot,
   principalDescriptorFromKeys,
   type Signer,
+  signControlRecord,
   signObject,
   sigStructureBytes,
+  verifyGenesis,
   verifySignedObject,
 } from "@openlfcp/wire";
 import {
@@ -240,10 +247,70 @@ const controlRecord: Handler = (c, context) => {
       ...(signed.parsed
         ? [bytesCheck("record_id/parsed", hexOf(e, "record_id"), signed.parsed.signed.id)]
         : []),
+      ...typedControlChecks(c, context, cose, payload, hexOf(e, "record_id")),
     ],
-    pending: ["payload_cbor/typed-body"],
   };
 };
+
+/**
+ * LFCP-019: the typed body decodes, re-encodes to the exact payload and
+ * re-signs (as the issuer) to the exact object and record ID; a Genesis
+ * verifies against the owner in its body; an ownership transfer commit
+ * carries the exact offer and accept objects of the owner_transfer case.
+ */
+function typedControlChecks(
+  c: VectorCase,
+  context: HandlerContext,
+  cose: Uint8Array,
+  payload: Uint8Array,
+  recordId: Uint8Array,
+): Check[] {
+  let record: ControlRecord;
+  try {
+    record = decodeControlRecord(cose);
+  } catch (e) {
+    return [{ name: "payload_cbor/typed-body", ok: false, message: describeError(e) }];
+  }
+  const header = {
+    resourceId: record.payload.resourceId,
+    controlSeq: record.payload.controlSeq,
+    prevControlId: record.payload.prevControlId,
+  };
+  const resign = () =>
+    signControlRecord(header, record.body, signerFor(context, record.payload.issuer));
+  const checks: Check[] = [
+    sameBytes("payload_cbor/typed-body", payload, () =>
+      encodeControlRecordPayload(header, record.payload.issuer, record.body),
+    ),
+    sameBytes("cose_sign1/sign-typed", cose, () => resign().bytes),
+    sameBytes("record_id/sign-typed", recordId, () => resign().recordId),
+  ];
+  if (record.body.type === "GENESIS") {
+    checks.push(
+      check("cose_sign1/genesis-owner", () => {
+        const v = verifyGenesis(record);
+        return v.valid || `Genesis does not verify against its owner: ${v.reason}`;
+      }),
+    );
+  }
+  const body = record.body;
+  if (body.type === "OWNER_TRANSFER_COMMIT") {
+    const transfer = context.suite.cases.find(
+      (x) => x.type === "bytes" && x.kind === "owner_transfer",
+    );
+    checks.push(
+      check("payload_cbor/transfer-objects", () => {
+        if (transfer === undefined) return "the suite has no owner_transfer case";
+        return (
+          (bytesEqual(body.offer, hexOf(transfer.expected, "offer_cose_sign1")) &&
+            bytesEqual(body.accept, hexOf(transfer.expected, "accept_cose_sign1"))) ||
+          `${c.id} does not carry the owner_transfer offer and accept`
+        );
+      }),
+    );
+  }
+  return checks;
+}
 
 const ownerTransfer: Handler = (c, context) => {
   const checks: Check[] = [];
@@ -263,7 +330,28 @@ const ownerTransfer: Handler = (c, context) => {
     );
     checks.push(bytesCheck(`${side}_id`, hexOf(c.expected, `${side}_id`), objectId(cose)));
   }
-  return { checks, pending: ["offer_payload_cbor/typed", "accept_payload_cbor/typed"] };
+  // LFCP-019: typed payloads (§23.1, §23.2; deferred from MVP 0.1, structure only).
+  checks.push(
+    check("offer_payload_cbor/typed", () => {
+      const offer = parseOwnerTransferOffer(hexOf(c.expected, "offer_cose_sign1")).payload;
+      return (
+        bytesEqual(offer.nonce, hexOf(c.inputs, "nonce")) || "the offer nonce is not inputs.nonce"
+      );
+    }),
+    check("accept_payload_cbor/typed", () => {
+      const offer = parseOwnerTransferOffer(hexOf(c.expected, "offer_cose_sign1")).payload;
+      const accept = parseOwnerTransferAccept(hexOf(c.expected, "accept_cose_sign1"));
+      if (!bytesEqual(accept.payload.offerId, hexOf(c.expected, "offer_id")))
+        return "the accept does not name the offer ID";
+      if (!bytesEqual(accept.payload.newOwner, offer.proposedOwner.principalId))
+        return "the accept is not by the proposed owner";
+      return (
+        bytesEqual(accept.signed.kid, accept.payload.newOwner) ||
+        "the accept is not signed by the new owner"
+      );
+    }),
+  );
+  return { checks };
 };
 
 const keyPackage: Handler = (c, context) => {

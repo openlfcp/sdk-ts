@@ -2,55 +2,6 @@
   "suite": "LFCP-TEST-VECTORS-01",
   "note": "Cases or parts of cases that sdk-ts cannot check yet, with the task that implements them (LFCP-017). Remove an entry when its task lands: the runner fails on stale entries.",
   "cases": {
-    "C0_genesis": {
-      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
-      "parts": {
-        "payload_cbor/typed-body": "LFCP-019"
-      }
-    },
-    "C1_grant_bob": {
-      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
-      "parts": {
-        "payload_cbor/typed-body": "LFCP-019"
-      }
-    },
-    "C2_invite_grant": {
-      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
-      "parts": {
-        "payload_cbor/typed-body": "LFCP-019"
-      }
-    },
-    "C3_invite_claim_carol": {
-      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
-      "parts": {
-        "payload_cbor/typed-body": "LFCP-019"
-      }
-    },
-    "C4_owner_transfer_commit": {
-      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
-      "parts": {
-        "payload_cbor/typed-body": "DEFERRED (.github docs/MVP-0.1-PROTOCOL-SCOPE.md §4, ownership transfer)"
-      }
-    },
-    "C5_route_update": {
-      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
-      "parts": {
-        "payload_cbor/typed-body": "LFCP-019"
-      }
-    },
-    "C6_key_epoch_1": {
-      "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
-      "parts": {
-        "payload_cbor/typed-body": "LFCP-019"
-      }
-    },
-    "owner_transfer": {
-      "reason": "COSE, signatures, IDs and re-signing run here; the offer and accept payload types belong to ownership transfer, deferred from MVP 0.1.",
-      "parts": {
-        "offer_payload_cbor/typed": "DEFERRED (.github docs/MVP-0.1-PROTOCOL-SCOPE.md §4, ownership transfer)",
-        "accept_payload_cbor/typed": "DEFERRED (.github docs/MVP-0.1-PROTOCOL-SCOPE.md §4, ownership transfer)"
-      }
-    },
     "KP0_bob_epoch0": {
       "reason": "Payload, COSE, signature against the sender and package ID run here; HPKE does not.",
       "parts": {
