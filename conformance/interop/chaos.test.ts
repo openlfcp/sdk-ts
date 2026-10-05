@@ -22,6 +22,7 @@
 import {
   createDataUnit,
   createQueuedDataUnit,
+  createQueuedSnapshot,
   LFCP_SUBPROTOCOL,
   latestAcceptedOwnUnit,
   loadControlChain,
@@ -487,6 +488,70 @@ describe("LFCP-057: network chaos (live)", () => {
         expect(gets.length).toBeGreaterThanOrEqual(2);
         expect(new Set(gets.map((f) => f.connection)).size).toBe(1); // no reconnect
       } finally {
+        await p.stop();
+      }
+    });
+  }, 90_000);
+
+  it("15. a lost SNAPSHOT reply falls back to the data round after the request timeout", async (ctx) => {
+    const url = live(ctx);
+    await withLog(async () => {
+      const p = await pair(url);
+      const tap = new WireTap();
+      let fresh: Side | undefined;
+      try {
+        await p.edit(p.A, "covered by the Snapshot");
+        await waitFor("A's unit ACKed", () => p.A.queueEmpty());
+        // OWNER publishes a Snapshot of everything it holds.
+        const chain = (await loadControlChain(p.A.storage, p.R)) as Linear;
+        const have = (await resourceSyncState(p.A.storage, p.R)).have;
+        await createQueuedSnapshot(p.A.storage, {
+          view: chain,
+          controlHead: chain.state.head,
+          publisher: p.owner.signer,
+          dek: p.dek,
+          frontier: have.map((h) => ({
+            principalId: h.principalId,
+            contiguous: h.contiguous,
+            ...(h.extras.length > 0 ? { ranges: [...h.extras] } : {}),
+          })),
+          profile: p.A.profile.snapshotCodec(),
+          value: p.A.profile.snapshotState(),
+        });
+        p.A.client.flush();
+        await waitFor("the Snapshot is ACKed", () => p.A.queueEmpty());
+        // A fresh replica of BOB, with Snapshots on; the SNAPSHOT reply is lost.
+        await p.B.stop();
+        tap.rule((f) =>
+          f.direction === "in" && f.message?.type === "SNAPSHOT" ? { kind: "drop" } : undefined,
+        );
+        fresh = new Side({
+          url,
+          resource: p.R,
+          who: p.bob,
+          profile: new SharedObjectsDataProfile(
+            SharedObjectsReplica.empty({
+              resource: p.R,
+              principal: p.bob.signer.descriptor.principalId,
+            }),
+          ),
+          webSocket: tap.factory,
+          snapshots: true,
+        });
+        const side = fresh;
+        side.start();
+        await waitFor(
+          "the fresh replica converges from units",
+          () => titleOf(side, p.task) === "covered by the Snapshot",
+          45_000,
+        );
+        expect(tap.messages("SNAPSHOT_GET", "out")).toHaveLength(1);
+        expect(tap.messages("SNAPSHOT", "in").length).toBeGreaterThanOrEqual(1); // sent, and dropped
+        expect(tap.messages("DATA_GET", "out").length).toBeGreaterThan(0);
+        expect(side.events.some((e) => e.type === "snapshot-loaded")).toBe(false);
+        expect(new Set(tap.frames.map((f) => f.connection)).size).toBe(1); // no reconnect
+      } finally {
+        await fresh?.stop();
         await p.stop();
       }
     });

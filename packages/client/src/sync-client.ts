@@ -125,7 +125,7 @@ export interface SyncClientOptions {
    * How long a request waits for its answer on a live connection before
    * the step it belongs to is issued again (a lost request or reply, §70
    * at-least-once): RESOURCE_OPEN, the Control round, KEY_PACKAGE_GET, the
-   * data round. Default 15 s.
+   * data round. A lost SNAPSHOT_GET falls back to the data round. Default 15 s.
    */
   readonly requestTimeoutMs?: number;
   /** An opaque hosting credential for AUTH (§36): server policy only. */
@@ -484,6 +484,14 @@ export class SyncClient {
         this.#serial(() => this.#controlRound(ctx, ctx.lastHeads));
       } else if (request.kind === "keys" && ctx.state === "KEY_SYNC") {
         this.#requestKeys(ctx, now);
+      } else if (request.kind === "snapshot" && ctx.snapshotPending) {
+        // A Snapshot is an optimization (§29.2): without it, replay the units.
+        this.#error(
+          "TIMEOUT",
+          "the offered Snapshot did not arrive; replaying units instead",
+          ctx.binding.resourceId,
+        );
+        this.#serial(() => this.#afterSnapshot(ctx));
       } else if (request.kind === "data-get" && ctx.state === "DATA_SYNC") {
         ctx.lastRound = ""; // a lost reply is not a round without progress
         ctx.expected = [];
@@ -679,6 +687,9 @@ export class SyncClient {
     if (ctx === undefined) return;
     if (request.kind === "open") this.#move(ctx, "CLOSE");
     if (request.kind === "keys") this.#keyBlocked(ctx);
+    // A Snapshot is an optimization (§29.2): without it, replay the units.
+    if (request.kind === "snapshot" && ctx.snapshotPending)
+      this.#serial(() => this.#afterSnapshot(ctx));
   }
 
   // -------------------------------------------------------------------------

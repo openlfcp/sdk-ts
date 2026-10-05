@@ -18,6 +18,7 @@ import {
   type EpochRow,
   InMemoryLfcpStorage,
   InMemorySecretStore,
+  InMemorySnapshotSequenceReservation,
 } from "@openlfcp/storage";
 import {
   type AnyMessage,
@@ -33,6 +34,7 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   createQueuedDataUnit,
+  createSnapshot,
   type DataProfileHandler,
   DataUnitApplier,
   dekResolver,
@@ -395,6 +397,82 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     expect(server.sockets).toHaveLength(1); // no reconnect
     expect(owner.merged).toEqual(["late reply"]);
     expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+  });
+
+  it("falls back to the data round when the offered Snapshot is lost or refused (§29.2, §70)", async () => {
+    for (const fault of ["lost", "nack"] as const) {
+      const server = new FakeServer();
+      const clock = { t: 0 };
+      const chain = chainFor(fault === "lost" ? 206 : 207);
+      const owner = client(OWNER, server, clock);
+      await ownerState(owner, chain);
+      const v = chain.view();
+      const u = await createQueuedDataUnit(new InMemoryLfcpStorage(), {
+        view: v,
+        controlHead: v.state.head,
+        actor: OWNER.signer,
+        dek: DEK0,
+        profile: TEXT,
+        previousUnitId: null,
+        value: "from units",
+      });
+      const frontier = [{ principalId: OWNER.signer.descriptor.principalId, contiguous: 1n }];
+      const snapshot = await createSnapshot({
+        view: v,
+        controlHead: v.state.head,
+        publisher: OWNER.signer,
+        dek: DEK0,
+        frontier,
+        profile: TEXT,
+        value: "from the snapshot",
+        sequences: new InMemorySnapshotSequenceReservation(),
+      });
+      hostOf(server, chain, [u.bytes]);
+      const answer = server.onMessage;
+      server.onMessage = (m, sv) => {
+        if (m.type === "RESOURCE_OPEN") {
+          sv.reply(m, "RESOURCE_OPENED", {
+            resourceId: chain.R,
+            heads: [{ seq: v.state.seq, recordId: v.state.head }],
+            haves: frontier,
+            snapshot: { snapshotId: snapshot.snapshotId, dataEpoch: 0n, frontier },
+          });
+          return [];
+        }
+        if (m.type === "SNAPSHOT_GET") {
+          if (fault === "nack")
+            sv.reply(m, "NACK", { code: 15n, diagnostic: "MISSING_DEPENDENCY" });
+          return []; // "lost": no answer at all
+        }
+        return answer(m, sv);
+      };
+      const loaded: string[] = [];
+      const binding = {
+        ...owner.binding(chain.R),
+        snapshot: {
+          codec: TEXT,
+          load: (value: unknown) => void loaded.push(value as string),
+          current: () => "",
+        },
+      };
+      owner.sync.open(binding);
+      owner.sync.start();
+      await settle(200);
+      await owner.sync.idle();
+      expect(server.of("SNAPSHOT_GET")).toHaveLength(1);
+      if (fault === "lost") {
+        expect(server.of("DATA_GET")).toEqual([]); // still waiting for the Snapshot
+        clock.t = 15_000;
+        owner.sync.tick(clock.t);
+        await settle(200);
+        await owner.sync.idle();
+      }
+      expect(server.of("DATA_GET")).toHaveLength(1);
+      expect(loaded).toEqual([]);
+      expect(owner.merged).toEqual(["from units"]);
+      expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+      expect(server.sockets).toHaveLength(1);
+    }
   });
 
   it("fetches missing ranges when the server's Have is ahead while LIVE (§69)", async () => {
