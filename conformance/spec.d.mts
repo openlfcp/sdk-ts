@@ -11,6 +11,8 @@ export type Git = (dir: string, args: readonly string[]) => Uint8Array;
 export interface Spec {
   readonly lock: SpecLock;
   readonly dir: string;
+  /** The entry names of a directory at the locked commit, sorted. */
+  list(dir: string): string[];
   read(path: string): Uint8Array;
   readText(path: string): string;
   readJson(path: string): unknown;

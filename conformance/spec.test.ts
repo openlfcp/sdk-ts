@@ -14,6 +14,14 @@ const bytes = (s: string) => Uint8Array.from(s, (c) => c.charCodeAt(0));
 const fakeGit =
   (resolved: string | undefined, files: Record<string, string> = {}): Git =>
   (_dir, args) => {
+    if (args[0] === "ls-tree") {
+      const [commit, dir] = String(args[2]).split(":");
+      if (commit !== LOCK.commit) throw new Error("fatal: bad object");
+      const names = Object.keys(files)
+        .filter((p) => p.startsWith(`${dir}/`))
+        .map((p) => p.slice((dir as string).length + 1));
+      return bytes(names.join("\n"));
+    }
     if (args[0] === "rev-parse") {
       if (resolved === undefined) throw new Error("fatal: Needed a single revision");
       return bytes(`${resolved}\n`);
@@ -44,6 +52,16 @@ describe("spec loader", () => {
     expect(() => openSpec({ lock: LOCK, specDir: "/x", git: fakeGit(undefined) })).toThrow(
       "spec.lock pins tag synthetic-tag, but it does not resolve in the spec checkout at /x",
     );
+  });
+
+  it("lists a directory at the locked commit, sorted", () => {
+    const spec = openSpec({
+      lock: LOCK,
+      specDir: "/x",
+      git: fakeGit(LOCK.commit, { "d/b.json": "{}", "d/a.json": "{}", "e/c.json": "{}" }),
+    });
+    expect(spec.list("d")).toEqual(["a.json", "b.json"]);
+    expect(spec.list("d/")).toEqual(["a.json", "b.json"]);
   });
 
   it("names the path and commit when a file is missing", () => {

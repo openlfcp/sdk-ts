@@ -80,9 +80,20 @@ export function openSpec(options = {}) {
       throw new Error(`cannot read ${path} at spec commit ${lock.commit}: ${e.message}`);
     }
   };
+  const list = (path) => {
+    const tree = `${lock.commit}:${path.replace(/\/+$/, "")}`;
+    let text;
+    try {
+      text = new TextDecoder().decode(git(dir, ["ls-tree", "--name-only", tree]));
+    } catch (e) {
+      throw new Error(`cannot list ${path} at spec commit ${lock.commit}: ${e.message}`);
+    }
+    return text.split("\n").filter(Boolean).sort();
+  };
   return {
     lock,
     dir,
+    list,
     read,
     readText: (path) => new TextDecoder("utf-8", { fatal: true }).decode(read(path)),
     readJson: (path) => {
