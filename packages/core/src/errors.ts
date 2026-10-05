@@ -71,7 +71,20 @@ export type LfcpErrorCode =
    * A local attempt to use an actor sequence twice for one (Resource,
    * Principal) (LFCP-WIRE-01 §8, §12: nonce reuse). SDK-local; never sent.
    */
-  | "SEQUENCE_REUSE";
+  | "SEQUENCE_REUSE"
+  /**
+   * A Control Chain that is not one valid linear chain (LFCP-WIRE-01 §13,
+   * §13.1): no Genesis, a sequence that is not previous + 1, a link that is
+   * not the previous record ID, a different Resource, a record that links
+   * to nothing, or an issuer whose descriptor cannot be resolved. Surfaces
+   * on the wire as INVALID_CONTROL_CHAIN (the unresolved-issuer case
+   * provisionally; MISSING_DEPENDENCY is the alternative).
+   */
+  | "INVALID_CONTROL_CHAIN"
+  /** A signed object whose kid or signature is wrong for its expected signer (G1/N2). INVALID_SIGNATURE on the wire. */
+  | "INVALID_SIGNATURE"
+  /** A record the authorization policy (LFCP-021) refuses. AUTHORIZATION_FAILED on the wire. */
+  | "AUTHORIZATION_FAILED";
 
 /** Error with a stable machine-readable `code`; the message is for humans only. */
 export class LfcpError extends Error {
