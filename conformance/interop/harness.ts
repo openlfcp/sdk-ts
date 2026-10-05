@@ -216,7 +216,7 @@ export class Side {
         actor: this.who.signer,
         dek,
         profile: profile.codecFor({ resourceId: this.resource, actor: this.me }),
-        // previous: the SDK's default, the last published unit (§26.2, G-DP1-GAP).
+        // previous: the SDK's default, the latest own unit still accepted (§26.2, G-DP1-GAP).
         value: checkChange(local.change),
         onCreated: (created, value) => profile.recordLocal(created.unitId, value),
       },

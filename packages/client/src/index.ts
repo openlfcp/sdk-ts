@@ -67,7 +67,7 @@ export {
   createQueuedDataUnit,
   dataUnitRow,
   dekResolver,
-  lastPublishedUnit,
+  latestAcceptedOwnUnit,
   loadControlChain,
   StoredSeenUnits,
   saveControlChain,

@@ -28,7 +28,7 @@ import {
   createQueuedDataUnit,
   dataUnitRow,
   dekResolver,
-  lastPublishedUnit,
+  latestAcceptedOwnUnit,
   loadControlChain,
   StoredSeenUnits,
   saveControlChain,
@@ -178,28 +178,36 @@ describe("client over storage", () => {
     expect((await storage.outbound.get(hash32(u2.unitId)))?.attempts).toBe(0);
   });
 
-  it("links each new unit to the last published one by default (§26.2, G-DP1-GAP)", async () => {
+  it("links each new unit to the latest own unit still accepted by default (§26.2, G-DP1-GAP)", async () => {
     const storage = new InMemoryLfcpStorage();
     const view = linear(records);
     const base = { view, controlHead: view.state.head, actor: WRITER, dek: DEK0, profile: TEXT };
+    const prevOf = (bytes: Uint8Array) => parseDataUnit(bytes).payload.prevDataUnitId;
     const u1 = await createQueuedDataUnit(storage, { ...base, value: "one" });
     const u2 = await createQueuedDataUnit(storage, { ...base, value: "two" });
-    const prevOf = (bytes: Uint8Array) => parseDataUnit(bytes).payload.prevDataUnitId;
     expect(prevOf(u1.bytes)).toBeNull();
     expect(toHex(prevOf(u2.bytes) as Uint8Array)).toBe(toHex(u1.unitId));
     // A crash abandons a reserved sequence (3): the next unit is 4 and names 2.
     await storage.actorSequences.reserveNext(R, WRITER.descriptor.principalId);
     const u4 = await createQueuedDataUnit(storage, { ...base, value: "four" });
-    expect(u4.seq).toBe(4n);
-    expect(toHex(prevOf(u4.bytes) as Uint8Array)).toBe(toHex(u2.unitId));
-    // A published unit that is no longer accepted (e.g. excluded by a cutoff) is still the
-    // last published one: the next unit names it, not the last accepted unit.
-    await storage.commit([{ op: "set-accepted", unitId: u4.unitId, accepted: false }]);
+    expect([u4.seq, toHex(prevOf(u4.bytes) as Uint8Array)]).toEqual([4n, toHex(u2.unitId)]);
+    // 4 goes stale (a cutoff excluded it, G-EP7): the re-applied work (G-EP5) names 2.
+    await storage.commit([
+      { op: "set-data-unit-status", unitId: u4.unitId, status: "quarantined", detail: "STALE" },
+      { op: "set-accepted", unitId: u4.unitId, accepted: false },
+    ]);
     const u5 = await createQueuedDataUnit(storage, { ...base, value: "five" });
-    expect(toHex(prevOf(u5.bytes) as Uint8Array)).toBe(toHex(u4.unitId));
+    expect([u5.seq, toHex(prevOf(u5.bytes) as Uint8Array)]).toEqual([5n, toHex(u2.unitId)]);
+    // 5 turns out to equivocate (G-DP5): the next unit names 2 again.
+    await storage.commit([
+      { op: "set-data-unit-status", unitId: u5.unitId, status: "equivocation" },
+      { op: "set-accepted", unitId: u5.unitId, accepted: false },
+    ]);
+    const u6 = await createQueuedDataUnit(storage, { ...base, value: "six" });
+    expect(toHex(prevOf(u6.bytes) as Uint8Array)).toBe(toHex(u2.unitId));
     expect(
-      toHex((await lastPublishedUnit(storage, R, WRITER.descriptor.principalId)) as Uint8Array),
-    ).toBe(toHex(u5.unitId));
+      toHex((await latestAcceptedOwnUnit(storage, R, WRITER.descriptor.principalId)) as Uint8Array),
+    ).toBe(toHex(u6.unitId));
   });
 
   it("runs the wire receive pipeline on durable SeenUnits with un-accept", async () => {

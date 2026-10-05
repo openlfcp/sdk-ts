@@ -251,12 +251,16 @@ export function dekResolver(
  */
 /**
  * §26.2 (G-DP1-GAP): the unit a writer's next unit names as `previous`:
- * its last published unit, the highest-sequence unit of `actor` in this
- * storage (its queued units are stored when queued, whatever happens to
- * them later), or null before its first. After an abandoned sequence N the
- * next unit therefore names N - 1. Stored, so it survives a restart.
+ * its latest own unit it still holds as accepted, or null before its
+ * first. Local units are stored accepted in the commit that queues them,
+ * so this is its last published unit, except one it has itself seen
+ * excluded by a cutoff (G-EP7) or as equivocation (G-DP5): no receiver
+ * accepts those either, so the next unit (e.g. stale work re-applied,
+ * G-EP5) names the unit before them and links. After an abandoned
+ * sequence N the next unit names N - 1. Read from storage, so a restart
+ * chooses the same unit.
  */
-export async function lastPublishedUnit(
+export async function latestAcceptedOwnUnit(
   storage: Pick<LfcpStorage, "dataUnits">,
   resource: ResourceId,
   actor: PrincipalId,
@@ -267,13 +271,13 @@ export async function lastPublishedUnit(
     actorSequence(1n),
     actorSequence(2n ** 64n - 1n),
   );
-  return mine.at(-1)?.unitId ?? null;
+  return mine.filter((u) => u.accepted).at(-1)?.unitId ?? null;
 }
 
 export async function createQueuedDataUnit<T>(
   storage: Pick<LfcpStorage, "actorSequences" | "commit" | "dataUnits">,
   options: Omit<CreateDataUnitOptions<T>, "sequences" | "previousUnitId"> & {
-    /** The previous unit (§26.2); default the writer's last published unit (lastPublishedUnit). */
+    /** The previous unit (§26.2); default the writer's latest own unit still accepted (latestAcceptedOwnUnit). */
     readonly previousUnitId?: DataUnitId | null;
     /**
      * Called once the unit is sealed, before the commit: e.g. the Data
@@ -288,7 +292,7 @@ export async function createQueuedDataUnit<T>(
   const previous =
     previousUnitId !== undefined
       ? previousUnitId
-      : await lastPublishedUnit(
+      : await latestAcceptedOwnUnit(
           storage,
           options.view.state.resourceId,
           options.actor.descriptor.principalId,
