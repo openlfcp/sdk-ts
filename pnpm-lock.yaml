@@ -52,6 +52,9 @@ importers:
 
   packages/crypto:
     dependencies:
+      '@noble/ciphers':
+        specifier: ^2.4.0
+        version: 2.4.0
       '@noble/curves':
         specifier: ^2.4.0
         version: 2.4.0

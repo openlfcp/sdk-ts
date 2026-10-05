@@ -107,6 +107,11 @@ export type LfcpErrorCode =
    * names (§25: recipient binding). Client-local, no wire code (ADR 0001 N5).
    */
   | "KEY_PACKAGE_RECIPIENT_MISMATCH"
+  /**
+   * A Data Unit that fails ChaCha20-Poly1305 authentication (§26.3). Only a
+   * client holding the DEK detects it; client-local, no wire code (ADR 0001 N3).
+   */
+  | "AEAD_AUTHENTICATION_FAILED"
   /** A Key Package does not open (HPKE failure). Client-local, no wire code (N5). */
   | "KEY_PACKAGE_OPEN_FAILED"
   /**

@@ -1,7 +1,7 @@
 {
   "name": "@openlfcp/crypto",
   "version": "0.0.0",
-  "description": "Thin wrapper over audited primitives (SHA-256, Ed25519, X25519) for LFCP; the only package that uses @noble/*.",
+  "description": "Thin wrapper over audited primitives (SHA-256, Ed25519, X25519, HKDF, ChaCha20-Poly1305, HPKE) for LFCP; the only package that uses @noble/*.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -23,6 +23,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@noble/ciphers": "^2.4.0",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "@openlfcp/core": "workspace:^",

@@ -4,6 +4,7 @@
  */
 export const PACKAGE = "@openlfcp/crypto";
 
+export { decryptDataUnit, encryptDataUnit } from "./aead.js";
 export {
   ActorDataKey,
   dataUnitNonce,
