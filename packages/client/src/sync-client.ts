@@ -231,6 +231,8 @@ interface ResourceContext {
   /** Units inside a stored Snapshot's frontier: accepted as covered, not merged again. */
   covered: HaveVector;
   unitsSinceSnapshot: number;
+  /** The ranges the last data round requested (to detect a round without progress). */
+  lastRound: string;
 }
 
 const SUBSCRIBE_DATA_AND_CONTROL = 0b11n;
@@ -347,6 +349,7 @@ export class SyncClient {
         snapshotPending: false,
         covered: [],
         unitsSinceSnapshot: 0,
+        lastRound: "",
       };
       this.#resources.set(key, ctx);
     }
@@ -1007,11 +1010,29 @@ export class SyncClient {
     // plus each actor's last covered unit, so the next one links (§26.2).
     const missing = [...(await this.#boundary(ctx)), ...missingFrom(local, ctx.remoteHave)];
     if (missing.length === 0) {
+      ctx.lastRound = "";
       if (ctx.state === "DATA_SYNC") this.#move(ctx, "FRONTIER_REACHED");
       ctx.expected = [];
       ctx.received = [];
       return;
     }
+    // A round that asks again for exactly what the last one asked for made no
+    // progress (e.g. the server lacks units it announced): stop instead of
+    // looping; periodic anti-entropy tries again.
+    const key = missing.map((r) => `${toHex(r.actor)}:${r.start}-${r.end}`).join(",");
+    if (key === ctx.lastRound) {
+      ctx.lastRound = "";
+      this.#error(
+        "NO_PROGRESS",
+        "a data round fetched nothing new; will retry on the next DATA_HAVE",
+        R,
+      );
+      if (ctx.state === "DATA_SYNC") this.#move(ctx, "FRONTIER_REACHED");
+      ctx.expected = [];
+      ctx.received = [];
+      return;
+    }
+    ctx.lastRound = key;
     if (ctx.state === "LIVE") this.#move(ctx, "MISSING_RANGES");
     let expected: HaveVector = [];
     for (const r of missing)
