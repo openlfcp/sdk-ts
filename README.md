@@ -10,8 +10,8 @@ stay portable to browsers and editors; Node-only code goes into separate
 
 Workspace scaffold (LFCP-011). `@openlfcp/core` has its identifier
 primitives (LFCP-012), `@openlfcp/crypto` the Principal key material and
-`@openlfcp/wire` its deterministic CBOR codec (LFCP-013) and the Principal
-Descriptor (LFCP-014); the other packages still export only a `PACKAGE`
+`@openlfcp/wire` its deterministic CBOR codec (LFCP-013), the Principal
+Descriptor (LFCP-014) and canonical COSE_Sign1 (LFCP-015); the other packages still export only a `PACKAGE`
 placeholder. Protocol code arrives with the backlog tasks that own each
 package.
 
@@ -21,7 +21,7 @@ package.
 | --- | --- | --- | --- |
 | `@openlfcp/core` | Identifiers, shared types, errors, byte helpers | none | 32-byte ids (`ResourceId`, `PrincipalId`, `Hash32`, `ControlRecordId`, `DataUnitId`), `ObjectId` (UUIDv7), hex/base64url, `LfcpError` |
 | `@openlfcp/crypto` | Thin wrapper over the audited `@noble` libraries | core | `sha256`; `SigningKeyPair` (Ed25519) and `AgreementKeyPair` (X25519) with redacted diagnostics; `generate*KeyPair`, `import*Key`, `exportSecretKeyBytes`, `verifyEd25519` |
-| `@openlfcp/wire` | Deterministic CBOR, COSE, LFCP Wire structures and codecs | core, crypto | Principal Descriptor (`principalDescriptor*`, `encode/decodePrincipalDescriptor`, `derivePrincipalId`); low-level deterministic CBOR (`encode`, `decodeStrict`, `isDeterministic`, `cborMap`) under the `@openlfcp/wire/cbor` subpath |
+| `@openlfcp/wire` | Deterministic CBOR, COSE, LFCP Wire structures and codecs | core, crypto | Principal Descriptor (`principalDescriptor*`, `encode/decodePrincipalDescriptor`, `derivePrincipalId`); canonical COSE_Sign1 (`signObject`, `parseSignedObject`, `verifySignedObject`, `sigStructureBytes`, `objectId`); low-level deterministic CBOR (`encode`, `decodeStrict`, `isDeterministic`, `cborMap`) under the `@openlfcp/wire/cbor` subpath |
 | `@openlfcp/storage` | Storage interfaces only (adapters such as a future `@openlfcp/storage-node` live elsewhere) | core | `PACKAGE` |
 | `@openlfcp/shared-objects` | SHARED-OBJECTS-PROFILE-01 (`org.openlfcp.shared-objects.v1`) | core, crypto | `PACKAGE` |
 | `@openlfcp/client` | Session, Control Plane and Data Plane synchronization | core, wire, storage, crypto | `PACKAGE` |
