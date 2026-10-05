@@ -31,5 +31,5 @@ wantsResourceId(new Uint8Array(32));
 wantsResourceId(resourceId(new Uint8Array(32)));
 
 // @ts-expect-error a plain string is not an ObjectId without parsing
-export const unparsed: ObjectId = "019a2f85-7b31-7c42-b85a-fc843e2f40ad";
-export const parsed: ObjectId = parseObjectId("019a2f85-7b31-7c42-b85a-fc843e2f40ad");
+export const unparsed: ObjectId = "017f22e2-79b0-7cc3-98c4-dc0c0c07398f";
+export const parsed: ObjectId = parseObjectId("017f22e2-79b0-7cc3-98c4-dc0c0c07398f");

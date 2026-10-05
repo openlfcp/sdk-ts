@@ -21,25 +21,24 @@ const codeOf = (fn: () => unknown): string | undefined => {
 
 describe("ObjectId validation (SHARED-OBJECTS-PROFILE-01 §19)", () => {
   it("accepts a canonical UUIDv7", () => {
-    // SHARED-OBJECTS-TEST-VECTORS-01 case D06-uuidv7-valid
-    const text = "019a2f85-7b31-7c42-b85a-fc843e2f40ad";
+    // RFC 9562 Appendix A.6 example UUIDv7. The Shared Objects vectors D06-D08
+    // run in the conformance runner (LFCP-032).
+    const text = "017f22e2-79b0-7cc3-98c4-dc0c0c07398f";
     expect(isObjectId(text)).toBe(true);
     expect(formatObjectId(parseObjectId(text))).toBe(text);
   });
 
   it.each([
-    // SHARED-OBJECTS-TEST-VECTORS-01 case D07-uuid-invalid-uppercase
-    ["019A2F85-7B31-7C42-B85A-FC843E2F40AD", "upper case"],
-    // SHARED-OBJECTS-TEST-VECTORS-01 case D08-uuid-invalid-version
-    ["019a2f85-7b31-6c42-b85a-fc843e2f40ad", "version 6"],
-    ["019a2f85-7b31-4c42-b85a-fc843e2f40ad", "version 4"],
-    ["019a2f85-7b31-7c42-c85a-fc843e2f40ad", "variant 110"],
-    ["019a2f85-7b31-7c42-785a-fc843e2f40ad", "variant 0"],
-    ["019a2f857b317c42b85afc843e2f40ad", "no hyphens"],
-    ["{019a2f85-7b31-7c42-b85a-fc843e2f40ad}", "braces"],
-    ["urn:uuid:019a2f85-7b31-7c42-b85a-fc843e2f40ad", "URN prefix"],
-    [" 019a2f85-7b31-7c42-b85a-fc843e2f40ad", "leading space"],
-    ["019a2f85-7b31-7c42-b85a-fc843e2f40a", "too short"],
+    ["017F22E2-79B0-7CC3-98C4-DC0C0C07398F", "upper case"],
+    ["017f22e2-79b0-6cc3-98c4-dc0c0c07398f", "version 6"],
+    ["017f22e2-79b0-4cc3-98c4-dc0c0c07398f", "version 4"],
+    ["017f22e2-79b0-7cc3-c8c4-dc0c0c07398f", "variant 110"],
+    ["017f22e2-79b0-7cc3-78c4-dc0c0c07398f", "variant 0"],
+    ["017f22e279b07cc398c4dc0c0c07398f", "no hyphens"],
+    ["{017f22e2-79b0-7cc3-98c4-dc0c0c07398f}", "braces"],
+    ["urn:uuid:017f22e2-79b0-7cc3-98c4-dc0c0c07398f", "URN prefix"],
+    [" 017f22e2-79b0-7cc3-98c4-dc0c0c07398f", "leading space"],
+    ["017f22e2-79b0-7cc3-98c4-dc0c0c07398", "too short"],
   ])("rejects %j (%s)", (text) => {
     expect(isObjectId(text)).toBe(false);
     expect(codeOf(() => parseObjectId(text))).toBe("INVALID_UUIDV7");
@@ -49,10 +48,10 @@ describe("ObjectId validation (SHARED-OBJECTS-PROFILE-01 §19)", () => {
 describe("generateObjectId (RFC 9562 §5.7)", () => {
   it("lays out timestamp, version, variant and random bits", () => {
     const id = generateObjectId({
-      now: 0x019a2f857b31,
+      now: 0x017f22e279b0,
       random: () => Uint8Array.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
     });
-    expect(id).toBe("019a2f85-7b31-7fff-bfff-ffffffffffff");
+    expect(id).toBe("017f22e2-79b0-7fff-bfff-ffffffffffff");
     const zeros = generateObjectId({ now: 0, random: () => new Uint8Array(10) });
     expect(zeros).toBe("00000000-0000-7000-8000-000000000000");
   });

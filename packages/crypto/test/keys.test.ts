@@ -11,10 +11,10 @@ import {
   verifyEd25519,
 } from "../src/index.js";
 
-// Public test fixtures, never use in production:
-// LFCP-TEST-VECTORS-01 (spec tag mvp-0.1-baseline) case principal_owner inputs.ed25519_seed / inputs.x25519_private.
-const OWNER_ED25519_SEED = "3df1a3457c0fc0d78c89cb4cdcd3c5912322cdc199f7a35a843e0e82ea9aa38b";
-const OWNER_X25519_PRIVATE = "792bb0d4a2752e97583e603235b07ece323d2f65f1285907fc20c95da91ed874";
+// Synthetic secrets for these tests only (never use in production). The
+// published Principal keys are checked by the conformance runner (LFCP-017).
+const OWNER_ED25519_SEED = toHex(Uint8Array.from({ length: 32 }, (_, i) => i + 1));
+const OWNER_X25519_PRIVATE = toHex(Uint8Array.from({ length: 32 }, (_, i) => 0x41 + i));
 
 const message = Uint8Array.from("LFCP test message", (c) => c.charCodeAt(0));
 const structuredClone = (globalThis as unknown as { structuredClone: (v: unknown) => unknown })

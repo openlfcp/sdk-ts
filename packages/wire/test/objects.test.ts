@@ -1,5 +1,5 @@
-import { bytesEqual, fromHex, LfcpError, toHex } from "@openlfcp/core";
-import { importAgreementKey, importSigningKey, sha256 } from "@openlfcp/crypto";
+import { bytesEqual, LfcpError, toHex } from "@openlfcp/core";
+import { sha256 } from "@openlfcp/crypto";
 import { describe, expect, it } from "vitest";
 import { type CborMap, type CborValue, cborMap, decodeStrict, encode } from "../src/cbor/index.js";
 import {
@@ -9,18 +9,19 @@ import {
   controlRecordPayloadFromCbor,
   dataUnitPayloadFromCbor,
   decodeDataUnitPayload,
+  encodePrincipalDescriptor,
   endpointFromCbor,
   expectedSignerOf,
   keyPackagePayloadFromCbor,
   parseDataUnit,
-  principalDescriptorFromKeys,
-  type Signer,
   signObject,
   sigStructureBytes,
   verifySignedObject,
 } from "../src/index.js";
-import * as K from "./cose-vectors.fixtures.js";
-import * as V from "./payload-vectors.fixtures.js";
+import { ALICE, BRUNO, DATA_UNIT, DATA_UNIT_PAYLOAD, dataUnitFields } from "./synthetic.js";
+
+// The published vectors (positives, negatives, CDDL fixtures) run in the
+// conformance runner (LFCP-017); these tests use synthetic objects.
 
 const codeOf = (fn: () => unknown): string | undefined => {
   try {
@@ -30,22 +31,16 @@ const codeOf = (fn: () => unknown): string | undefined => {
   }
   return undefined;
 };
-const signer = (seed: string, x25519: string): Signer => {
-  const key = importSigningKey(fromHex(seed));
-  return { key, descriptor: principalDescriptorFromKeys(key, importAgreementKey(fromHex(x25519))) };
-};
-const BOB = signer(K.BOB_SEED, K.BOB_X25519);
-const CAROL = signer(K.CAROL_SEED, K.CAROL_X25519);
 
-const D1 = fromHex(V.D1_COSE);
-const D1_PAYLOAD = fromHex(V.D1_PAYLOAD);
+const D1 = DATA_UNIT.bytes;
+const D1_PAYLOAD = DATA_UNIT_PAYLOAD;
 const [D1_PROTECTED, , , D1_SIGNATURE] = decodeStrict(D1) as [
   Uint8Array,
   unknown,
   Uint8Array,
   Uint8Array,
 ];
-const D1_FIELDS = (decodeStrict(D1_PAYLOAD) as CborMap).entries as readonly [number, CborValue][];
+const D1_FIELDS: readonly [number, CborValue][] = dataUnitFields();
 
 /** A COSE_Sign1 array from parts; parsing does not check the signature. */
 const cose = (
@@ -77,21 +72,32 @@ const d1Cose = (payload: CborValue) =>
   cose(D1_PROTECTED, cborMap([]), encode(payload), D1_SIGNATURE);
 const protectedWith = (entries: [number, CborValue][]) => encode(cborMap(entries));
 
+const D1_ID = toHex(DATA_UNIT.id);
+/** The synthetic Data Unit tagged with COSE tag 18. */
+const TAGGED_D1 = Uint8Array.from([0xd2, ...D1]);
+/** Its payload with the data epoch (field 1, value 0) as the non-shortest 0x18 0x00 (N7). */
+const NONCANONICAL_PAYLOAD_D1 = cose(
+  D1_PROTECTED,
+  cborMap([]),
+  Uint8Array.from([...D1_PAYLOAD.subarray(0, 37), 0x18, ...D1_PAYLOAD.subarray(37)]),
+  D1_SIGNATURE,
+);
+/** The same payload signed by another Principal: different kid and signature. */
+const WRONG_KID_D1 = signObject(D1_PAYLOAD, BRUNO).bytes;
+
 describe("LFCP-016 prompt tests, at the typed Data Unit layer", () => {
-  it("1. a valid canonical signed object parses (D1_bob_epoch0_seq1)", () => {
+  it("1. a valid canonical signed object parses", () => {
     const { signed, payload } = parseDataUnit(D1);
     expect(payload.kind).toBe("data-unit");
-    expect(toHex(signed.id)).toBe(V.D1_ID);
+    expect(toHex(signed.id)).toBe(D1_ID);
   });
 
   it("2. COSE tag 18 is rejected", () => {
-    expect(codeOf(() => parseDataUnit(fromHex(V.TAGGED_COSE_D1)))).toBe("COSE_MALFORMED");
+    expect(codeOf(() => parseDataUnit(TAGGED_D1))).toBe("COSE_MALFORMED");
   });
 
-  it("3. a non-canonical integer encoding is rejected (noncanonical_payload_D1: seq 1 as 18 01)", () => {
-    expect(codeOf(() => parseDataUnit(fromHex(V.NONCANONICAL_PAYLOAD_D1)))).toBe(
-      "CBOR_NON_CANONICAL",
-    );
+  it("3. a non-canonical integer encoding is rejected (data epoch 0 as 18 00)", () => {
+    expect(codeOf(() => parseDataUnit(NONCANONICAL_PAYLOAD_D1))).toBe("CBOR_NON_CANONICAL");
   });
 
   it("4. non-deterministic map ordering is rejected", () => {
@@ -110,7 +116,12 @@ describe("LFCP-016 prompt tests, at the typed Data Unit layer", () => {
   });
 
   it("6. a malformed protected header is rejected (CDDL fixture: a descriptor as the header)", () => {
-    const bad = cose(fromHex(V.OWNER_DESCRIPTOR), cborMap([]), D1_PAYLOAD, D1_SIGNATURE);
+    const bad = cose(
+      encodePrincipalDescriptor(BRUNO.descriptor),
+      cborMap([]),
+      D1_PAYLOAD,
+      D1_SIGNATURE,
+    );
     expect(codeOf(() => parseDataUnit(bad))).toBe("COSE_MALFORMED");
     const notBstr = cose(cborMap([[1, -8]]), cborMap([]), D1_PAYLOAD, D1_SIGNATURE);
     expect(codeOf(() => parseDataUnit(notBstr))).toBe("COSE_MALFORMED");
@@ -165,7 +176,7 @@ describe("LFCP-016 prompt tests, at the typed Data Unit layer", () => {
   it("12. the object ID is SHA-256 of the exact received bytes", () => {
     const { signed } = parseDataUnit(D1);
     expect(toHex(signed.id)).toBe(toHex(sha256(D1)));
-    expect(toHex(signed.id)).toBe(V.D1_ID);
+    expect(toHex(signed.id)).toBe(D1_ID);
   });
 
   it("13. verification uses the received header and payload bytes, not a re-encoding", () => {
@@ -175,47 +186,45 @@ describe("LFCP-016 prompt tests, at the typed Data Unit layer", () => {
       D1.findIndex((_, i) => bytesEqual(D1.subarray(i, i + part.length), part));
     expect(at(signed.protectedBytes)).toBeGreaterThan(0);
     expect(at(signed.payloadBytes)).toBeGreaterThan(at(signed.protectedBytes));
-    expect(toHex(signed.payloadBytes)).toBe(V.D1_PAYLOAD);
-    expect(verifySignedObject(signed, BOB.descriptor)).toEqual({ valid: true });
+    expect(toHex(signed.payloadBytes)).toBe(toHex(D1_PAYLOAD));
+    expect(verifySignedObject(signed, ALICE.descriptor)).toEqual({ valid: true });
     // A Sig_structure over a different payload encoding does not verify, so a
     // verifier that re-encoded could not stay compatible with the signer.
     const reEncoded = rawMap([...D1_FIELDS].reverse());
     expect(
-      BOB.key
+      ALICE.key
         .sign(sigStructureBytes(signed.protectedBytes, reEncoded))
         .every((b, i) => b === signed.signature[i]),
     ).toBe(false);
   });
 
   it("14. byte-different objects over the same payload get different IDs", () => {
-    // Ed25519 is deterministic: re-signing D1's payload as Bob gives D1's bytes again.
-    expect(toHex(signObject(D1_PAYLOAD, BOB).bytes)).toBe(V.D1_COSE);
-    // The same payload under another kid and signature is a different object (wrong_kid_D1).
-    const wrongKid = parseDataUnit(fromHex(V.WRONG_KID_D1));
-    expect(toHex(wrongKid.signed.payloadBytes)).toBe(V.D1_PAYLOAD);
-    expect(toHex(wrongKid.signed.id)).toBe(toHex(sha256(fromHex(V.WRONG_KID_D1))));
-    expect(toHex(wrongKid.signed.id)).not.toBe(V.D1_ID);
-    const byCarol = signObject(D1_PAYLOAD, CAROL);
-    expect(toHex(parseDataUnit(byCarol.bytes).signed.id)).toBe(toHex(byCarol.id));
-    expect(toHex(byCarol.id)).not.toBe(V.D1_ID);
+    // Ed25519 is deterministic: re-signing D1's payload as Alice gives D1's bytes again.
+    expect(toHex(signObject(D1_PAYLOAD, ALICE).bytes)).toBe(toHex(D1));
+    // The same payload under another kid and signature is a different object .
+    const wrongKid = parseDataUnit(WRONG_KID_D1);
+    expect(toHex(wrongKid.signed.payloadBytes)).toBe(toHex(D1_PAYLOAD));
+    expect(toHex(wrongKid.signed.id)).toBe(toHex(sha256(WRONG_KID_D1)));
+    expect(toHex(wrongKid.signed.id)).not.toBe(D1_ID);
+    const byBruno = signObject(D1_PAYLOAD, BRUNO);
+    expect(toHex(parseDataUnit(byBruno.bytes).signed.id)).toBe(toHex(byBruno.id));
+    expect(toHex(byBruno.id)).not.toBe(D1_ID);
     // ... and only the actor's signature is accepted (INVALID_SIGNATURE otherwise).
     expect(
-      verifySignedObject(wrongKid.signed, BOB.descriptor).valid ||
-        verifySignedObject(parseDataUnit(byCarol.bytes).signed, BOB.descriptor).valid,
+      verifySignedObject(wrongKid.signed, ALICE.descriptor).valid ||
+        verifySignedObject(parseDataUnit(byBruno.bytes).signed, ALICE.descriptor).valid,
     ).toBe(false);
     // The only other encoding of the same values is non-canonical and is rejected.
-    expect(codeOf(() => parseDataUnit(fromHex(V.NONCANONICAL_PAYLOAD_D1)))).toBe(
-      "CBOR_NON_CANONICAL",
-    );
+    expect(codeOf(() => parseDataUnit(NONCANONICAL_PAYLOAD_D1))).toBe("CBOR_NON_CANONICAL");
   });
 });
 
 describe("expectedSignerOf", () => {
-  it("is the Data Unit actor; wrong_kid_D1 fails against it with KID_MISMATCH", () => {
-    const { signed, payload } = parseDataUnit(fromHex(V.WRONG_KID_D1));
-    expect(toHex(expectedSignerOf(payload))).toBe(toHex(BOB.descriptor.principalId));
-    expect(toHex(signed.kid)).toBe(toHex(CAROL.descriptor.principalId));
-    expect(verifySignedObject(signed, BOB.descriptor)).toEqual({
+  it("is the Data Unit actor; a kid naming another Principal fails with KID_MISMATCH", () => {
+    const { signed, payload } = parseDataUnit(WRONG_KID_D1);
+    expect(toHex(expectedSignerOf(payload))).toBe(toHex(ALICE.descriptor.principalId));
+    expect(toHex(signed.kid)).toBe(toHex(BRUNO.descriptor.principalId));
+    expect(verifySignedObject(signed, ALICE.descriptor)).toEqual({
       valid: false,
       reason: "KID_MISMATCH",
     });

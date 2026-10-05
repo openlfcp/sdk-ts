@@ -33,19 +33,12 @@ describe("base64url", () => {
     }
   });
 
-  it("matches the LFCP-WIRE-01 §18.2 invitation URI encoding", () => {
-    // LFCP-TEST-VECTORS-01 fixtures.resource.id and case invite_uri expected.resource_b64url
-    const resource = fromHex("c8c3041cd1e87009c39a3fe5a02f4812b8ca2733f3aa6c0117530d4cfc3cc241");
-    expect(toBase64url(resource)).toBe("yMMEHNHocAnDmj_loC9IErjKJzPzqmwBF1MNTPw8wkE");
-    // LFCP-TEST-VECTORS-01 case C2_invite_grant expected.record_id and invite_uri expected.grant_id_b64url
-    const grant = fromHex("a77e8c2cebad4458e9ca036bef606cd9a7305395127b6a8479e7a088506334c2");
-    expect(fromBase64url("p36MLOutRFjpygNr72Bs2acwU5USe2qEeeegiFBjNMI")).toEqual(grant);
-  });
-
-  it("encodes a 32-byte Principal ID as the PrincipalRef payload needs", () => {
-    // SHARED-OBJECTS-TEST-VECTORS-01 case D03-principal-ref-andrey (the part after "p:")
-    const id = fromHex("bd07952a86218f6f57a360520c0403acd3c72f275907e8cb38a3d6362ab4c9f4");
-    expect(toBase64url(id)).toBe("vQeVKoYhj29Xo2BSDAQDrNPHLydZB-jLOKPWNiq0yfQ");
+  it("encodes 32 bytes (an ID) as 43 unpadded characters", () => {
+    // RFC 4648 §5 by hand: 0x00..0x1f. Published IDs are checked by the
+    // conformance runner (LFCP-017; Shared Objects vectors: LFCP-032).
+    const id = Uint8Array.from({ length: 32 }, (_, i) => i);
+    expect(toBase64url(id)).toBe("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8");
+    expect(fromBase64url("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8")).toEqual(id);
   });
 
   it.each([

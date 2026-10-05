@@ -3,7 +3,7 @@ import {
   exportSecretKeyBytes,
   generateSigningKeyPair,
   importAgreementKey,
-  importSigningKey,
+  sha256,
 } from "@openlfcp/crypto";
 import { describe, expect, it } from "vitest";
 import { type CborMap, type CborValue, cborMap, decodeStrict, encode } from "../src/cbor/index.js";
@@ -16,15 +16,10 @@ import {
   sigStructureBytes,
   verifySignedObject,
 } from "../src/index.js";
-import * as V from "./cose-vectors.fixtures.js";
+import { ALICE, BRUNO, DATA_UNIT, DATA_UNIT_PAYLOAD, seq32 } from "./synthetic.js";
 
-const signer = (seed: string, x25519: string): Signer => {
-  const key = importSigningKey(fromHex(seed));
-  return { key, descriptor: principalDescriptorFromKeys(key, importAgreementKey(fromHex(x25519))) };
-};
-const OWNER = signer(V.OWNER_SEED, V.OWNER_X25519);
-const BOB = signer(V.BOB_SEED, V.BOB_X25519);
-const CAROL = signer(V.CAROL_SEED, V.CAROL_X25519);
+// Byte-exact agreement with the published vectors (signing, IDs, headers,
+// Sig_structure, negatives) is checked by the conformance runner (LFCP-017).
 
 const codeOf = (fn: () => unknown): string | undefined => {
   try {
@@ -35,59 +30,60 @@ const codeOf = (fn: () => unknown): string | undefined => {
   return undefined;
 };
 
-// Sign path: published payload + fixture key -> exact published bytes (Ed25519 is deterministic).
-const SIGN_CASES = [
-  { id: "C0_genesis", who: OWNER, payload: V.C0_PAYLOAD, cose: V.C0_COSE, objectId: V.C0_ID },
-  { id: "D1_bob_epoch0_seq1", who: BOB, payload: V.D1_PAYLOAD, cose: V.D1_COSE, objectId: V.D1_ID },
-  { id: "SNAPSHOT-01", who: BOB, payload: V.S1_PAYLOAD, cose: V.S1_COSE, objectId: V.S1_ID },
-];
+describe("a signed synthetic object", () => {
+  const signed = DATA_UNIT;
+  const parsed = parseSignedObject(signed.bytes);
 
-describe.each(SIGN_CASES)("$id", (c) => {
-  const signed = signObject(fromHex(c.payload), c.who);
-  const parsed = parseSignedObject(fromHex(c.cose));
-
-  it("9. signing reproduces the published COSE bytes exactly", () => {
-    expect(toHex(signed.bytes)).toBe(c.cose);
+  it("9. signing is deterministic (Ed25519, deterministic CBOR)", () => {
+    expect(toHex(signObject(DATA_UNIT_PAYLOAD, ALICE).bytes)).toBe(toHex(signed.bytes));
   });
 
-  it("7. the Ed25519 signature equals the vector's", () => {
-    const signature = (decodeStrict(fromHex(c.cose)) as CborValue[])[3] as Uint8Array;
+  it("7. the signature is 64 bytes and survives parsing", () => {
+    const signature = (decodeStrict(signed.bytes) as CborValue[])[3] as Uint8Array;
     expect(toHex(parsed.signature)).toBe(toHex(signature));
     expect(parsed.signature).toHaveLength(64);
   });
 
-  it("10. the object ID is SHA-256 of the exact bytes and equals the vector's", () => {
-    expect(toHex(signed.id)).toBe(c.objectId);
-    expect(toHex(parsed.id)).toBe(c.objectId);
-    expect(toHex(objectId(fromHex(c.cose)))).toBe(c.objectId);
+  it("10. the object ID is SHA-256 of the exact bytes", () => {
+    expect(toHex(signed.id)).toBe(toHex(sha256(signed.bytes)));
+    expect(toHex(parsed.id)).toBe(toHex(signed.id));
+    expect(toHex(objectId(signed.bytes))).toBe(toHex(signed.id));
   });
 
   it("8, 15. the object is an untagged four-element array", () => {
     expect(signed.bytes[0]).toBe(0x84);
-    expect((signed.bytes[0] as number) >> 5).not.toBe(6);
     expect(decodeStrict(signed.bytes)).toHaveLength(4);
   });
 
-  it("2, 3, 5. protected = {1: -8, 4: kid}, unprotected = {}, payload present", () => {
+  it("1, 2, 3, 5. protected = {1: -8, 4: kid} exactly, unprotected = {}, payload present", () => {
     const [prot, unprot, payload] = decodeStrict(signed.bytes) as CborValue[];
-    const header = decodeStrict(prot as Uint8Array) as CborMap;
-    expect(header.entries.map(([k]) => k)).toEqual([1, 4]);
-    expect(header.entries[0]?.[1]).toBe(-8);
-    expect(toHex(header.entries[1]?.[1] as Uint8Array)).toBe(toHex(c.who.descriptor.principalId));
+    // a2 01 27 04 58 20 <kid>: map(2), 1 => -8, 4 => bstr(32).
+    expect(toHex(prot as Uint8Array)).toBe(`a20127045820${toHex(ALICE.descriptor.principalId)}`);
+    expect(toHex(parsed.protectedBytes)).toBe(toHex(prot as Uint8Array));
     expect((unprot as CborMap).entries).toHaveLength(0);
-    expect(toHex(payload as Uint8Array)).toBe(c.payload);
-    expect(toHex(parsed.payloadBytes)).toBe(c.payload);
-    expect(toHex(parsed.kid)).toBe(toHex(c.who.descriptor.principalId));
+    expect(toHex(payload as Uint8Array)).toBe(toHex(DATA_UNIT_PAYLOAD));
+    expect(toHex(parsed.payloadBytes)).toBe(toHex(DATA_UNIT_PAYLOAD));
+    expect(toHex(parsed.kid)).toBe(toHex(ALICE.descriptor.principalId));
   });
 
-  it("11. the published object verifies under its signer", () => {
-    expect(verifySignedObject(parsed, c.who.descriptor)).toEqual({ valid: true });
+  it("4, 6. Sig_structure is [\"Signature1\", protected, h'', payload]", () => {
+    const structure = decodeStrict(
+      sigStructureBytes(parsed.protectedBytes, parsed.payloadBytes),
+    ) as CborValue[];
+    expect(structure[0]).toBe("Signature1");
+    expect(toHex(structure[1] as Uint8Array)).toBe(toHex(parsed.protectedBytes));
+    expect(structure[2]).toEqual(new Uint8Array(0));
+    expect(toHex(structure[3] as Uint8Array)).toBe(toHex(parsed.payloadBytes));
+  });
+
+  it("11. verifies under its signer", () => {
+    expect(verifySignedObject(parsed, ALICE.descriptor)).toEqual({ valid: true });
   });
 
   it("12. a modified payload fails verification", () => {
     const payload = Uint8Array.from(parsed.payloadBytes);
     payload[payload.length - 1] = (payload[payload.length - 1] as number) ^ 1;
-    expect(verifySignedObject({ ...parsed, payloadBytes: payload }, c.who.descriptor)).toEqual({
+    expect(verifySignedObject({ ...parsed, payloadBytes: payload }, ALICE.descriptor)).toEqual({
       valid: false,
       reason: "BAD_SIGNATURE",
     });
@@ -96,83 +92,41 @@ describe.each(SIGN_CASES)("$id", (c) => {
   it("13. a modified signature fails verification", () => {
     const signature = Uint8Array.from(parsed.signature);
     signature[0] = (signature[0] as number) ^ 1;
-    expect(verifySignedObject({ ...parsed, signature }, c.who.descriptor)).toEqual({
+    expect(verifySignedObject({ ...parsed, signature }, ALICE.descriptor)).toEqual({
       valid: false,
       reason: "BAD_SIGNATURE",
     });
   });
 
-  it("14. a different expected signer fails on kid", () => {
-    const other = c.who === OWNER ? BOB : OWNER;
-    expect(verifySignedObject(parsed, other.descriptor)).toEqual({
+  it("14. a different expected signer fails on kid; the same payload under another kid verifies only for that kid", () => {
+    expect(verifySignedObject(parsed, BRUNO.descriptor)).toEqual({
       valid: false,
       reason: "KID_MISMATCH",
     });
-  });
-});
-
-describe("1, 4, 6. exact header and Sig_structure bytes", () => {
-  it.each([
-    ["C0_genesis", V.C0_PROTECTED, V.C0_SIG_STRUCTURE, V.C0_COSE],
-    ["SNAPSHOT-01", V.S1_PROTECTED, V.S1_SIG_STRUCTURE, V.S1_COSE],
-  ])("%s", (_id, protectedHex, sigStructureHex, coseHex) => {
-    const parsed = parseSignedObject(fromHex(coseHex));
-    expect(toHex(parsed.protectedBytes)).toBe(protectedHex);
-    expect(toHex(sigStructureBytes(parsed.protectedBytes, parsed.payloadBytes))).toBe(
-      sigStructureHex,
-    );
-    // External AAD is the empty byte string (§10.4): third element of Sig_structure.
-    const structure = decodeStrict(fromHex(sigStructureHex)) as CborValue[];
-    expect(structure[0]).toBe("Signature1");
-    expect(structure[2]).toEqual(new Uint8Array(0));
-  });
-});
-
-describe("published negative vectors", () => {
-  it("invalid_signature_D1: parses, signature fails", () => {
-    const parsed = parseSignedObject(fromHex(V.INVALID_SIGNATURE_D1));
-    expect(verifySignedObject(parsed, BOB.descriptor)).toEqual({
-      valid: false,
-      reason: "BAD_SIGNATURE",
-    });
-  });
-
-  it("tampered_D1: parses, signature fails", () => {
-    const parsed = parseSignedObject(fromHex(V.TAMPERED_D1));
-    expect(verifySignedObject(parsed, BOB.descriptor)).toEqual({
-      valid: false,
-      reason: "BAD_SIGNATURE",
-    });
-  });
-
-  it("wrong_kid_D1: kid is CAROL, so it fails for the expected signer BOB", () => {
-    const parsed = parseSignedObject(fromHex(V.WRONG_KID_D1));
-    expect(toHex(parsed.kid)).toBe(toHex(CAROL.descriptor.principalId));
-    expect(verifySignedObject(parsed, BOB.descriptor)).toEqual({
+    const other = parseSignedObject(signObject(DATA_UNIT_PAYLOAD, BRUNO).bytes);
+    expect(verifySignedObject(other, ALICE.descriptor)).toEqual({
       valid: false,
       reason: "KID_MISMATCH",
     });
-    // The COSE layer alone would accept CAROL; requiring the actor as signer is the Data Unit rule (LFCP-016).
-    expect(verifySignedObject(parsed, CAROL.descriptor)).toEqual({ valid: true });
-  });
-
-  it("15. tagged_cose_D1: tag 18 is rejected", () => {
-    expect(V.TAGGED_COSE_D1.slice(0, 2)).toBe("d2");
-    expect(codeOf(() => parseSignedObject(fromHex(V.TAGGED_COSE_D1)))).toBe("COSE_MALFORMED");
-  });
-
-  it("noncanonical_payload_D1: rejected by the §5.2 payload check", () => {
-    expect(codeOf(() => parseSignedObject(fromHex(V.NONCANONICAL_PAYLOAD_D1)))).toBe(
-      "CBOR_NON_CANONICAL",
-    );
+    expect(verifySignedObject(other, BRUNO.descriptor)).toEqual({ valid: true });
   });
 });
 
 describe("synthetic malformed objects", () => {
-  const good = decodeStrict(fromHex(V.D1_COSE)) as CborValue[];
-  const [prot, unprot, payload, signature] = good as [Uint8Array, CborMap, Uint8Array, Uint8Array];
-  const kid = (decodeStrict(prot) as CborMap).entries[1]?.[1] as Uint8Array;
+  const [prot, unprot, payload, signature] = decodeStrict(DATA_UNIT.bytes) as [
+    Uint8Array,
+    CborMap,
+    Uint8Array,
+    Uint8Array,
+  ];
+  const kid = ALICE.descriptor.principalId;
   const build = (items: CborValue[]): Uint8Array => encode(items);
+
+  it("15. tag 18 is rejected", () => {
+    expect(codeOf(() => parseSignedObject(Uint8Array.from([0xd2, ...DATA_UNIT.bytes])))).toBe(
+      "COSE_MALFORMED",
+    );
+  });
 
   it.each([
     [
@@ -248,6 +202,16 @@ describe("synthetic malformed objects", () => {
     );
   });
 
+  it("rejects a payload with a non-shortest integer (N7)", () => {
+    // Field 1 (data epoch 0) as 0x18 0x00: after the map head, key 0 and the 32-byte resource ID.
+    expect(payload[36]).toBe(0x01);
+    expect(payload[37]).toBe(0x00);
+    const loose = Uint8Array.from([...payload.subarray(0, 37), 0x18, ...payload.subarray(37)]);
+    expect(codeOf(() => parseSignedObject(build([prot, unprot, loose, signature])))).toBe(
+      "CBOR_NON_CANONICAL",
+    );
+  });
+
   it("reports the specific CBOR error of a malformed payload", () => {
     // {1: 1, 1: 1}: a duplicate key; and a payload with trailing bytes.
     const duplicate = Uint8Array.from([0xa2, 0x01, 0x01, 0x01, 0x01]);
@@ -261,39 +225,39 @@ describe("synthetic malformed objects", () => {
   });
 
   it("rejects trailing bytes and a non-array", () => {
-    expect(codeOf(() => parseSignedObject(Uint8Array.from([...fromHex(V.D1_COSE), 0])))).toBe(
+    expect(codeOf(() => parseSignedObject(Uint8Array.from([...DATA_UNIT.bytes, 0])))).toBe(
       "CBOR_TRAILING_BYTES",
     );
     expect(codeOf(() => parseSignedObject(encode(cborMap([]))))).toBe("COSE_MALFORMED");
   });
 
   it("keeps the exact received bytes", () => {
-    const input = fromHex(V.D1_COSE);
+    const input = Uint8Array.from(DATA_UNIT.bytes);
     const parsed = parseSignedObject(input);
     input.fill(0);
-    expect(toHex(parsed.bytes)).toBe(V.D1_COSE);
+    expect(toHex(parsed.bytes)).toBe(toHex(DATA_UNIT.bytes));
   });
 });
 
 describe("signObject guards", () => {
   it("refuses a key that does not belong to the descriptor", () => {
     expect(
-      codeOf(() =>
-        signObject(fromHex(V.D1_PAYLOAD), { key: OWNER.key, descriptor: BOB.descriptor }),
-      ),
+      codeOf(() => signObject(DATA_UNIT_PAYLOAD, { key: ALICE.key, descriptor: BRUNO.descriptor })),
     ).toBe("COSE_SIGNER_MISMATCH");
   });
 
   it("refuses payload bytes that are not deterministic CBOR, without re-encoding them", () => {
-    expect(codeOf(() => signObject(Uint8Array.from([0x18, 0x01]), BOB))).toBe("CBOR_NON_CANONICAL");
-    expect(codeOf(() => signObject(Uint8Array.from([0xff]), BOB))).toBe("CBOR_NON_CANONICAL");
+    expect(codeOf(() => signObject(Uint8Array.from([0x18, 0x01]), ALICE))).toBe(
+      "CBOR_NON_CANONICAL",
+    );
+    expect(codeOf(() => signObject(Uint8Array.from([0xff]), ALICE))).toBe("CBOR_NON_CANONICAL");
   });
 
   it("signs fresh keys and round-trips", () => {
     const key = generateSigningKeyPair();
     const fresh: Signer = {
       key,
-      descriptor: principalDescriptorFromKeys(key, importAgreementKey(fromHex(V.BOB_X25519))),
+      descriptor: principalDescriptorFromKeys(key, importAgreementKey(seq32(7))),
     };
     const signed = signObject(encode(cborMap([[0, "x"]])), fresh);
     expect(verifySignedObject(parseSignedObject(signed.bytes), fresh.descriptor)).toEqual({
@@ -302,12 +266,12 @@ describe("signObject guards", () => {
   });
 
   it("never puts secret key bytes into errors", () => {
-    const secret = toHex(exportSecretKeyBytes(BOB.key));
+    const secret = toHex(exportSecretKeyBytes(ALICE.key));
     const forms = [secret, toBase64url(fromHex(secret))];
     const errors: unknown[] = [];
     for (const attempt of [
-      () => signObject(fromHex(V.D1_PAYLOAD), { key: BOB.key, descriptor: OWNER.descriptor }),
-      () => signObject(Uint8Array.from([0x18, 0x01]), BOB),
+      () => signObject(DATA_UNIT_PAYLOAD, { key: ALICE.key, descriptor: BRUNO.descriptor }),
+      () => signObject(Uint8Array.from([0x18, 0x01]), ALICE),
     ]) {
       try {
         attempt();
