@@ -341,9 +341,14 @@ export class IdbLfcpStorage implements LfcpStorage {
         return;
       case "put-epoch": {
         const key = `${hex(w.resourceId)}:${pad(BigInt(w.epoch.epoch))}`;
-        // A null dekRef never clears a stored one (read and write in this transaction).
+        // A null dekRef or closedBy never clears a stored one (read and write
+        // in this transaction).
         const stored = (await req(s("epochs").get(key))) as Keyed<EpochRow> | undefined;
-        const row = { ...w.epoch, dekRef: w.epoch.dekRef ?? stored?.row.dekRef ?? null };
+        const row = {
+          ...w.epoch,
+          closedBy: w.epoch.closedBy ?? stored?.row.closedBy ?? null,
+          dekRef: w.epoch.dekRef ?? stored?.row.dekRef ?? null,
+        };
         await req(s("epochs").put({ r: hex(w.resourceId), row } satisfies Keyed<EpochRow>, key));
         return;
       }

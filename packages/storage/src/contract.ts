@@ -303,6 +303,26 @@ export function runStorageContract(
       );
     });
 
+    test("never reopens a closed epoch with a null closedBy (a DEK reference from an older row)", async ({
+      storage: s,
+    }) => {
+      const open = { ...(epochRows[1] as EpochRow), dekRef: null };
+      await ok(s, [{ op: "put-epoch", resourceId: R, epoch: open }], "open");
+      const closedBy = controlRecordId(id(104));
+      await ok(s, [{ op: "put-epoch", resourceId: R, epoch: { ...open, closedBy } }], "closed");
+      // A Key Package's DEK reference, written from the row read before the close.
+      await ok(
+        s,
+        [{ op: "put-epoch", resourceId: R, epoch: { ...open, dekRef: dekSecretRef(R, E1) } }],
+        "ref from the older row",
+      );
+      eq(
+        await s.control.epochs(R),
+        [{ ...open, closedBy, dekRef: dekSecretRef(R, E1) }],
+        "still closed, ref stored",
+      );
+    });
+
     test("keeps Data Unit bytes, treats a repeat as a duplicate and exposes an equivocating pair", async ({
       storage: s,
     }) => {

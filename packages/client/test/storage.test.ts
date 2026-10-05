@@ -195,6 +195,40 @@ describe("client over storage", () => {
     ]);
   });
 
+  it("keeps an epoch closed when a DEK reference is stored from a row read before the close", async () => {
+    const storage = new InMemoryLfcpStorage();
+    await saveControlChain(storage, linear(records), null);
+    // The sync client's Key Package path: read the epoch row, then (after
+    // storing the secret) commit the row with its DEK reference.
+    const read = (await storage.control.epochs(R))[0] as EpochRow;
+    expect(read.closedBy).toBeNull();
+    // Meanwhile the application saves a rotation that closes epoch 0.
+    const rotation = rotateEpoch(linear(records).state, OWNER, {
+      reason: 0n,
+      finalFrontier: [],
+      dek: DEK1,
+    });
+    const longer = linear([...records, rotation.bytes]);
+    expect(await saveControlChain(storage, longer, linear(records).state.head)).toEqual({
+      ok: true,
+    });
+    await storage.commit([
+      {
+        op: "put-epoch",
+        resourceId: R,
+        epoch: { ...read, dekRef: dekSecretRef(R, dataEpoch(0n)) },
+      },
+    ]);
+    const after = await storage.control.epochs(R);
+    expect(after.map((e) => [e.epoch, e.closedBy !== null, e.dekRef])).toEqual([
+      [0n, true, dekSecretRef(R, dataEpoch(0n))],
+      [1n, false, null],
+    ]);
+    // The reloaded chain and the stored epochs agree: epoch 0 is closed.
+    const loaded = await loadControlChain(storage, R);
+    expect(loaded?.kind === "linear" && loaded.state.epoch.epoch).toBe(1n);
+  });
+
   it("creates a local unit with a stored sequence and commits it with its outbound entry", async () => {
     const storage = new InMemoryLfcpStorage();
     const view = linear(records);

@@ -251,10 +251,12 @@ export type StorageWrite =
     }
   | {
       /**
-       * Stores the epoch row. A null `dekRef` never clears a stored one: a
-       * chain save that read the rows before a Key Package stored the DEK
-       * reference must not erase it (merged inside the commit, so no lost
-       * update).
+       * Stores the epoch row. A null `dekRef` or `closedBy` never clears a
+       * stored one: a chain save that read the rows before a Key Package
+       * stored the DEK reference must not erase it, and a DEK reference
+       * written from a row read before a Key Epoch closed the epoch must not
+       * reopen it (merged inside the commit, so no lost update). Both only
+       * ever go from null to set: the stored chain only grows.
        */
       readonly op: "put-epoch";
       readonly resourceId: ResourceId;

@@ -137,7 +137,11 @@ function apply(s: State, w: StorageWrite): void {
       const stored = epochs.get(BigInt(w.epoch.epoch));
       epochs.set(
         BigInt(w.epoch.epoch),
-        own({ ...w.epoch, dekRef: w.epoch.dekRef ?? stored?.dekRef ?? null }),
+        own({
+          ...w.epoch,
+          closedBy: w.epoch.closedBy ?? stored?.closedBy ?? null,
+          dekRef: w.epoch.dekRef ?? stored?.dekRef ?? null,
+        }),
       );
       s.epochs.set(key, epochs);
       return;
