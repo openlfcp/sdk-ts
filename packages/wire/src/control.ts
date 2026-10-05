@@ -360,7 +360,7 @@ function writerUrl(url: string): string {
 
 function abilities(list: readonly bigint[], nonEmpty: boolean): bigint[] {
   if (nonEmpty && list.length === 0) refuse("the ability list must not be empty");
-  // PROVISIONAL (gap A1 / G-CP6): no ability twice in one list.
+  // §17.1: an ability list MUST NOT repeat a code.
   if (new Set(list).size !== list.length) refuse("an ability is listed twice");
   return [...list];
 }

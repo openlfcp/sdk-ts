@@ -363,7 +363,7 @@ describe("typed bodies", () => {
         [3, 0],
       ]),
     ],
-    // PROVISIONAL (gap A1 / G-CP6)
+    // §17.1: an ability list MUST NOT repeat a code (MALFORMED_MESSAGE).
     [
       "a duplicate ability",
       1n,

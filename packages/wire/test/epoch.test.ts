@@ -213,7 +213,7 @@ describe("Key Epoch rotation (§19)", () => {
         ]),
       ],
     ],
-    ["a range at contiguous + 1 (W3)", [have(BRUNO, 3, [[4, 5]])]],
+    ["a range at contiguous + 1 (§28.1 rule 5)", [have(BRUNO, 3, [[4, 5]])]],
     ["an empty extras list", [have(BRUNO, 3, [])]],
     ["a duplicate actor", [have(BRUNO, 3), have(BRUNO, 4)]],
   ])("refuses a final frontier with %s (MALFORMED_MESSAGE)", (_n, frontier) => {
