@@ -20,6 +20,7 @@ export {
 export { sha256 } from "./hash.js";
 export { hkdfExpand, hkdfExtract } from "./hkdf.js";
 export { openDek, type SealedDek, sealDek } from "./hpke.js";
+export { InvitationSecret } from "./invitation.js";
 export {
   AgreementKeyPair,
   exportSecretKeyBytes,
