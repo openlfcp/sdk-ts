@@ -28,6 +28,7 @@ import {
   decodeControlRecordPayload,
   decodeDataUnitPayload,
   decodeEnvelope,
+  decodeInviteSecret,
   decodeKeyPackagePayload,
   decodeMessage,
   decodePrincipalDescriptor,
@@ -177,6 +178,8 @@ const RULES: Readonly<Record<string, (bytes: Uint8Array) => unknown>> = {
   "lfcp-message": decodeEnvelope,
   // §32-§61: a registry type with its typed body.
   "typed-lfcp-message": decodeMessage,
+  // §18.2: the bearer invitation secret.
+  "invite-secret": decodeInviteSecret,
 };
 const PENDING: Readonly<Record<string, string>> = cddlPending.rules;
 

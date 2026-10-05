@@ -7,6 +7,7 @@
 import { createDataUnit, createSnapshot } from "@openlfcp/client";
 import {
   bytesEqual,
+  controlRecordId,
   dataEpoch,
   fromBase64url,
   fromHex,
@@ -25,6 +26,7 @@ import {
   encryptDataUnit,
   encryptSnapshot,
   exportSecretKeyBytes,
+  type InvitationSecret,
   importAgreementKey,
   importResourceDEK,
   importSigningKey,
@@ -35,6 +37,7 @@ import {
 import {
   type AnyMessage,
   type AuthTranscriptFields,
+  assembleInviteUri,
   authTranscript,
   type ControlPutBody,
   type ControlRecord,
@@ -47,6 +50,7 @@ import {
   decodeControlRecordPayload,
   decodeDataUnitPayload,
   decodeEnvelope,
+  decodeInviteSecret,
   decodeKeyPackagePayload,
   decodeMessage,
   decodePrincipalDescriptor,
@@ -54,6 +58,7 @@ import {
   derivePrincipalId,
   ERROR_CODE,
   encodeControlRecordPayload,
+  encodeInviteSecret,
   encodeMessage,
   encodePrincipalDescriptor,
   expectedSignerOf,
@@ -72,6 +77,7 @@ import {
   type Parsed,
   parseControlRecord,
   parseDataUnit,
+  parseInviteUri,
   parseKeyPackage,
   parseOwnerTransferAccept,
   parseOwnerTransferOffer,
@@ -94,6 +100,7 @@ import {
   validateControlChain,
   verifyAuthProof,
   verifyGenesis,
+  verifyInvitationSecret,
   verifyKeyPackage,
   verifySignedObject,
   WIRE_PROFILE,
@@ -986,12 +993,58 @@ const snapshot: Handler = async (c, context) => {
   };
 };
 
+/**
+ * LFCP-039b (§18.2). The secret decodes as a typed invite-secret, re-encodes
+ * to its exact bytes, and its recomputed Invitation Principal is the
+ * subject of the grant the case names (verifyInvitationSecret on the
+ * published chain). The bearer URI assembles from the Resource, the
+ * Genesis coordinator endpoint, the grant and the secret to exactly the
+ * published string, and parses back to the same parts.
+ */
 const inviteUri: Handler = (c, context) => {
   const e = c.expected;
   const secret = hexOf(e, "secret_cbor");
   const fixtures = context.suite.fixtures as { resource?: { id?: unknown } } | undefined;
+  const grantCase = context.caseById(String((c.inputs as { grant_case?: unknown }).grant_case));
+  const grantId = controlRecordId(hexOf(grantCase?.expected, "record_id"));
+  const resource = resourceId(hexOf(fixtures?.resource as Fields, "id"));
+  const view = publishedView(context);
+  // The generator's endpoint is the Genesis coordinator (a later Route Update may move it).
+  const genesis = view.stateAt(view.state.genesisId)?.route.coordinatorUrl ?? "";
+  const typed = (): InvitationSecret => decodeInviteSecret(secret);
   return {
     checks: [
+      check("secret_cbor/typed", () => {
+        const s = typed();
+        if (!bytesEqual(encodeInviteSecret(s), secret)) return "does not re-encode to its bytes";
+        const signer = verifyInvitationSecret(view.state, grantId, s);
+        const subject = view.state.grants.get(toHex(grantId))?.subject;
+        return (
+          (subject !== undefined && bytesEqual(signer.descriptor.principalId, subject)) ||
+          "the Invitation Principal is not the grant's subject"
+        );
+      }),
+      check("uri/assemble", () => {
+        const uri = assembleInviteUri({
+          resourceId: resource,
+          endpoints: [genesis],
+          grantId,
+          secret: typed(),
+        });
+        return uri === (e as { uri?: unknown }).uri || "the assembled URI differs";
+      }),
+      check("uri/parse", () => {
+        const parsed = parseInviteUri(String((e as { uri?: unknown }).uri));
+        return (
+          (bytesEqual(parsed.resourceId, resource) &&
+            bytesEqual(parsed.grantId, grantId) &&
+            parsed.endpoints.length === 1 &&
+            parsed.endpoints[0] === genesis &&
+            parsed.secret !== undefined &&
+            bytesEqual(encodeInviteSecret(parsed.secret), secret)) ||
+          "the parsed URI differs from its parts"
+        );
+      }),
       deterministic("secret_cbor/deterministic", secret),
       equalCheck("secret_b64url", b64Of(e, "secret_b64url"), toBase64url(secret)),
       check("resource_b64url", () => {
@@ -1009,7 +1062,6 @@ const inviteUri: Handler = (c, context) => {
         return match || "names no Control Record of this suite";
       }),
     ],
-    pending: ["secret_cbor/typed", "uri/assemble"],
   };
 };
 

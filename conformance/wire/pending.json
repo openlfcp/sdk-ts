@@ -1,13 +1,5 @@
 {
   "suite": "LFCP-TEST-VECTORS-01",
   "note": "Cases or parts of cases that sdk-ts cannot check yet, with the task that implements them (LFCP-017). Remove an entry when its task lands: the runner fails on stale entries.",
-  "cases": {
-    "invite_uri": {
-      "reason": "Deterministic secret CBOR and the base64url fields run here; the invite-secret structure and the lfcp://join URI do not.",
-      "parts": {
-        "secret_cbor/typed": "LFCP-053",
-        "uri/assemble": "LFCP-053"
-      }
-    }
-  }
+  "cases": {}
 }
