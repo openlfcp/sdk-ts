@@ -98,9 +98,12 @@ export type LfcpErrorCode =
    * names (§25: recipient binding). Client-local, no wire code (ADR 0001 N5).
    */
   | "KEY_PACKAGE_RECIPIENT_MISMATCH"
-  /** A Key Package does not open (HPKE failure, or not a 32-byte DEK). Client-local, no wire code (N5). */
+  /** A Key Package does not open (HPKE failure). Client-local, no wire code (N5). */
   | "KEY_PACKAGE_OPEN_FAILED"
-  /** An opened DEK does not match the epoch's DEK commitment (§25.2). Client-local, no wire code (N5). */
+  /**
+   * An opened DEK does not match the epoch's DEK commitment, or the
+   * plaintext is not 32 bytes (§25.2). Client-local, no wire code (N5).
+   */
   | "DEK_COMMITMENT_MISMATCH";
 
 /** Error with a stable machine-readable `code`; the message is for humans only. */

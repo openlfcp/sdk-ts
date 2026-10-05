@@ -51,10 +51,12 @@ export async function sealDek(
 }
 
 /**
- * Opens an HPKE-sealed DEK with the recipient's X25519 key pair. Any
- * failure (wrong key, tampered enc, ciphertext, info or AAD, or a
- * plaintext that is not 32 bytes) is KEY_PACKAGE_OPEN_FAILED, client-local
- * (ADR 0001 N5).
+ * Opens an HPKE-sealed DEK with the recipient's X25519 key pair. An HPKE
+ * failure (wrong key, tampered enc, ciphertext, info or AAD) is
+ * KEY_PACKAGE_OPEN_FAILED. A plaintext that is not 32 bytes is
+ * DEK_COMMITMENT_MISMATCH (LFCP-WIRE-01 §25.2: "A decrypted plaintext that
+ * is not exactly 32 bytes long is a DEK that does not match the
+ * commitment"). Both are client-local (ADR 0001 N5).
  */
 export async function openDek(
   recipient: AgreementKeyPair,
@@ -79,8 +81,8 @@ export async function openDek(
   try {
     if (plaintext.length !== KEY_LENGTH)
       throw new LfcpError(
-        "KEY_PACKAGE_OPEN_FAILED",
-        "the Key Package plaintext is not a 32-byte DEK",
+        "DEK_COMMITMENT_MISMATCH",
+        "the Key Package plaintext is not a 32-byte DEK, so it matches no commitment",
       );
     return importResourceDEK(plaintext);
   } finally {

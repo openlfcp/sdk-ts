@@ -142,6 +142,24 @@ describe("sealDek / openDek", () => {
     await fails(() => openDek(recipient, sealed.enc, sealed.ciphertext, info, flip(aad)));
   });
 
+  it("a plaintext that is not 32 bytes is a commitment mismatch (§25.2)", async () => {
+    const recipient = generateAgreementKeyPair();
+    const suite = new CipherSuite(
+      KEM_DHKEM_X25519_HKDF_SHA256,
+      KDF_HKDF_SHA256,
+      AEAD_ChaCha20Poly1305,
+    );
+    const pk = await suite.DeserializePublicKey(recipient.publicKey);
+    for (const length of [31, 33]) {
+      const sealed = await suite.Seal(pk, new Uint8Array(length).fill(7), { info, aad });
+      expect(
+        await codeOf(() =>
+          openDek(recipient, sealed.encapsulatedSecret, sealed.ciphertext, info, aad),
+        ),
+      ).toBe("DEK_COMMITMENT_MISMATCH");
+    }
+  });
+
   it("refuses a malformed recipient public key", async () => {
     expect(await codeOf(() => sealDek(new Uint8Array(31), generateResourceDEK(), info, aad))).toBe(
       "INVALID_LENGTH",
