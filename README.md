@@ -9,22 +9,25 @@ stay portable to browsers and editors; Node-only code goes into separate
 ## Status
 
 Workspace scaffold (LFCP-011). `@openlfcp/core` has its identifier
-primitives (LFCP-012), `@openlfcp/crypto` the Principal key material and
-`@openlfcp/wire` its deterministic CBOR codec (LFCP-013), the Principal
-Descriptor (LFCP-014), canonical COSE_Sign1 (LFCP-015) and the typed
-signed-object payloads (LFCP-016); the other packages still export only a `PACKAGE`
-placeholder. Protocol code arrives with the backlog tasks that own each
-package. The official vectors run through the conformance runner
+primitives (LFCP-012) and uint64 epoch and sequence types (LFCP-018),
+`@openlfcp/crypto` the Principal key material (LFCP-014) and the Data
+Epoch keys (LFCP-018), `@openlfcp/wire` its deterministic CBOR codec
+(LFCP-013), the Principal Descriptor (LFCP-014), canonical COSE_Sign1
+(LFCP-015) and the typed signed-object payloads (LFCP-016), and
+`@openlfcp/storage` the actor sequence reservation contract (LFCP-018).
+`@openlfcp/shared-objects` and `@openlfcp/client` still export only a
+`PACKAGE` placeholder. Protocol code arrives with the backlog tasks that
+own each package. The official vectors run through the conformance runner
 (LFCP-017; see [Conformance](#conformance)).
 
 ## Packages
 
 | Package | Purpose | Depends on | Exports |
 | --- | --- | --- | --- |
-| `@openlfcp/core` | Identifiers, shared types, errors, byte helpers | none | 32-byte ids (`ResourceId`, `PrincipalId`, `Hash32`, `ControlRecordId`, `DataUnitId`), `ObjectId` (UUIDv7), hex/base64url, `LfcpError` |
-| `@openlfcp/crypto` | Thin wrapper over the audited `@noble` libraries | core | `sha256`; `SigningKeyPair` (Ed25519) and `AgreementKeyPair` (X25519) with redacted diagnostics; `generate*KeyPair`, `import*Key`, `exportSecretKeyBytes`, `verifyEd25519` |
+| `@openlfcp/core` | Identifiers, shared types, errors, byte helpers | none | 32-byte ids (`ResourceId`, `PrincipalId`, `Hash32`, `ControlRecordId`, `DataUnitId`), `ObjectId` (UUIDv7), uint64 `DataEpoch`/`ActorSequence` and `uint64BE`, hex/base64url, `LfcpError` |
+| `@openlfcp/crypto` | Thin wrapper over the audited `@noble` libraries | core | `sha256`; `SigningKeyPair` (Ed25519) and `AgreementKeyPair` (X25519) with redacted diagnostics; `generate*KeyPair`, `import*Key`, `exportSecretKeyBytes`, `verifyEd25519`; HKDF-SHA256 (`hkdfExtract`, `hkdfExpand`); Data Epoch keys (`ResourceDEK`, `generateResourceDEK`, `importResourceDEK`, `dekCommitment`, `ActorDataKey`/`deriveActorDataKey`, `SnapshotKey`/`deriveSnapshotKey`, `dataUnitNonce`, `snapshotNonce`) |
 | `@openlfcp/wire` | Deterministic CBOR, COSE, LFCP Wire structures and codecs | core, crypto | Principal Descriptor (`principalDescriptor*`, `encode/decodePrincipalDescriptor`, `derivePrincipalId`); canonical COSE_Sign1 (`signObject`, `parseSignedObject`, `verifySignedObject`, `sigStructureBytes`, `objectId`); typed payloads (`parseControlRecord`, `parseDataUnit`, `parseKeyPackage`, `parseSnapshot`, `decode*Payload`, `*PayloadFromCbor`, `expectedSignerOf`, `actorHaveFromCbor`, `canonicalFrontierFromCbor`, `endpointFromCbor`, `CONTROL_TYPE`); low-level deterministic CBOR (`encode`, `decodeStrict`, `decodeDeterministic`, `isDeterministic`, `cborMap`) under the `@openlfcp/wire/cbor` subpath |
-| `@openlfcp/storage` | Storage interfaces only (adapters such as a future `@openlfcp/storage-node` live elsewhere) | core | `PACKAGE` |
+| `@openlfcp/storage` | Storage interfaces only (adapters such as a future `@openlfcp/storage-node` live elsewhere) | core | `ActorSequenceReservation` (durable-before-use contract; durable implementations are LFCP-034 to LFCP-036), `nextActorSequence`, `SequenceReuseGuard`, and `InMemoryActorSequenceReservation` for tests and development only (not crash-safe) |
 | `@openlfcp/shared-objects` | SHARED-OBJECTS-PROFILE-01 (`org.openlfcp.shared-objects.v1`) | core, crypto | `PACKAGE` |
 | `@openlfcp/client` | Session, Control Plane and Data Plane synchronization | core, wire, storage, crypto | `PACKAGE` |
 
