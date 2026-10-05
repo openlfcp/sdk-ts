@@ -225,18 +225,29 @@ function scalarize(value: Json): unknown {
   return value;
 }
 
-/** An Automerge value as logical JSON: scalar strings and Text read as strings. */
-function plain(value: unknown): Json {
+/** §30: an object's maps and lists nest at most this many levels (the field's own map is 1). */
+export const MAX_VALUE_DEPTH = 64;
+/** Maps and lists plain() reads, the first included: the root, `objects` and an object map plus MAX_VALUE_DEPTH. */
+const MAX_READ_DEPTH = MAX_VALUE_DEPTH + 3;
+
+/**
+ * An Automerge value as logical JSON: scalar strings and Text read as
+ * strings. Reads at most `budget` nested maps and lists; a deeper one reads
+ * as null, so a crafted document cannot exhaust the stack (§30: it is
+ * INVALID_FIELD_TYPE, reported by textProblems).
+ */
+function plain(value: unknown, budget = MAX_READ_DEPTH): Json {
   if (A.isImmutableString(value)) return value.toString();
   if (value instanceof A.Counter) return value.value;
-  if (Array.isArray(value)) return value.map(plain);
-  if (
+  const nested =
     value !== null &&
     typeof value === "object" &&
     !(value instanceof Uint8Array) &&
-    !(value instanceof Date)
-  )
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, plain(v)]));
+    !(value instanceof Date);
+  if (nested && budget <= 0) return null;
+  if (Array.isArray(value)) return value.map((v) => plain(v, budget - 1));
+  if (nested)
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, plain(v, budget - 1)]));
   return value as Json;
 }
 
@@ -314,7 +325,9 @@ function textProblems(doc: Doc, object: AMap, key: string): ProfileProblem[] {
   const backend = A.getBackend(doc);
   const heads = A.getHeads(doc);
   const out: ProfileProblem[] = [];
-  const scan = (id: string, kind: "map" | "list", at: string): void => {
+  // `depth` is the depth of the maps and lists found under this one: the
+  // object's field values are at depth 1 (§30).
+  const scan = (id: string, kind: "map" | "list", at: string, depth: number): void => {
     const props: (string | number)[] =
       kind === "list"
         ? Array.from({ length: backend.length(id, heads) }, (_, i) => i)
@@ -322,15 +335,20 @@ function textProblems(doc: Doc, object: AMap, key: string): ProfileProblem[] {
     for (const prop of props) {
       const here = `${at}/${pointerToken(String(prop))}`;
       const values = backend.getAll(id, prop, heads);
+      const nested = values.filter((v) => v[0] === "map" || v[0] === "list");
       if (values.some((v) => v[0] === "text"))
         out.push(
           problem("INVALID_FIELD_TYPE", here, "collaborative Text, not a scalar string (§30)"),
         );
-      for (const v of values)
-        if (v[0] === "map" || v[0] === "list") scan(v[1] as string, v[0], here);
+      else if (nested.length > 0 && depth > MAX_VALUE_DEPTH)
+        out.push(
+          problem("INVALID_FIELD_TYPE", here, `nested deeper than ${MAX_VALUE_DEPTH} levels (§30)`),
+        );
+      if (depth > MAX_VALUE_DEPTH) continue; // nothing below it is examined
+      for (const v of nested) scan(v[1] as string, v[0] as "map" | "list", here, depth + 1);
     }
   };
-  scan(obj, "map", `/objects/${pointerToken(key)}`);
+  scan(obj, "map", `/objects/${pointerToken(key)}`, 1);
   return out;
 }
 
