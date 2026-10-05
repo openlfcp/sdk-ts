@@ -22,6 +22,7 @@ import {
   canonicalFrontierToCbor,
   createMessage,
   type DataProfileCodec,
+  ERROR_CODE,
   type HaveVector,
   hasSequence,
   type LfcpMessage,
@@ -195,6 +196,8 @@ export type SyncEvent =
       readonly code: string;
       readonly message: string;
     };
+
+const NACK_NAME = new Map<bigint, string>(Object.entries(ERROR_CODE).map(([k, v]) => [v, k]));
 
 type Request =
   | { readonly kind: "open"; readonly resource: string }
@@ -669,7 +672,8 @@ export class SyncClient {
   }
 
   #onRequestNack(request: Request, m: LfcpMessage<"NACK">): void {
-    const code = String(m.body.code);
+    // The §62 name (e.g. AUTHORIZATION_FAILED), so applications can explain it; unknown codes keep their number.
+    const code = NACK_NAME.get(m.body.code) ?? `NACK ${m.body.code}`;
     if (request.kind === "host") {
       request.reject(
         new Error(
@@ -680,7 +684,7 @@ export class SyncClient {
     }
     const ctx = this.#resources.get(request.resource);
     this.#error(
-      `NACK ${code}`,
+      code,
       `${request.kind} refused${m.body.diagnostic ? `: ${m.body.diagnostic}` : ""}`,
       ctx?.binding.resourceId,
     );

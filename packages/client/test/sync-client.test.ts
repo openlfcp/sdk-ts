@@ -593,6 +593,24 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     await settle(200);
     await bob.sync.idle();
     expect(bob.sync.resourceState(chain.R)).toBe("CLOSED");
-    expect(bob.events.find((e) => e.type === "error")).toMatchObject({ code: "NACK 6" });
+    expect(bob.events.find((e) => e.type === "error")).toMatchObject({
+      code: "RESOURCE_NOT_HOSTED",
+    });
+  });
+
+  it("names the §62 code of a refused RESOURCE_HOST", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(207);
+    const owner = client(OWNER, server, clock);
+    server.onMessage = (m, s) => {
+      if (m.type === "RESOURCE_HOST") s.reply(m, "NACK", { code: 20n });
+      return [];
+    };
+    owner.sync.start();
+    await settle(200);
+    await expect(owner.sync.host(chain.records[0] as Uint8Array)).rejects.toThrow(
+      "RESOURCE_HOST refused: NACK HOSTING_DENIED",
+    );
   });
 });
