@@ -15,6 +15,14 @@ export {
   unframeSnapshot,
 } from "./automerge-bytes.js";
 export {
+  type SharedObjectsApplyResult,
+  type SharedObjectsCodec,
+  SharedObjectsDataProfile,
+  type SharedObjectsDiagnostic,
+  type SharedObjectsExcludeResult,
+  type SharedObjectsUnit,
+} from "./data-profile.js";
+export {
   type BuiltReplica,
   type LocalChange,
   type ObjectChange,

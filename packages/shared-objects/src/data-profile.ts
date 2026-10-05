@@ -1,0 +1,246 @@
+import {
+  type DataUnitId,
+  LfcpError,
+  type PrincipalId,
+  type ResourceId,
+  toHex,
+} from "@openlfcp/core";
+import { type CheckedChange, frameChange, unframeChange } from "./automerge-bytes.js";
+import type { ObjectChange, SharedObjectsReplica } from "./replica.js";
+import type { Json } from "./validate.js";
+import { deriveActorId, PROFILE_ID } from "./values.js";
+
+/**
+ * The Shared Objects Data Profile handler (LFCP-033): what a profile-
+ * agnostic Data Unit applier (@openlfcp/client DataUnitApplier) calls once
+ * LFCP has accepted a unit. It matches the client's DataProfileHandler
+ * structurally; this package depends on neither client nor wire.
+ *
+ * - decode: the §11 plaintext is one checked Automerge change, written by
+ *   the §8 actor of the unit's signing Principal (SO-SEC1);
+ * - apply: the change merges into the replica, or waits in a buffer until
+ *   the changes it depends on arrive in other units (profile-pending), and
+ *   every buffered change it unblocks merges with it;
+ * - one object becoming profile-invalid is a diagnostic, never a refusal:
+ *   the other objects stay usable (§77);
+ * - exclude (PROVISIONAL G-EP7): rebuilds the replica without given units.
+ */
+
+/** An accepted unit as the applier passes it (structurally the client's ProfileUnit). */
+export interface SharedObjectsUnit {
+  readonly unitId: DataUnitId;
+}
+
+export interface SharedObjectsDiagnostic {
+  readonly objectId?: string;
+  readonly code: string;
+  readonly diagnostic?: string;
+  readonly pointer?: string;
+  readonly message: string;
+}
+
+export interface SharedObjectsApplyResult {
+  readonly merged: readonly DataUnitId[];
+  readonly objects: readonly string[];
+  readonly diagnostics: readonly SharedObjectsDiagnostic[];
+  readonly pending?: string;
+}
+
+export interface SharedObjectsExcludeResult {
+  readonly objects: readonly string[];
+  readonly pending: readonly DataUnitId[];
+}
+
+/** The §11 codec of one unit (structurally the wire DataProfileCodec). */
+export interface SharedObjectsCodec {
+  readonly dataProfile: string;
+  encode(change: CheckedChange): Uint8Array;
+  decode(plaintext: Uint8Array): CheckedChange;
+}
+
+interface Buffered {
+  readonly unitId: DataUnitId;
+  readonly change: CheckedChange;
+}
+
+export class SharedObjectsDataProfile {
+  readonly dataProfile = PROFILE_ID;
+  #replica: SharedObjectsReplica;
+  /** Merged units: unit ID hex → change hash. */
+  readonly #merged = new Map<string, { unitId: DataUnitId; hash: string }>();
+  /** LFCP-accepted units waiting for Automerge dependencies, by unit ID hex. */
+  readonly #pending = new Map<string, Buffered>();
+  readonly #listeners = new Set<(change: ObjectChange) => void>();
+
+  constructor(replica: SharedObjectsReplica) {
+    this.#replica = replica;
+  }
+
+  /** The current replica (a G-EP7 rebuild replaces it). */
+  get replica(): SharedObjectsReplica {
+    return this.#replica;
+  }
+
+  /** §98, §100: object change notifications for remote merges and rebuilds. */
+  onObjectChanged(listener: (change: ObjectChange) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  #emit(changes: readonly ObjectChange[]): void {
+    for (const c of changes) for (const l of this.#listeners) l(c);
+  }
+
+  /** The units waiting for Automerge dependencies. */
+  pendingUnits(): DataUnitId[] {
+    return [...this.#pending.values()].map((b) => b.unitId);
+  }
+
+  codecFor(unit: {
+    readonly resourceId: ResourceId;
+    readonly actor: PrincipalId;
+  }): SharedObjectsCodec {
+    const actor = toHex(deriveActorId(unit.resourceId, unit.actor));
+    // PROVISIONAL (SO-SEC1): a unit carries only changes of its signer's §8
+    // actor, so no Principal can write into another Principal's Automerge
+    // history.
+    const bound = (change: CheckedChange): CheckedChange => {
+      if (change.actor !== actor)
+        throw new LfcpError(
+          "PROFILE_INVALID",
+          `the change's Automerge actor ${change.actor} is not the §8 actor ${actor} of the unit's signer (SO-SEC1)`,
+        );
+      return change;
+    };
+    return {
+      dataProfile: PROFILE_ID,
+      encode: (change) => frameChange(bound(change).bytes),
+      decode: (plaintext) => bound(unframeChange(plaintext)),
+    };
+  }
+
+  apply(unit: SharedObjectsUnit, change: CheckedChange): SharedObjectsApplyResult {
+    const r = this.#replica.receiveChange(change.bytes);
+    if (r.status === "missing_dependencies") {
+      this.#pending.set(toHex(unit.unitId), { unitId: unit.unitId, change });
+      return Object.freeze({
+        merged: [],
+        objects: [],
+        diagnostics: [],
+        pending: `waiting for Automerge changes ${r.missing.join(", ")}`,
+      });
+    }
+    // "duplicate": the replica holds the change already (e.g. this client's
+    // own change coming back): merged, nothing changes.
+    this.#merged.set(toHex(unit.unitId), { unitId: unit.unitId, hash: change.hash });
+    const merged: DataUnitId[] = [unit.unitId];
+    const changes: ObjectChange[] = r.status === "applied" ? [...r.objects] : [];
+    for (let progress = true; progress; ) {
+      progress = false;
+      for (const [key, b] of this.#pending) {
+        const again = this.#replica.receiveChange(b.change.bytes);
+        if (again.status === "missing_dependencies") continue;
+        this.#pending.delete(key);
+        this.#merged.set(key, { unitId: b.unitId, hash: b.change.hash });
+        merged.push(b.unitId);
+        if (again.status === "applied") changes.push(...again.objects);
+        progress = true;
+      }
+    }
+    this.#emit(changes);
+    const objects = [...new Set(changes.map((c) => c.objectId))].sort();
+    return Object.freeze({ merged, objects, diagnostics: this.#diagnostics(objects) });
+  }
+
+  /** §74.1 problems and §21 collisions of the given objects (§77: the rest are unaffected). */
+  #diagnostics(objects: readonly string[]): SharedObjectsDiagnostic[] {
+    if (objects.length === 0) return [];
+    const validation = this.#replica.validate();
+    const out: SharedObjectsDiagnostic[] = [];
+    for (const id of objects) {
+      for (const p of validation.objects.get(id) ?? [])
+        out.push({
+          objectId: id,
+          code: p.code,
+          diagnostic: p.diagnostic,
+          pointer: p.pointer,
+          message: p.message,
+        });
+      if (validation.collisions.includes(id))
+        out.push({
+          objectId: id,
+          code: "OBJECT_ID_COLLISION",
+          message: `${id}: concurrent objects share this Object ID (§21)`,
+        });
+    }
+    return out;
+  }
+
+  /**
+   * PROVISIONAL (G-EP7): the state without `unitIds`, rebuilt from the
+   * remaining changes. Merged units whose changes build on an excluded one
+   * go back to the buffer and are reported as pending.
+   */
+  exclude(unitIds: readonly DataUnitId[]): SharedObjectsExcludeResult {
+    const hashes: string[] = [];
+    for (const id of unitIds) {
+      const key = toHex(id);
+      this.#pending.delete(key);
+      const m = this.#merged.get(key);
+      if (m !== undefined) {
+        hashes.push(m.hash);
+        this.#merged.delete(key);
+      }
+    }
+    if (hashes.length === 0) return Object.freeze({ objects: [], pending: [] });
+    const before = this.#replica;
+    const { replica, unapplied } = before.rebuildWithout(hashes);
+    this.#replica = replica;
+    const pending: DataUnitId[] = [];
+    for (const change of unapplied) {
+      const entry = [...this.#merged].find(([, m]) => m.hash === change.hash);
+      if (entry === undefined) continue; // a local change: kept out with its dependency
+      this.#merged.delete(entry[0]);
+      this.#pending.set(entry[0], { unitId: entry[1].unitId, change });
+      pending.push(entry[1].unitId);
+    }
+    const changes = rebuildChanges(before, replica);
+    this.#emit(changes);
+    return Object.freeze({ objects: changes.map((c) => c.objectId), pending });
+  }
+}
+
+/** §100 notifications for every object that differs between two replicas of one Resource. */
+function rebuildChanges(before: SharedObjectsReplica, after: SharedObjectsReplica): ObjectChange[] {
+  const ids = [...new Set([...before.objectIds(), ...after.objectIds()])].sort();
+  const beforeConflicts = before.conflicts();
+  const afterConflicts = after.conflicts();
+  const out: ObjectChange[] = [];
+  for (const id of ids) {
+    const was = (before.getObject(id) ?? {}) as Record<string, Json>;
+    const now = (after.getObject(id) ?? {}) as Record<string, Json>;
+    const fields = [...new Set([...Object.keys(was), ...Object.keys(now)])]
+      .filter((f) => JSON.stringify(was[f]) !== JSON.stringify(now[f]))
+      .sort();
+    const wasC = Object.keys(beforeConflicts[id] ?? {});
+    const nowC = Object.keys(afterConflicts[id] ?? {});
+    if (fields.length === 0 && JSON.stringify(wasC) === JSON.stringify(nowC)) continue;
+    out.push(
+      Object.freeze({
+        resource: after.resource,
+        objectId: id,
+        objectType:
+          typeof now.type === "string"
+            ? now.type
+            : typeof was.type === "string"
+              ? was.type
+              : undefined,
+        fields: Object.freeze(fields),
+        conflictsAppeared: Object.freeze(nowC.filter((f) => !wasC.includes(f)).sort()),
+        conflictsDisappeared: Object.freeze(wasC.filter((f) => !nowC.includes(f)).sort()),
+        origin: "rebuild",
+      }),
+    );
+  }
+  return out;
+}

@@ -137,7 +137,8 @@ export interface ObjectChange {
   readonly fields: readonly string[];
   readonly conflictsAppeared: readonly string[];
   readonly conflictsDisappeared: readonly string[];
-  readonly origin: "local" | "remote";
+  /** "rebuild": the state was rebuilt without some changes (PROVISIONAL G-EP7). */
+  readonly origin: "local" | "remote" | "rebuild";
 }
 
 /** A local intent's Automerge change, ready to become a Data Unit. */
