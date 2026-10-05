@@ -480,6 +480,8 @@ export type ReceivedDataUnit<T> =
       readonly reason: "NO_DEK" | "DEK_COMMITMENT_MISMATCH" | "AEAD" | "PROFILE_REJECTED";
       readonly unitId: DataUnitId;
       readonly message: string;
+      /** PROFILE_REJECTED: what the profile codec threw, e.g. an error carrying a profile diagnostic. */
+      readonly error?: unknown;
     };
 
 export interface ReceiveDataUnitOptions<T> extends DataUnitCheckOptions {
@@ -518,7 +520,15 @@ export async function receiveDataUnit<T>(
   const local = (
     reason: "NO_DEK" | "DEK_COMMITMENT_MISMATCH" | "AEAD" | "PROFILE_REJECTED",
     message: string,
-  ): ReceivedDataUnit<T> => Object.freeze({ kind: "local-failure", reason, unitId, message });
+    error?: unknown,
+  ): ReceivedDataUnit<T> =>
+    Object.freeze({
+      kind: "local-failure",
+      reason,
+      unitId,
+      message,
+      ...(error !== undefined ? { error } : {}),
+    });
   const dek = await options.dek(p.dataEpoch);
   if (dek === undefined) return local("NO_DEK", `no DEK is held for epoch ${p.dataEpoch}`);
   const commitment = view.state.epochs.get(String(p.dataEpoch))?.dekCommitment;
@@ -543,6 +553,7 @@ export async function receiveDataUnit<T>(
     return local(
       "PROFILE_REJECTED",
       `the Data Profile rejects the plaintext: ${err instanceof Error ? err.message : String(err)}`,
+      err,
     );
   }
 

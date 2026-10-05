@@ -469,6 +469,11 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
     const r = await applier.receive(view, stolen.bytes);
     expect(r).toMatchObject({ kind: "local-failure", reason: "PROFILE_REJECTED" });
     expect(r.kind === "local-failure" && r.message).toMatch(/SO-SEC1/);
+    // §11, §74.1: PROFILE_INVALID with the diagnostic CHANGE_ACTOR_MISMATCH.
+    expect(r.kind === "local-failure" && r.error).toMatchObject({
+      code: "PROFILE_INVALID",
+      diagnostic: "CHANGE_ACTOR_MISMATCH",
+    });
     expect(profile.replica.objectIds()).toEqual([]);
     // The same change in Alice's own unit merges.
     expect(await applier.receive(view, createUnit.bytes)).toMatchObject({ kind: "applied" });

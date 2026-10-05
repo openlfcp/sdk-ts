@@ -315,6 +315,7 @@ describe("receiveDataUnit: AEAD (§26.3 rule 6, N3: client-local)", () => {
   it("33. plaintext the Data Profile rejects is not accepted, after a successful decryption", async () => {
     const r = await receiver().receive(unit({ plaintext: Uint8Array.of(0xff, 1) }).bytes);
     expect(kindOf(r)).toBe("local-failure:PROFILE_REJECTED");
+    expect(r.kind === "local-failure" && r.error).toBeInstanceOf(Error);
   });
 
   it("refuses a profile codec of another data_profile", async () => {
