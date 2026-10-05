@@ -38,7 +38,8 @@ host's bundler handles the rest.
 A host whose bundler cannot import `.wasm` files can resolve the base64
 build instead, or alias `@automerge/automerge` to `@automerge/automerge/slim`.
 With the slim build it must `await initializeAutomerge()` (exported here: it
-imports the base64 wasm dynamically and compiles it asynchronously) before
+imports the base64 wasm dynamically, decodes it in a few milliseconds where
+Automerge's own helper takes about 200 ms, and compiles it asynchronously) before
 first using this package; on every other build that call is a no-op. It is
 idempotent and safe to call concurrently (one shared in-flight promise; a
 failure clears it, so a later call retries). Calling any other export

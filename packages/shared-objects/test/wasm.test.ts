@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { initializeAutomerge, isAutomergeInitialized, SharedObjectsReplica } from "../src/index.js";
-import { automergeInitializer } from "../src/wasm.js";
+import { automergeInitializer, decodeBase64 } from "../src/wasm.js";
 
 describe("initializeAutomerge", () => {
   // Node resolves the self-initializing build: a no-op here. The /slim path
@@ -14,6 +14,13 @@ describe("initializeAutomerge", () => {
       principal: new Uint8Array(32).fill(2) as never,
     });
     expect(replica.objectIds()).toEqual([]);
+  });
+
+  it("decodes standard base64 exactly", () => {
+    expect(decodeBase64("AGFzbQEAAAA=")).toEqual(Uint8Array.of(0, 0x61, 0x73, 0x6d, 1, 0, 0, 0));
+    expect(decodeBase64("")).toEqual(new Uint8Array());
+    const all = Uint8Array.from({ length: 256 }, (_, i) => i);
+    expect(decodeBase64(btoa(String.fromCharCode(...all)))).toEqual(all);
   });
 
   it("shares one in-flight initialization between concurrent callers", async () => {
