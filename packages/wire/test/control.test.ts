@@ -474,6 +474,8 @@ describe("endpoint URL rules (§16)", () => {
     ["http in an endpoint", "https://sync.example.test", "wss://sync.example.test"],
     ["http as the coordinator", "wss://sync.example.test", "http://sync.example.test"],
     ["no scheme", "sync.example.test", "wss://sync.example.test"],
+    ["a scheme without ://", "wss:sync.example.test", "wss://sync.example.test"],
+    ["a coordinator without ://", "wss://sync.example.test", "WSS:/sync.example.test"],
   ])(
     "a receiver rejects %s with INVALID_STRUCTURE (MALFORMED_MESSAGE, §16)",
     (_n, endpoint, coordinator) => {

@@ -45,16 +45,23 @@ function refuse(why: string): never {
 /**
  * §16, receiver side: "A receiver MUST reject a record carrying such a URL
  * [an endpoint or Control Coordinator URL in a Control Record] with any
- * scheme other than ws or wss with MALFORMED_MESSAGE." Only the scheme is
- * checked (case-insensitively, RFC 3986 §3.1); the loopback rule is the
- * sender's. Throws INVALID_STRUCTURE.
+ * scheme other than ws or wss with MALFORMED_MESSAGE." The scheme is
+ * compared case-insensitively (RFC 3986 §3.1) and must be followed by
+ * "://", so a URL without an authority (wss:host) is rejected too. The
+ * loopback rule is the sender's. Throws INVALID_STRUCTURE.
  */
 export function checkReceivedUrl(url: string): void {
-  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(url)?.[1]?.toLowerCase();
+  const m = /^([A-Za-z][A-Za-z0-9+.-]*):(\/\/)?/.exec(url);
+  const scheme = m?.[1]?.toLowerCase();
   if (scheme !== "ws" && scheme !== "wss")
     throw new LfcpError(
       "INVALID_STRUCTURE",
       `an endpoint or coordinator URL must use ws or wss, not ${scheme ?? "no scheme"} (§16)`,
+    );
+  if (m?.[2] === undefined)
+    throw new LfcpError(
+      "INVALID_STRUCTURE",
+      `an endpoint or coordinator URL must start with ${scheme}:// (§16)`,
     );
 }
 
