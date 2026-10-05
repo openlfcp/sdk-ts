@@ -61,6 +61,28 @@ export {
   verifySignedObject,
 } from "./cose.js";
 export {
+  checkDataUnit,
+  type DataProfileCodec,
+  type DataUnitAadFields,
+  type DataUnitCheck,
+  type DataUnitCheckOptions,
+  type DataUnitEquivocation,
+  type DataUnitHoldReason,
+  type DataUnitQuarantined,
+  type DataUnitRejected,
+  type DataUnitRejectReason,
+  dataUnitAad,
+  encodeDataUnitPayload,
+  InMemorySeenUnits,
+  type ReceiveDataUnitOptions,
+  type ReceivedDataUnit,
+  receiveDataUnit,
+  type SealedDataUnit,
+  type SeenRecord,
+  type SeenUnits,
+  sealDataUnit,
+} from "./data-unit.js";
+export {
   checkReceivedUrl,
   checkWriterUrl,
   ENDPOINT_FLAGS,

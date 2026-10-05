@@ -107,6 +107,8 @@ export type LfcpErrorCode =
    * names (§25: recipient binding). Client-local, no wire code (ADR 0001 N5).
    */
   | "KEY_PACKAGE_RECIPIENT_MISMATCH"
+  /** A Data Profile codec used with a Resource of another data_profile (§15, §27). SDK-local misuse. */
+  | "DATA_PROFILE_MISMATCH"
   /**
    * A Data Unit that fails ChaCha20-Poly1305 authentication (§26.3). Only a
    * client holding the DEK detects it; client-local, no wire code (ADR 0001 N3).
