@@ -19,6 +19,11 @@
   "files": [
     "dist"
   ],
+  "scripts": {
+    "test": "cd ../.. && vitest run packages/shared-objects/test/",
+    "test:property": "cd ../.. && vitest run packages/shared-objects/test/property/",
+    "test:property:extended": "cd ../.. && LFCP_PROPERTY_EXTENDED=1 vitest run packages/shared-objects/test/property/"
+  },
   "publishConfig": {
     "access": "public"
   },
