@@ -284,18 +284,73 @@ describe("every other body round-trips (§39-§61)", () => {
     );
   });
 
-  it("decodes live haves as received and calls the LFCP-028 hook for each", () => {
-    const reversed = msg("DATA_HAVE", { resourceId: R, haves: [have([[9n, 5n]])] });
-    const bytes = encodeMessage(reversed);
+  it("decodes live haves as received, refuses reversed ranges and sequence 0 (G-HV1), and calls the hook", () => {
+    const unsorted = msg("DATA_HAVE", {
+      resourceId: R,
+      haves: [
+        have([
+          [9n, 12n],
+          [5n, 10n],
+          [4n, 4n],
+        ]),
+        have(),
+      ],
+    });
+    const bytes = encodeMessage(unsorted);
     const seen: LiveActorHave[] = [];
     const back = decodeMessage(bytes, { liveHave: (h) => seen.push(h) });
-    expect(back).toMatchObject({ body: { haves: [{ ranges: [[9n, 5n]] }] } });
-    expect(seen).toHaveLength(1);
+    expect(back).toMatchObject({
+      body: {
+        haves: [
+          {
+            ranges: [
+              [9n, 12n],
+              [5n, 10n],
+              [4n, 4n],
+            ],
+          },
+          {},
+        ],
+      },
+    });
+    expect(seen).toHaveLength(2);
+    expect(toHex(encodeMessage(back))).toBe(toHex(bytes)); // kept as received
+    for (const range of [
+      [9n, 5n],
+      [0n, 3n],
+    ] as [bigint, bigint][]) {
+      const raw = encode(
+        cborMap([
+          [0, 30],
+          [1, ID],
+          [
+            4,
+            cborMap([
+              [0, R],
+              [
+                1,
+                [
+                  cborMap([
+                    [0, P],
+                    [1, 3],
+                    [2, [range]],
+                  ]),
+                ],
+              ],
+            ]),
+          ],
+        ]),
+      );
+      expect(
+        codeOf(() => decodeMessage(raw)),
+        String(range),
+      ).toBe("INVALID_STRUCTURE");
+    }
     expect(
       codeOf(() =>
         decodeMessage(bytes, {
           liveHave: () => {
-            throw new LfcpError("INVALID_STRUCTURE", "reversed range");
+            throw new LfcpError("INVALID_STRUCTURE", "refused by the hook");
           },
         }),
       ),

@@ -19,7 +19,7 @@ import {
   isCborMap,
 } from "./cbor/index.js";
 import { Fields, invalid } from "./fields.js";
-import type { SequenceRange } from "./have.js";
+import { checkLiveHave, type SequenceRange } from "./have.js";
 import {
   type PrincipalDescriptor,
   principalDescriptorFromCbor,
@@ -49,8 +49,9 @@ import { type ControlPutBody, controlPutBodyFromCbor } from "./transition.js";
  * Key Packages, Snapshots, the AUTH proof) stay the exact received byte
  * strings: they are parsed lazily with parseControlRecord, parseDataUnit
  * and the like, and are never re-encoded. Live actor-haves are decoded as
- * received; normalizing them and refusing reversed ranges or sequence 0
- * (§48, G-HV1) is LFCP-028, through DecodeOptions.liveHave.
+ * received, except that a reversed range or one containing sequence 0 is
+ * refused (§48, G-HV1, checkLiveHave); normalizeLiveHaves merges them
+ * losslessly (have.ts).
  */
 
 /** §33 message type codes. */
@@ -137,8 +138,9 @@ export interface ControlHeadRef {
 
 /**
  * A live `actor-have` as received (§48): ranges may be unsorted,
- * overlapping or even reversed here; LFCP-028 normalizes and validates
- * them. `ranges` is undefined when the CBOR omits key 2.
+ * overlapping or adjacent (never reversed or containing 0, G-HV1);
+ * normalizeLiveHaves merges them. `ranges` is undefined when the CBOR
+ * omits key 2.
  */
 export interface LiveActorHave {
   readonly principalId: PrincipalId;
@@ -400,6 +402,8 @@ function liveHave(value: CborValue, options: DecodeOptions): LiveActorHave {
         }
       : {}),
   });
+  // §48 (G-HV1): a reversed range or sequence 0 is MALFORMED_MESSAGE.
+  checkLiveHave(have);
   options.liveHave?.(have);
   return have;
 }
@@ -811,7 +815,7 @@ export interface DecodeOptions {
   readonly maxMessageBytes?: number;
   /** Extension message types (128+) negotiated for the session; others are PROTOCOL_UNSUPPORTED. */
   readonly extensions?: ReadonlySet<bigint>;
-  /** Called for every live actor-have as decoded; throws to reject it (LFCP-028 hook, §48). */
+  /** Called for every live actor-have after checkLiveHave; throws to reject it. */
   readonly liveHave?: (have: LiveActorHave) => void;
 }
 

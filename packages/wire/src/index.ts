@@ -128,11 +128,25 @@ export {
 } from "./handshake.js";
 export {
   type ActorHave,
+  type ActorRange,
   actorHaveFromCbor,
   actorHaveToCbor,
+  addRange,
+  addSequence,
+  batchDataRanges,
   canonicalFrontierFromCbor,
   canonicalFrontierToCbor,
+  checkLiveHave,
+  type HaveVector,
+  hasSequence,
+  type LiveHaveEntry,
+  liveHavesOf,
+  MAX_DATA_GET_RANGES,
+  missingAfter,
+  missingFrom,
+  normalizeLiveHaves,
   type SequenceRange,
+  unionHaves,
 } from "./have.js";
 export {
   type KeyPackageCheck,

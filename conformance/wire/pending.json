@@ -22,12 +22,6 @@
         "secret_cbor/typed": "LFCP-053",
         "uri/assemble": "LFCP-053"
       }
-    },
-    "data_have_reversed_range": {
-      "reason": "The message decodes (the reversed range is structurally valid, CDDL pass); §48 (G-MSG6, G-HV1) live-Have validation rejects it.",
-      "parts": {
-        "outcome": "LFCP-028"
-      }
     }
   }
 }
