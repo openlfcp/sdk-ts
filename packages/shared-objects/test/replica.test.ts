@@ -423,14 +423,14 @@ describe("receiving", () => {
     expect(b.root()).toEqual(a.root());
   });
 
-  it("rejects a second change under one actor sequence (equivocation) and stays usable", () => {
+  it("rejects a second change under one actor sequence as ACTOR_EQUIVOCATION and stays usable", () => {
     const { replica: a } = aliceWithTask();
     const lost = SharedObjectsReplica.fromChanges(a.changes(), opts()).replica;
     const one = a.apply(setTitle(taskOf(a), "one").intent) as LocalChange;
     const two = lost.apply(setTitle(taskOf(lost), "two").intent) as LocalChange;
     expect(two.seq).toBe(one.seq);
     expect(() => a.receive(two.plaintext)).toThrow(
-      expect.objectContaining({ code: "SEQUENCE_REUSE" }),
+      expect.objectContaining({ code: "ACTOR_EQUIVOCATION" }),
     );
     expect(taskOf(a).title).toBe("one");
     expect(a.apply(setTitle(taskOf(a), "three").intent)?.seq).toBe(4);

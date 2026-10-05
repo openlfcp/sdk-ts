@@ -95,12 +95,11 @@ export function resolveFieldConflict(
   return Object.freeze({ intent: "task.resolve_field_conflict", id, field, value });
 }
 
-/** §21: two concurrent objects under one Object ID. A profile error of its own, not PROFILE_INVALID. */
-export class ObjectIdCollisionError extends Error {
-  readonly code = "OBJECT_ID_COLLISION";
+/** §21: two concurrent objects under one Object ID: OBJECT_ID_COLLISION, a profile error of its own, not PROFILE_INVALID. */
+export class ObjectIdCollisionError extends LfcpError {
   readonly objectId: string;
   constructor(objectId: string) {
-    super(`${objectId}: concurrent objects share this Object ID (§21)`);
+    super("OBJECT_ID_COLLISION", `${objectId}: concurrent objects share this Object ID (§21)`);
     this.name = "ObjectIdCollisionError";
     this.objectId = objectId;
   }
@@ -762,8 +761,8 @@ export class SharedObjectsReplica {
     // own actor, a lost-state fork, §9). Checked before Automerge sees it.
     if (change.seq <= (this.#seqs.get(change.actor) ?? 0))
       throw new LfcpError(
-        "SEQUENCE_REUSE",
-        `actor ${change.actor} sequence ${change.seq} already has a different change`,
+        "ACTOR_EQUIVOCATION",
+        `actor ${change.actor} sequence ${change.seq} already has a different change (§26.2)`,
       );
     const before = A.getHeads(this.#doc);
     let next: Doc;
