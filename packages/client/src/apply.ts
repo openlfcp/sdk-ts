@@ -6,6 +6,7 @@ import {
   type DataUnitId,
   type PrincipalId,
   type ResourceId,
+  toHex,
 } from "@openlfcp/core";
 import { decryptDataUnit, deriveActorDataKey, type ResourceDEK } from "@openlfcp/crypto";
 import type { DataUnitRow, DataUnitStatus, LfcpStorage, StorageWrite } from "@openlfcp/storage";
@@ -152,6 +153,8 @@ export type EquivocationOutcome = DataUnitEquivocation & {
   readonly objects: readonly string[];
   /** Merged units that now wait in the profile for an excluded unit's content. */
   readonly pending: readonly DataUnitId[];
+  /** Held units of the actor retried after the exclusion (§26.2, G-DP1-GAP). */
+  readonly released: readonly ApplyOutcome[];
 };
 
 /** The outcome of one received Data Unit. */
@@ -212,6 +215,11 @@ export interface EpochReconciliation {
    * it covered must be fetched again.
    */
   readonly snapshotDropped: boolean;
+  /**
+   * Held units retried once the excluded units stopped being their actors'
+   * latest accepted ones (§26.2, G-DP1-GAP), with their outcomes.
+   */
+  readonly released: readonly ApplyOutcome[];
 }
 
 export interface DataUnitApplierOptions extends DataUnitCheckOptions {
@@ -304,7 +312,7 @@ export class DataUnitApplier {
         await this.#write([status(r.unitId, "local-failure", `${r.reason}: ${r.message}`)]);
         return r;
       case "equivocation":
-        return this.#equivocation(handler, r);
+        return this.#equivocation(view, handler, r);
       default:
         return r; // duplicate (harmless replay) or rejected (never stored)
     }
@@ -406,6 +414,7 @@ export class DataUnitApplier {
 
   // §26.2 (G-DP5): exclude every merged unit of an equivocating set.
   async #equivocation(
+    view: ControlView,
     handler: DataProfileHandler<unknown>,
     r: DataUnitEquivocation,
   ): Promise<EquivocationOutcome> {
@@ -434,11 +443,14 @@ export class DataUnitApplier {
         }),
       ),
     ]);
+    // The actor's latest accepted unit may now be lower: held units can link (G-DP1-GAP).
+    const released = merged.length > 0 ? await this.#retryHeld(view, [r.actor]) : [];
     return Object.freeze({
       ...r,
       excluded: Object.freeze(merged),
       objects: result.objects,
       pending: result.pending,
+      released,
     });
   }
 
@@ -541,8 +553,8 @@ export class DataUnitApplier {
     if (c.kind === "equivocation") {
       const handler = this.#handlers.get(dataProfile);
       return handler === undefined
-        ? Object.freeze({ ...c, excluded: [], objects: [], pending: [] })
-        : this.#equivocation(handler, c);
+        ? Object.freeze({ ...c, excluded: [], objects: [], pending: [], released: [] })
+        : this.#equivocation(view, handler, c);
     }
     if (c.kind !== "valid") {
       if (c.kind === "quarantined")
@@ -595,7 +607,7 @@ export class DataUnitApplier {
     // DEK-free checks only: the plaintext of an unknown profile is never decrypted.
     const c = await checkDataUnit(view, bytes, this.#seen, this.#options);
     if (c.kind === "equivocation")
-      return Object.freeze({ ...c, excluded: [], objects: [], pending: [] });
+      return Object.freeze({ ...c, excluded: [], objects: [], pending: [], released: [] });
     if (c.kind !== "valid") return c;
     await this.#write([
       { op: "set-data-unit-status", unitId: c.unitId, status: "profile-unsupported" },
@@ -657,10 +669,50 @@ export class DataUnitApplier {
     return true;
   }
 
+  /** The distinct actors of stored units. */
+  async #actorsOf(unitIds: readonly DataUnitId[]): Promise<PrincipalId[]> {
+    const byHex = new Map<string, PrincipalId>();
+    for (const id of unitIds) {
+      const u = await this.#storage.dataUnits.get(id);
+      if (u !== undefined) byHex.set(toHex(u.actor), u.actor);
+    }
+    return [...byHex.values()];
+  }
+
+  /**
+   * §26.2 (G-DP1-GAP): after units of `actors` stopped being accepted, a
+   * held unit may now name the actor's latest accepted unit. Every held
+   * unit of those actors is received again, lowest sequence first.
+   */
+  async #retryHeld(view: ControlView, actors: readonly PrincipalId[]): Promise<ApplyOutcome[]> {
+    const released: ApplyOutcome[] = [];
+    for (const actor of actors) {
+      const held = (
+        await this.#storage.dataUnits.range(
+          view.state.resourceId,
+          actor,
+          actorSequence(1n),
+          actorSequence(2n ** 64n - 1n),
+        )
+      ).filter((u) => u.status === "held");
+      for (const u of held) {
+        if ((await this.#storage.dataUnits.get(u.unitId))?.status !== "held") continue;
+        released.push(await this.receive(view, u.bytes));
+      }
+    }
+    return released;
+  }
+
   async reconcileEpochs(view: ControlView): Promise<EpochReconciliation> {
     const handler = this.#handlers.get(view.state.dataProfile);
     if (handler === undefined)
-      return Object.freeze({ excluded: [], objects: [], pending: [], snapshotDropped: false });
+      return Object.freeze({
+        excluded: [],
+        objects: [],
+        pending: [],
+        snapshotDropped: false,
+        released: [],
+      });
     const resource = view.state.resourceId;
     const snapshotDropped = await this.#dropCutSnapshots(view, handler);
     const empty: EpochReconciliation = Object.freeze({
@@ -668,6 +720,7 @@ export class DataUnitApplier {
       objects: [],
       pending: [],
       snapshotDropped,
+      released: [],
     });
     const candidates = [
       ...(await this.#storage.dataUnits.withStatus(resource, "merged")),
@@ -703,11 +756,14 @@ export class DataUnitApplier {
         }),
       ),
     ]);
+    const actors = await this.#actorsOf(excluded.map((e) => e.unitId));
+    const released = await this.#retryHeld(view, actors);
     return Object.freeze({
       snapshotDropped,
       excluded: Object.freeze(excluded),
       objects: result.objects,
       pending: result.pending,
+      released,
     });
   }
 }

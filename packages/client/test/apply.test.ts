@@ -17,6 +17,7 @@ import {
   type ControlBody,
   type DataProfileCodec,
   principalDescriptorFromKeys,
+  rotateEpoch,
   type Signer,
   signControlRecord,
   validateControlChain,
@@ -102,6 +103,73 @@ async function units(...values: string[]) {
     );
   return out;
 }
+
+describe("DataUnitApplier: stale work re-applied after a cutoff (§19.1, §26.2, G-EP5, G-DP1-GAP)", () => {
+  // OWNER writes 1, 2, 3 in epoch 0; a Key Epoch closes epoch 0 at OWNER 2,
+  // so 3 is stale; the re-applied work is 4 in epoch 1, naming 2.
+  const DEK1 = importResourceDEK(bytes32(91));
+  const rotation = rotateEpoch(VIEW.state, OWNER, {
+    reason: 0n,
+    finalFrontier: [{ principalId: OWNER.descriptor.principalId, contiguous: 2n, extras: [] }],
+    dek: DEK1,
+  });
+  const rotated = validateControlChain([...records, rotation.bytes]);
+  if (rotated.kind !== "linear") throw new Error(rotated.kind);
+  const ROTATED = rotated;
+  const deks = (e: bigint) => (e === 0n ? DEK0 : DEK1);
+  const build = async () => {
+    const [u1, u2, u3] = (await units("one", "two", "three")) as {
+      bytes: Uint8Array;
+      unitId: DataUnitId;
+    }[];
+    const sequences = new InMemoryActorSequenceReservation();
+    for (let i = 0; i < 3; i++)
+      await sequences.reserveNext(VIEW.state.resourceId, OWNER.descriptor.principalId);
+    const u4 = await createDataUnit({
+      view: ROTATED,
+      controlHead: ROTATED.state.head,
+      actor: OWNER,
+      dek: DEK1,
+      sequences,
+      previousUnitId: (u2 as { unitId: DataUnitId }).unitId,
+      profile: TEXT,
+      value: "four",
+    });
+    expect(u4.seq).toBe(4n);
+    return { u1, u2, u3, u4 } as Record<"u1" | "u2" | "u3" | "u4", { bytes: Uint8Array }>;
+  };
+  const applier = (merged: string[]) =>
+    new DataUnitApplier({
+      storage: new InMemoryLfcpStorage(),
+      dek: deks,
+      handlers: [textHandler(merged) as DataProfileHandler<unknown>],
+    });
+
+  it("a receiver that knows the cutoff quarantines 3 and links the re-applied 4 across it", async () => {
+    const merged: string[] = [];
+    const a = applier(merged);
+    const { u1, u2, u3, u4 } = await build();
+    for (const u of [u1, u2]) await a.receive(ROTATED, u.bytes);
+    expect(await a.receive(ROTATED, u3.bytes)).toMatchObject({ kind: "quarantined" });
+    expect(await a.receive(ROTATED, u4.bytes)).toMatchObject({ kind: "applied" });
+    expect(merged).toEqual(["one", "two", "four"]);
+  });
+
+  it("a receiver that merged 3 before the cutoff holds 4 until reconciling excludes 3", async () => {
+    const merged: string[] = [];
+    const a = applier(merged);
+    const { u1, u2, u3, u4 } = await build();
+    for (const u of [u1, u2, u3]) await a.receive(VIEW, u.bytes);
+    expect(await a.receive(ROTATED, u4.bytes)).toMatchObject({
+      kind: "held",
+      reason: "PREV_MISMATCH",
+    });
+    const r = await a.reconcileEpochs(ROTATED);
+    expect(r.excluded).toHaveLength(1);
+    expect(r.released.map((x) => x.kind)).toEqual(["applied"]);
+    expect(merged).toEqual(["one", "two", "three", "four"]);
+  });
+});
 
 describe("DataUnitApplier (profile-agnostic)", () => {
   it("releases a unit held across an abandoned sequence once its previous unit is accepted (§26.2, G-DP1-GAP)", async () => {
