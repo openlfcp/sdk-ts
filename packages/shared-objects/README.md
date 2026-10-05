@@ -39,7 +39,12 @@ A host whose bundler cannot import `.wasm` files can resolve the base64
 build instead, or alias `@automerge/automerge` to `@automerge/automerge/slim`.
 With the slim build it must `await initializeAutomerge()` (exported here: it
 imports the base64 wasm dynamically and compiles it asynchronously) before
-first using this package; on every other build that call is a no-op. The
+first using this package; on every other build that call is a no-op. It is
+idempotent and safe to call concurrently (one shared in-flight promise; a
+failure clears it, so a later call retries). Calling any other export
+before it resolves on the slim build is not guarded: the host awaits it
+first (the Obsidian plugin does so in its startup, before any replica
+exists). The
 Obsidian plugin uses the slim build this way (LFCP-059): Chromium refuses to
 compile more than 4 KB of wasm synchronously on a renderer's main thread,
 which the base64 build would do.
