@@ -18,3 +18,11 @@ export {
   type ResourceId,
   resourceId,
 } from "./ids.js";
+export {
+  formatObjectId,
+  type GenerateObjectIdOptions,
+  generateObjectId,
+  isObjectId,
+  type ObjectId,
+  parseObjectId,
+} from "./object-id.js";

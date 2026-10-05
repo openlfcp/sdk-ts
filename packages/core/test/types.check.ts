@@ -3,6 +3,8 @@ import {
   type ControlRecordId,
   controlRecordId,
   dataUnitId,
+  type ObjectId,
+  parseObjectId,
   type ResourceId,
   resourceId,
 } from "../src/index.js";
@@ -27,3 +29,7 @@ wantsResourceId(controlRecordId(new Uint8Array(32)));
 wantsResourceId(new Uint8Array(32));
 
 wantsResourceId(resourceId(new Uint8Array(32)));
+
+// @ts-expect-error a plain string is not an ObjectId without parsing
+export const unparsed: ObjectId = "019a2f85-7b31-7c42-b85a-fc843e2f40ad";
+export const parsed: ObjectId = parseObjectId("019a2f85-7b31-7c42-b85a-fc843e2f40ad");
