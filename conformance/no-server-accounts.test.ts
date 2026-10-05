@@ -57,3 +57,26 @@ describe("pure Control Plane logic", () => {
     expect(code.filter((line) => IMPURE.test(line))).toEqual([]);
   });
 });
+
+// LFCP-024: deterministic HPKE sealing is test-only. The SDK's HPKE module
+// never replaces the KEM's ephemeral key generation, and nothing in the
+// packages reaches the conformance-only raw-skE wrapper.
+describe("no deterministic HPKE in the SDK", () => {
+  it("packages/crypto/src/hpke.ts never overrides GenerateKeyPair or takes an ephemeral key", () => {
+    const code = readRepoText("packages/crypto/src/hpke.ts")
+      .split("\n")
+      .filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line));
+    expect(
+      code.filter((line) => /GenerateKeyPair|DeriveKeyPair|skE|ikmE|ephemeral/.test(line)),
+    ).toEqual([]);
+  });
+
+  it.each([
+    "packages/wire/src/key-package.ts",
+    "packages/crypto/src/hpke.ts",
+    "packages/crypto/src/index.ts",
+    "packages/wire/src/index.ts",
+  ])("%s does not import the conformance raw-skE wrapper", (path) => {
+    expect(readRepoText(path)).not.toMatch(/hpke-raw-ske|conformance\//);
+  });
+});

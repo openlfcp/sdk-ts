@@ -1,4 +1,4 @@
-// LFCP-TEST-VECTORS-01 handlers for sdk-ts through LFCP-016 (LFCP-017).
+// LFCP-TEST-VECTORS-01 handlers for sdk-ts (LFCP-017; extended by each later task).
 //
 // One handler per "<type>/<kind>". A handler checks what the SDK implements
 // today and names, as pending parts, what later tasks implement (the owner
@@ -9,6 +9,7 @@ import {
   dataEpoch,
   fromBase64url,
   fromHex,
+  LfcpError,
   type PrincipalId,
   resourceId,
   toBase64url,
@@ -42,7 +43,12 @@ import {
   encodeControlRecordPayload,
   encodePrincipalDescriptor,
   expectedSignerOf,
+  type KeyPackagePayload,
+  type KeyPackageRecipient,
+  keyPackageHpkeAad,
+  keyPackageHpkeInfo,
   objectId,
+  openKeyPackage,
   type Parsed,
   parseControlRecord,
   parseDataUnit,
@@ -59,6 +65,7 @@ import {
   sigStructureBytes,
   validateControlChain,
   verifyGenesis,
+  verifyKeyPackage,
   verifySignedObject,
 } from "@openlfcp/wire";
 import {
@@ -71,6 +78,7 @@ import {
 import { bytesCheck, check, describeError, equalCheck, outcomeCheck } from "../checks.js";
 import type { Check, Handler, HandlerContext, VectorCase, VectorSuite } from "../runner.js";
 import { SIGNATURE_FAILURE, wireCodeOf } from "./error-map.js";
+import { aeadSeal, sealWithRawSkE } from "./hpke-raw-ske.js";
 
 type Fields = Readonly<Record<string, unknown>> | undefined;
 
@@ -294,11 +302,11 @@ function chainCheck(c: VectorCase, context: HandlerContext, cose: Uint8Array): C
 
 /** The value a `{case, field}` reference in a vector's context names. */
 function referenced(context: HandlerContext, ref: unknown): Uint8Array {
-  const r = ref as { case?: string; field?: string } | undefined;
+  const r = ref as { case?: string; field?: string; in?: string } | undefined;
   const target = r?.case === undefined ? undefined : context.caseById(r.case);
   if (target === undefined || r?.field === undefined)
     throw new Error(`bad reference ${JSON.stringify(ref)}`);
-  return hexOf(target.expected, r.field);
+  return hexOf(r.in === "inputs" ? target.inputs : target.expected, r.field);
 }
 
 /**
@@ -474,7 +482,31 @@ const ownerTransfer: Handler = (c, context) => {
   return { checks };
 };
 
-const keyPackage: Handler = (c, context) => {
+/** The X25519 key pair and descriptor of a fixture Principal, from its principal case. */
+function recipientKeys(context: HandlerContext, id: Uint8Array): KeyPackageRecipient {
+  for (const c of context.suite.cases) {
+    if (c.type !== "bytes" || c.kind !== "principal") continue;
+    if (!bytesEqual(hexOf(c.expected, "principal_id"), id)) continue;
+    const signer = principals(context).get(toHex(id));
+    if (signer === undefined) break;
+    return {
+      descriptor: signer.descriptor,
+      agreement: importAgreementKey(hexOf(c.inputs, "x25519_private")),
+    };
+  }
+  throw new Error(`no fixture Principal ${toHex(id)}`);
+}
+
+/**
+ * LFCP-024. Every HPKE field is checked: info and AAD built from the
+ * payload (§25.1); enc = X25519(skE); the shared secret, enc and
+ * ciphertext reproduced through the library from the published skE
+ * (test-only wrapper, hpke-raw-ske.ts); the published key and base_nonce
+ * produce the ciphertext through the suite AEAD; the package opens for its
+ * recipient to the epoch DEK with the chain's commitment; and the package
+ * is authorized at its head (§25.2).
+ */
+const keyPackage: Handler = async (c, context) => {
   const e = c.expected;
   const payload = hexOf(e, "payload_cbor");
   const cose = hexOf(e, "cose_sign1");
@@ -486,35 +518,64 @@ const keyPackage: Handler = (c, context) => {
     (p) => expectedSignerOf(p.payload),
     payload,
   );
-  return {
-    checks: [
-      deterministic("hpke_info_cbor/deterministic", hexOf(e, "hpke_info_cbor")),
-      deterministic("hpke_aad_cbor/deterministic", hexOf(e, "hpke_aad_cbor")),
-      sameBytes(
-        "hpke_enc/payload-field",
-        hexOf(e, "hpke_enc"),
-        () => decodeKeyPackagePayload(payload).hpkeEnc,
-      ),
-      sameBytes(
-        "hpke_ciphertext/payload-field",
-        hexOf(e, "hpke_ciphertext"),
-        () => decodeKeyPackagePayload(payload).hpkeCiphertext,
-      ),
-      deterministic("payload_cbor/deterministic", payload),
-      check("payload_cbor/decode", () => decodeKeyPackagePayload(payload).kind === "key-package"),
-      ...signed.checks,
-      bytesCheck("package_id", hexOf(e, "package_id"), objectId(cose)),
-    ],
-    pending: [
-      "hpke_info_cbor/construct",
-      "hpke_aad_cbor/construct",
-      "hpke_enc/derive",
-      "hpke_shared_secret/derive",
-      "hpke_key/derive",
-      "hpke_base_nonce/derive",
-      "hpke_ciphertext/seal",
-    ],
-  };
+  const p = decodeKeyPackagePayload(payload);
+  const info = keyPackageHpkeInfo(p.resourceId, p.dataEpoch, p.recipient);
+  const aad = keyPackageHpkeAad(p.resourceId, p.dataEpoch, p.controlHead);
+  const skE = hexOf(c.inputs, "hpke_ephemeral_private");
+  const recipient = recipientKeys(context, p.recipient);
+  const dek = dekForEpoch(context, p.dataEpoch);
+  const dekBytes = exportSecretKeyBytes(dek);
+  const seal = await sealWithRawSkE(skE, recipient.descriptor.x25519PublicKey, dekBytes, info, aad);
+  const published = await aeadSeal(
+    hexOf(e, "hpke_key"),
+    hexOf(e, "hpke_base_nonce"),
+    aad,
+    dekBytes,
+  );
+  const chain = validateControlChain(publishedChain(context));
+  const checks: Check[] = [
+    deterministic("hpke_info_cbor/deterministic", hexOf(e, "hpke_info_cbor")),
+    bytesCheck("hpke_info_cbor/construct", hexOf(e, "hpke_info_cbor"), info),
+    deterministic("hpke_aad_cbor/deterministic", hexOf(e, "hpke_aad_cbor")),
+    bytesCheck("hpke_aad_cbor/construct", hexOf(e, "hpke_aad_cbor"), aad),
+    sameBytes("hpke_enc/payload-field", hexOf(e, "hpke_enc"), () => p.hpkeEnc),
+    bytesCheck("hpke_enc/derive", hexOf(e, "hpke_enc"), importAgreementKey(skE).publicKey),
+    bytesCheck("hpke_enc/seal", hexOf(e, "hpke_enc"), seal.enc),
+    bytesCheck("hpke_shared_secret/derive", hexOf(e, "hpke_shared_secret"), seal.sharedSecret),
+    bytesCheck("hpke_key/aead", hexOf(e, "hpke_ciphertext"), published),
+    bytesCheck("hpke_base_nonce/aead", hexOf(e, "hpke_ciphertext"), published),
+    sameBytes("hpke_ciphertext/payload-field", hexOf(e, "hpke_ciphertext"), () => p.hpkeCiphertext),
+    bytesCheck("hpke_ciphertext/seal", hexOf(e, "hpke_ciphertext"), seal.ciphertext),
+    deterministic("payload_cbor/deterministic", payload),
+    check("payload_cbor/decode", () => p.kind === "key-package"),
+    ...signed.checks,
+    bytesCheck("package_id", hexOf(e, "package_id"), objectId(cose)),
+  ];
+  if (chain.kind === "linear") {
+    const parsed = parseKeyPackage(cose);
+    checks.push(
+      check("cose_sign1/authorized", () => {
+        const v = verifyKeyPackage(chain, parsed);
+        return v.kind === "authorized" || `${v.reason}: ${v.message}`;
+      }),
+    );
+    const commitment = chain.state.epochs.get(String(p.dataEpoch))?.dekCommitment;
+    let opened: Uint8Array | string;
+    try {
+      opened =
+        commitment === undefined
+          ? "the epoch has no commitment on the chain"
+          : exportSecretKeyBytes(await openKeyPackage(parsed, recipient, commitment));
+    } catch (err) {
+      opened = describeError(err);
+    }
+    checks.push(
+      typeof opened === "string"
+        ? { name: "hpke_ciphertext/open", ok: false, message: opened }
+        : bytesCheck("hpke_ciphertext/open", dekBytes, opened),
+    );
+  }
+  return { checks };
 };
 
 // ---------------------------------------------------------------------------
@@ -763,7 +824,11 @@ function negative(c: VectorCase, actual: string | null): { checks: Check[]; pend
  * A layer applied after structure and signature accept an object: the wire
  * code it fails with, or null. LFCP-023 adds the epoch cutoff for Data Units.
  */
-type AfterReceive<P> = (context: HandlerContext, parsed: Parsed<P>) => string | null;
+type AfterReceive<P> = (
+  context: HandlerContext,
+  parsed: Parsed<P>,
+  vector: VectorCase,
+) => string | null | Promise<string | null>;
 
 /** The published Data Unit case whose unit_id is `unitId` (for vectors that name a unit by ID). */
 function publishedUnit(context: HandlerContext, unitId: Uint8Array): Uint8Array | undefined {
@@ -781,7 +846,7 @@ function signedNegative<P>(
   signerOf: (p: Parsed<P>) => PrincipalId,
   after?: AfterReceive<P>,
 ): Handler {
-  return (c, context) => {
+  return async (c, context) => {
     const inputs = c.inputs;
     const extra: Check[] = [];
     let cose: Uint8Array | undefined;
@@ -809,11 +874,39 @@ function signedNegative<P>(
       );
     }
     let actual = receive(context, cose, parse, signerOf);
-    if (actual === null && after !== undefined) actual = after(context, parse(cose));
+    if (actual === null && after !== undefined) actual = await after(context, parse(cose), c);
     const result = negative(c, actual);
     return { checks: [...extra, ...result.checks], pending: result.pending };
   };
 }
+
+/**
+ * LFCP-024: a received Key Package opened with the recipient key its
+ * vector's context names (hpke_recipient_mismatch_KP0: CAROL's key for a
+ * package sealed to BOB). Opening failures are client-local (N5), so the
+ * outcome has no wire code: the vector requires failure only.
+ */
+const keyPackageOpen: AfterReceive<KeyPackagePayload> = async (context, parsed, vector) => {
+  const ref = (vector.context as { recipient_x25519_private?: unknown } | undefined)
+    ?.recipient_x25519_private;
+  if (ref === undefined) return null;
+  const chain = validateControlChain(publishedChain(context));
+  if (chain.kind !== "linear") return null;
+  const commitment = chain.state.epochs.get(String(parsed.payload.dataEpoch))?.dekCommitment;
+  if (commitment === undefined) return "MISSING_DEPENDENCY";
+  const descriptor = principals(context).get(toHex(parsed.payload.recipient))?.descriptor;
+  if (descriptor === undefined) return "CLIENT_LOCAL:UNKNOWN_RECIPIENT";
+  try {
+    await openKeyPackage(
+      parsed,
+      { descriptor, agreement: importAgreementKey(referenced(context, ref)) },
+      commitment,
+    );
+    return null;
+  } catch (e) {
+    return `CLIENT_LOCAL:${e instanceof LfcpError ? e.code : String(e)}`;
+  }
+};
 
 /**
  * LFCP-023: a received Data Unit against the epoch cutoff of the latest
@@ -857,7 +950,11 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   ),
   "validation/control_record": controlRecordNegative,
   "validation/control_put": controlPutNegative,
-  "validation/key_package": signedNegative(parseKeyPackage, (p) => expectedSignerOf(p.payload)),
+  "validation/key_package": signedNegative(
+    parseKeyPackage,
+    (p) => expectedSignerOf(p.payload),
+    keyPackageOpen,
+  ),
   "validation/snapshot": signedNegative(parseSnapshot, (p) => expectedSignerOf(p.payload)),
   "validation/principal": principalNegative,
 };

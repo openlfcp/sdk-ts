@@ -2,42 +2,6 @@
   "suite": "LFCP-TEST-VECTORS-01",
   "note": "Cases or parts of cases that sdk-ts cannot check yet, with the task that implements them (LFCP-017). Remove an entry when its task lands: the runner fails on stale entries.",
   "cases": {
-    "KP0_bob_epoch0": {
-      "reason": "Payload, COSE, signature against the sender and package ID run here; HPKE does not.",
-      "parts": {
-        "hpke_info_cbor/construct": "LFCP-024",
-        "hpke_aad_cbor/construct": "LFCP-024",
-        "hpke_enc/derive": "LFCP-024",
-        "hpke_shared_secret/derive": "LFCP-024",
-        "hpke_key/derive": "LFCP-024",
-        "hpke_base_nonce/derive": "LFCP-024",
-        "hpke_ciphertext/seal": "LFCP-024"
-      }
-    },
-    "KPI_invite_epoch0": {
-      "reason": "Payload, COSE, signature against the sender and package ID run here; HPKE does not.",
-      "parts": {
-        "hpke_info_cbor/construct": "LFCP-024",
-        "hpke_aad_cbor/construct": "LFCP-024",
-        "hpke_enc/derive": "LFCP-024",
-        "hpke_shared_secret/derive": "LFCP-024",
-        "hpke_key/derive": "LFCP-024",
-        "hpke_base_nonce/derive": "LFCP-024",
-        "hpke_ciphertext/seal": "LFCP-024"
-      }
-    },
-    "KPC_carol_epoch1": {
-      "reason": "Payload, COSE, signature against the sender and package ID run here; HPKE does not.",
-      "parts": {
-        "hpke_info_cbor/construct": "LFCP-024",
-        "hpke_aad_cbor/construct": "LFCP-024",
-        "hpke_enc/derive": "LFCP-024",
-        "hpke_shared_secret/derive": "LFCP-024",
-        "hpke_key/derive": "LFCP-024",
-        "hpke_base_nonce/derive": "LFCP-024",
-        "hpke_ciphertext/seal": "LFCP-024"
-      }
-    },
     "D1_bob_epoch0_seq1": {
       "reason": "Payload, COSE, signature against the actor, unit ID, actor key and nonce run here; the AAD and AEAD do not.",
       "parts": {
@@ -279,12 +243,6 @@
       "reason": "Structurally valid; §26.2 asks for a report to the sync engine (G4: LFCP-025/LFCP-028).",
       "parts": {
         "outcome": "LFCP-025"
-      }
-    },
-    "hpke_recipient_mismatch_KP0": {
-      "reason": "The package parses and verifies against the sender; the HPKE outcome is client-local (N5).",
-      "parts": {
-        "outcome": "LFCP-024"
       }
     }
   }

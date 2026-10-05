@@ -23,6 +23,8 @@
     "@openlfcp/crypto": "workspace:*",
     "@openlfcp/shared-objects": "workspace:*",
     "@openlfcp/wire": "workspace:*",
+    "@panva/hpke-noble": "^1.1.7",
+    "hpke": "^1.1.7",
     "typescript": "^5.9.3",
     "vitest": "^5.0.3"
   }

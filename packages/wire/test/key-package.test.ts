@@ -238,6 +238,12 @@ describe("sealKeyPackage / receiveKeyPackage (§25, §25.2)", () => {
     });
   });
 
+  it("17. production sealing uses a fresh ephemeral key: two packages of the same DEK differ in enc", async () => {
+    const a = parseKeyPackage((await seal()).bytes).payload;
+    const b = parseKeyPackage((await seal()).bytes).payload;
+    expect(toHex(a.hpkeEnc)).not.toBe(toHex(b.hpkeEnc));
+  });
+
   it("11. a package from a sender without key/distribute is rejected before opening", async () => {
     const pkg = await seal({ signer: CARLA });
     expect(await receiveKeyPackage(view, pkg.bytes, BRUNO_KEYS)).toMatchObject({
