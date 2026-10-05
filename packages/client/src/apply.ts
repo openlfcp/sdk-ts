@@ -83,6 +83,22 @@ export interface ProfileApplyResult {
   readonly pending?: string;
 }
 
+/** What a handler's applyBatch reports: per unit merged, pending or rejected, and the objects once. */
+export interface ProfileBatchResult {
+  /** Units merged now: the batch's and buffered units it unblocked. */
+  readonly merged: readonly DataUnitId[];
+  /** Units buffered by the profile (the batch's, and earlier ones still waiting). */
+  readonly pending: readonly DataUnitId[];
+  /** Units the profile refused, with the code and message apply would have thrown. */
+  readonly rejected: readonly {
+    readonly unitId: DataUnitId;
+    readonly code: string;
+    readonly message: string;
+  }[];
+  readonly objects: readonly string[];
+  readonly diagnostics: readonly ProfileDiagnostic[];
+}
+
 export interface ProfileExcludeResult {
   /** Objects whose state changed. */
   readonly objects: readonly string[];
@@ -106,6 +122,15 @@ export interface DataProfileHandler<T> {
   }): DataProfileCodec<T>;
   /** Merges one accepted unit's decoded value. Throws when the profile refuses it. */
   apply(unit: ProfileUnit, value: T): ProfileApplyResult;
+  /**
+   * Merges many accepted units at once, as apply would one by one (a
+   * refusal rejects only its unit). Optional: with it, receiveBatch and
+   * replayStored hand the profile a whole catch-up at once, which an engine
+   * such as Automerge applies far faster than unit by unit.
+   */
+  applyBatch?(
+    units: readonly { readonly unit: ProfileUnit; readonly value: T }[],
+  ): ProfileBatchResult;
   /**
    * LFCP-WIRE-01 §19.1 (G-EP7): takes merged or buffered units out again, so that
    * the state equals the state built from the remaining accepted units.
@@ -248,6 +273,16 @@ const unreachableCodec = (dataProfile: string): DataProfileCodec<never> => ({
 
 const LFCP_ACCEPTED: readonly DataUnitStatus[] = ["merged", "profile-pending"];
 
+type Accepted = Extract<ReceivedDataUnit<unknown>, { kind: "accepted" }>;
+
+const profileUnit = (view: ControlView, r: Accepted): ProfileUnit => ({
+  unitId: r.unitId,
+  resourceId: view.state.resourceId,
+  actor: r.actor,
+  seq: r.seq,
+  epoch: r.epoch,
+});
+
 export class DataUnitApplier {
   readonly #options: DataUnitApplierOptions;
   readonly #handlers: ReadonlyMap<string, DataProfileHandler<unknown>>;
@@ -272,6 +307,59 @@ export class DataUnitApplier {
    * a Data Unit: received content is applied, not re-sent as local work.
    */
   async receive(view: ControlView, bytes: Uint8Array): Promise<ApplyOutcome> {
+    const v = await this.#verify(view, bytes);
+    if ("outcome" in v) return v.outcome;
+    return v.r.kind === "accepted"
+      ? this.#apply(view, v.handler, v.r)
+      : this.#settle(view, v.handler, v.r);
+  }
+
+  /**
+   * Receives the units of one DATA_BATCH (or any run of units) of the
+   * Resource `view` describes: each passes the LFCP checks of receive in
+   * order, unchanged, and the accepted ones reach the profile together
+   * through the handler's applyBatch, when it has one. Outcomes come in the
+   * order of `units`. An applied unit's objects and diagnostics are those
+   * of the whole batch, reported on the last unit merged; the units
+   * buffered before that the batch unblocked count as merged by the first.
+   * Before an equivocation is handled, the units accepted so far are
+   * applied, so its exclusion sees them.
+   */
+  async receiveBatch(view: ControlView, units: readonly Uint8Array[]): Promise<ApplyOutcome[]> {
+    const handler = this.#handlers.get(view.state.dataProfile);
+    const outcomes: ApplyOutcome[] = [];
+    if (handler?.applyBatch === undefined) {
+      for (const bytes of units) outcomes.push(await this.receive(view, bytes));
+      return outcomes;
+    }
+    let staged: { index: number; r: Accepted }[] = [];
+    const flush = async () => {
+      const batch = staged;
+      staged = [];
+      for (const [index, outcome] of await this.#applyStaged(view, handler, batch))
+        outcomes[index] = outcome;
+    };
+    for (const [index, bytes] of units.entries()) {
+      const v = await this.#verify(view, bytes);
+      if ("outcome" in v) outcomes[index] = v.outcome;
+      else if (v.r.kind === "accepted") staged.push({ index, r: v.r });
+      else {
+        if (v.r.kind === "equivocation") await flush();
+        outcomes[index] = await this.#settle(view, v.handler, v.r);
+      }
+    }
+    await flush();
+    return outcomes;
+  }
+
+  /** The LFCP checks of one unit (receiveDataUnit), or the outcome when there is no handler. */
+  async #verify(
+    view: ControlView,
+    bytes: Uint8Array,
+  ): Promise<
+    | { readonly outcome: ApplyOutcome }
+    | { readonly handler: DataProfileHandler<unknown>; readonly r: ReceivedDataUnit<unknown> }
+  > {
     const dataProfile = view.state.dataProfile;
     let row: DataUnitRow | undefined;
     try {
@@ -281,7 +369,8 @@ export class DataUnitApplier {
       row = undefined; // receiveDataUnit reports it as MALFORMED_MESSAGE
     }
     const handler = this.#handlers.get(dataProfile);
-    if (handler === undefined) return this.#unsupported(view, bytes, dataProfile);
+    if (handler === undefined)
+      return { outcome: await this.#unsupported(view, bytes, dataProfile) };
 
     const codec =
       row === undefined
@@ -292,6 +381,15 @@ export class DataUnitApplier {
       seen: this.#seen,
       profile: codec,
     });
+    return { handler, r };
+  }
+
+  /** A unit LFCP did not accept for merging: held, quarantined, failed locally, equivocating, … */
+  async #settle(
+    view: ControlView,
+    handler: DataProfileHandler<unknown>,
+    r: Exclude<ReceivedDataUnit<unknown>, { kind: "accepted" }>,
+  ): Promise<ApplyOutcome> {
     const status = (unitId: DataUnitId, s: DataUnitStatus, detail?: string): StorageWrite => ({
       op: "set-data-unit-status",
       unitId,
@@ -300,8 +398,6 @@ export class DataUnitApplier {
     });
 
     switch (r.kind) {
-      case "accepted":
-        return this.#apply(view, handler, r);
       case "held":
         await this.#write([status(r.unitId, "held", r.reason)]);
         return r;
@@ -321,40 +417,131 @@ export class DataUnitApplier {
   async #apply(
     view: ControlView,
     handler: DataProfileHandler<unknown>,
-    r: Extract<ReceivedDataUnit<unknown>, { kind: "accepted" }>,
+    r: Accepted,
   ): Promise<ApplyOutcome> {
-    const dataProfile = handler.dataProfile;
     let result: ProfileApplyResult;
     try {
-      result = handler.apply(
-        {
-          unitId: r.unitId,
-          resourceId: view.state.resourceId,
-          actor: r.actor,
-          seq: r.seq,
-          epoch: r.epoch,
-        },
-        r.value,
-      );
+      result = handler.apply(profileUnit(view, r), r.value);
     } catch (e) {
       const code = (e as { code?: unknown }).code;
-      const message = e instanceof Error ? e.message : String(e);
-      await this.#write([
-        {
-          op: "set-data-unit-status",
-          unitId: r.unitId,
-          status: "profile-rejected",
-          detail: message,
-        },
-      ]);
-      return Object.freeze({
-        kind: "profile-rejected",
-        unitId: r.unitId,
-        dataProfile,
-        code: typeof code === "string" ? code : "PROFILE_REJECTED",
-        message,
-      });
+      return this.#rejected(
+        r,
+        handler.dataProfile,
+        typeof code === "string" ? code : "PROFILE_REJECTED",
+        e instanceof Error ? e.message : String(e),
+      );
     }
+    return this.#merged(view, handler, r, result);
+  }
+
+  /** The staged accepted units through the handler's applyBatch, as #apply would one by one. */
+  async #applyStaged(
+    view: ControlView,
+    handler: DataProfileHandler<unknown>,
+    staged: readonly { readonly index: number; readonly r: Accepted }[],
+  ): Promise<[number, ApplyOutcome][]> {
+    if (staged.length === 0 || handler.applyBatch === undefined) return [];
+    let batch: ProfileBatchResult;
+    try {
+      batch = handler.applyBatch(
+        staged.map(({ r }) => ({ unit: profileUnit(view, r), value: r.value })),
+      );
+    } catch {
+      // The handler failed as a whole: apply one by one, which isolates the failing unit.
+      const out: [number, ApplyOutcome][] = [];
+      for (const { index, r } of staged) out.push([index, await this.#apply(view, handler, r)]);
+      return out;
+    }
+    const merged = new Set(batch.merged.map((id) => toHex(id)));
+    const rejected = new Map(batch.rejected.map((x) => [toHex(x.unitId), x]));
+    const inBatch = new Set(staged.map(({ r }) => toHex(r.unitId)));
+    const unblocked = batch.merged.filter((id) => !inBatch.has(toHex(id)));
+    let last = -1;
+    staged.forEach(({ r }, k) => {
+      if (merged.has(toHex(r.unitId))) last = k;
+    });
+    const out: [number, ApplyOutcome][] = [];
+    for (const [k, { index, r }] of staged.entries()) {
+      const key = toHex(r.unitId);
+      const refused = rejected.get(key);
+      if (refused !== undefined) {
+        out.push([
+          index,
+          await this.#rejected(r, handler.dataProfile, refused.code, refused.message),
+        ]);
+        continue;
+      }
+      const now = merged.has(key);
+      out.push([
+        index,
+        await this.#merged(
+          view,
+          handler,
+          r,
+          {
+            merged: [...(now ? [r.unitId] : []), ...(k === 0 ? unblocked : [])],
+            objects: k === last ? batch.objects : [],
+            diagnostics: k === last ? batch.diagnostics : [],
+            ...(now ? {} : { pending: "buffered by the profile" }),
+          },
+          false,
+        ),
+      ]);
+    }
+    // §26.2 (G-DP1-GAP): held units whose previous names a unit of the batch
+    // may link now. One scan for the whole batch keeps it linear; each
+    // released unit is reported with the unit it links to.
+    const byPrevious = new Map(staged.map(({ index, r }) => [toHex(r.unitId), index]));
+    const held = await this.#storage.dataUnits.withStatus(view.state.resourceId, "held");
+    const releasedFor = new Map<number, ApplyOutcome[]>();
+    for (const h of held) {
+      const previous = parseDataUnit(h.bytes).payload.prevDataUnitId;
+      const owner = previous === null ? undefined : byPrevious.get(toHex(previous));
+      if (owner === undefined) continue;
+      if ((await this.#storage.dataUnits.get(h.unitId))?.status !== "held") continue;
+      releasedFor.set(owner, [
+        ...(releasedFor.get(owner) ?? []),
+        await this.receive(view, h.bytes),
+      ]);
+    }
+    return out.map(([index, outcome]) => {
+      const extra = releasedFor.get(index);
+      if (extra === undefined || !("released" in outcome)) return [index, outcome];
+      return [
+        index,
+        Object.freeze({ ...outcome, released: Object.freeze([...outcome.released, ...extra]) }),
+      ];
+    });
+  }
+
+  /** An accepted unit the profile refused: never merged. */
+  async #rejected(
+    r: Accepted,
+    dataProfile: string,
+    code: string,
+    message: string,
+  ): Promise<ApplyOutcome> {
+    await this.#write([
+      { op: "set-data-unit-status", unitId: r.unitId, status: "profile-rejected", detail: message },
+    ]);
+    return Object.freeze({
+      kind: "profile-rejected",
+      unitId: r.unitId,
+      dataProfile,
+      code,
+      message,
+    });
+  }
+
+  /** An accepted unit the profile merged or buffered: its statuses, then held units it releases. */
+  async #merged(
+    view: ControlView,
+    handler: DataProfileHandler<unknown>,
+    r: Accepted,
+    result: ProfileApplyResult,
+    releaseHeld = true,
+  ): Promise<ApplyOutcome> {
+    const dataProfile = handler.dataProfile;
     const mergedNow = result.merged.some((id) => bytesEqual(id, r.unitId));
     const alsoMerged = result.merged.filter((id) => !bytesEqual(id, r.unitId));
     await this.#write([
@@ -371,12 +558,15 @@ export class DataUnitApplier {
       ),
     ]);
     // §26.2 (G-DP1, G-DP1-GAP): a held unit of this actor above it may link now, across a gap.
-    const next = await this.#storage.dataUnits.range(
-      view.state.resourceId,
-      r.actor,
-      actorSequence(r.seq + 1n),
-      actorSequence(2n ** 64n - 1n),
-    );
+    // A batch releases its held units once, at its end (#applyStaged).
+    const next = releaseHeld
+      ? await this.#storage.dataUnits.range(
+          view.state.resourceId,
+          r.actor,
+          actorSequence(r.seq + 1n),
+          actorSequence(2n ** 64n - 1n),
+        )
+      : [];
     const released: ApplyOutcome[] = [];
     // Only a held unit whose previous names the unit just accepted can link now.
     for (const held of next.filter((u) => u.status === "held")) {
@@ -485,6 +675,7 @@ export class DataUnitApplier {
       .sort((a, b) => (a.actorSeq < b.actorSeq ? -1 : a.actorSeq > b.actorSeq ? 1 : 0));
     const merged: DataUnitId[] = [];
     const pendingNow: DataUnitId[] = [];
+    const decoded: { readonly unit: ProfileUnit; readonly value: unknown }[] = [];
     for (const u of stored) {
       const dek = await this.#options.dek(u.dataEpoch);
       if (dek === undefined) {
@@ -498,8 +689,8 @@ export class DataUnitApplier {
         const value = handler
           .codecFor({ resourceId: p.resourceId, actor: p.actor })
           .decode(plaintext);
-        const r = handler.apply(
-          {
+        decoded.push({
+          unit: {
             unitId: u.unitId,
             resourceId: p.resourceId,
             actor: p.actor,
@@ -507,14 +698,36 @@ export class DataUnitApplier {
             epoch: p.dataEpoch,
           },
           value,
-        );
-        merged.push(...r.merged);
-        if (!r.merged.some((id) => bytesEqual(id, u.unitId))) pendingNow.push(u.unitId);
-        replayed.push(u.unitId);
+        });
       } catch (e) {
         skipped.push({ unitId: u.unitId, reason: e instanceof Error ? e.message : String(e) });
       }
     }
+    if (handler.applyBatch !== undefined && decoded.length > 0) {
+      // One profile call for the whole replay (a restart after many changes).
+      const batch = handler.applyBatch(decoded);
+      const refused = new Map(batch.rejected.map((x) => [toHex(x.unitId), x]));
+      merged.push(...batch.merged);
+      for (const { unit } of decoded) {
+        const no = refused.get(toHex(unit.unitId));
+        if (no !== undefined) {
+          skipped.push({ unitId: unit.unitId, reason: `${no.code}: ${no.message}` });
+          continue;
+        }
+        if (!batch.merged.some((id) => bytesEqual(id, unit.unitId))) pendingNow.push(unit.unitId);
+        replayed.push(unit.unitId);
+      }
+    } else
+      for (const { unit, value } of decoded) {
+        try {
+          const r = handler.apply(unit, value);
+          merged.push(...r.merged);
+          if (!r.merged.some((id) => bytesEqual(id, unit.unitId))) pendingNow.push(unit.unitId);
+          replayed.push(unit.unitId);
+        } catch (e) {
+          skipped.push({ unitId: unit.unitId, reason: e instanceof Error ? e.message : String(e) });
+        }
+      }
     await this.#write([
       ...pendingNow
         .filter((id) => !merged.some((m) => bytesEqual(m, id)))

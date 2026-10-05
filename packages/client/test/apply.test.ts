@@ -300,3 +300,106 @@ describe("DataUnitApplier (profile-agnostic)", () => {
     });
   });
 });
+
+describe("DataUnitApplier.receiveBatch", () => {
+  /** A text profile with applyBatch, counting its calls; "boom" is refused, "wait" buffered. */
+  function batchHandler(log: { calls: number; merged: string[] }): DataProfileHandler<string> {
+    return {
+      ...textHandler(log.merged),
+      applyBatch: (batch) => {
+        log.calls += 1;
+        const merged: DataUnitId[] = [];
+        const pending: DataUnitId[] = [];
+        const rejected: { unitId: DataUnitId; code: string; message: string }[] = [];
+        for (const { unit, value } of batch) {
+          if (value === "boom")
+            rejected.push({ unitId: unit.unitId, code: "TEXT_REFUSED", message: "refused" });
+          else if (value === "wait") pending.push(unit.unitId);
+          else {
+            log.merged.push(value);
+            merged.push(unit.unitId);
+          }
+        }
+        return { merged, pending, rejected, objects: ["o"], diagnostics: [] };
+      },
+    };
+  }
+  const applier = (handler: DataProfileHandler<string>) =>
+    new DataUnitApplier({
+      storage: new InMemoryLfcpStorage(),
+      dek: () => DEK0,
+      handlers: [handler],
+    });
+
+  it("checks every unit and hands the accepted ones to the profile in one call, in order", async () => {
+    const log = { calls: 0, merged: [] as string[] };
+    const a = applier(batchHandler(log));
+    const u = await units("a", "b", "boom", "wait", "c");
+    const outcomes = await a.receiveBatch(
+      VIEW,
+      u.map((x) => x.bytes),
+    );
+    expect(log.calls).toBe(1);
+    expect(log.merged).toEqual(["a", "b", "c"]);
+    expect(outcomes.map((o) => o.kind)).toEqual([
+      "applied",
+      "applied",
+      "profile-rejected",
+      "profile-pending",
+      "applied",
+    ]);
+    // The batch's objects are reported once, on the last unit merged.
+    expect(outcomes.map((o) => ("objects" in o ? o.objects : null))).toEqual([
+      [],
+      [],
+      null,
+      null,
+      ["o"],
+    ]);
+    // Receiving them again: duplicates, nothing reaches the profile.
+    const again = await a.receiveBatch(
+      VIEW,
+      u.map((x) => x.bytes),
+    );
+    expect(again.every((o) => o.kind === "duplicate")).toBe(true);
+    expect(log.calls).toBe(1);
+  });
+
+  it("releases held units once, after the batch, on the unit they link to (§26.2)", async () => {
+    const log = { calls: 0, merged: [] as string[] };
+    const a = applier(batchHandler(log));
+    const [u1, u2, u3] = (await units("a", "b", "c")).map((u) => u.bytes);
+    if (u1 === undefined || u2 === undefined || u3 === undefined) throw new Error("units");
+    expect((await a.receive(VIEW, u3)).kind).toBe("held");
+    const outcomes = await a.receiveBatch(VIEW, [u1, u2]);
+    expect(outcomes.map((o) => o.kind)).toEqual(["applied", "applied"]);
+    const second = outcomes[1];
+    const released = second !== undefined && "released" in second ? second.released : [];
+    expect(released.map((o) => o.kind)).toEqual(["applied"]);
+    expect(log.merged).toEqual(["a", "b", "c"]);
+  });
+
+  it("falls back to one unit at a time without applyBatch, or when it throws", async () => {
+    const plain: string[] = [];
+    const u = await units("a", "boom", "b");
+    const outcomes = await applier(textHandler(plain)).receiveBatch(
+      VIEW,
+      u.map((x) => x.bytes),
+    );
+    expect(outcomes.map((o) => o.kind)).toEqual(["applied", "profile-rejected", "applied"]);
+    expect(plain).toEqual(["a", "b"]);
+    const throwing: string[] = [];
+    const failing = applier({
+      ...textHandler(throwing),
+      applyBatch: () => {
+        throw new Error("the profile failed as a whole");
+      },
+    });
+    const isolated = await failing.receiveBatch(
+      VIEW,
+      u.map((x) => x.bytes),
+    );
+    expect(isolated.map((o) => o.kind)).toEqual(["applied", "profile-rejected", "applied"]);
+    expect(throwing).toEqual(["a", "b"]);
+  });
+});

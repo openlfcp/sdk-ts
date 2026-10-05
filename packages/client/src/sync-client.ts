@@ -1157,6 +1157,15 @@ export class SyncClient {
     const R = ctx.binding.resourceId;
     let changed = false;
     let needControl = false;
+    // Units a loaded Snapshot covers are accepted as covered, one by one;
+    // runs of the others go to the applier together (receiveBatch), so the
+    // profile merges a catch-up at once.
+    const outcomes: ApplyOutcome[] = [];
+    let run: Uint8Array[] = [];
+    const flushRun = async () => {
+      if (run.length > 0) outcomes.push(...(await ctx.binding.applier.receiveBatch(view, run)));
+      run = [];
+    };
     for (const bytes of units) {
       let covered = false;
       try {
@@ -1166,9 +1175,15 @@ export class SyncClient {
       } catch {
         // malformed: the applier reports it
       }
-      const outcome = covered
-        ? await ctx.binding.applier.acceptCovered(view, bytes)
-        : await ctx.binding.applier.receive(view, bytes);
+      if (!covered) {
+        run.push(bytes);
+        continue;
+      }
+      await flushRun();
+      outcomes.push(await ctx.binding.applier.acceptCovered(view, bytes));
+    }
+    await flushRun();
+    for (const outcome of outcomes) {
       if (outcome.kind === "applied" || outcome.kind === "profile-pending") {
         changed = true;
         ctx.unitsSinceSnapshot += 1;
