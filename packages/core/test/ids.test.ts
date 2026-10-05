@@ -4,6 +4,7 @@ import {
   controlRecordId,
   dataUnitId,
   fromHex,
+  generateResourceId,
   hash32,
   idEquals,
   LfcpError,
@@ -78,5 +79,13 @@ describe("compareCanonicalFrontierOrder", () => {
     const low = principalId(new Uint8Array(32).fill(0x7f));
     const high = principalId(new Uint8Array(32).fill(0x80));
     expect(compareCanonicalFrontierOrder(low, high)).toBeLessThan(0);
+  });
+});
+
+describe("generateResourceId", () => {
+  it("returns 32 random bytes, different each time (LFCP-WIRE-01 §6)", () => {
+    const ids = Array.from({ length: 8 }, () => toHex(generateResourceId()));
+    expect(new Set(ids).size).toBe(8);
+    expect(generateResourceId()).toHaveLength(32);
   });
 });

@@ -1,5 +1,6 @@
 import { bytesEqual } from "./bytes.js";
 import { LfcpError } from "./errors.js";
+import { secureRandom } from "./random.js";
 
 /**
  * 32-byte LFCP identifiers, as raw bytes.
@@ -38,6 +39,13 @@ function id32<Kind extends string>(kind: Kind, bytes: Uint8Array): Id32<Kind> {
 }
 
 export const resourceId = (bytes: Uint8Array): ResourceId => id32("ResourceId", bytes);
+
+/**
+ * A new Resource ID: 32 bytes from the platform CSPRNG (LFCP-WIRE-01 §6).
+ * It never encodes a hostname, owner, account, path or time, and nothing
+ * derives it from Genesis content.
+ */
+export const generateResourceId = (): ResourceId => resourceId(secureRandom(ID32_LENGTH));
 export const principalId = (bytes: Uint8Array): PrincipalId => id32("PrincipalId", bytes);
 export const hash32 = (bytes: Uint8Array): Hash32 => id32("Hash32", bytes);
 export const controlRecordId = (bytes: Uint8Array): ControlRecordId =>

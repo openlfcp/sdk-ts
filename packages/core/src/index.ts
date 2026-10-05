@@ -9,6 +9,7 @@ export {
   controlRecordId,
   type DataUnitId,
   dataUnitId,
+  generateResourceId,
   type Hash32,
   hash32,
   ID32_LENGTH,

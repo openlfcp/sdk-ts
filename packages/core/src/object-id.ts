@@ -1,4 +1,5 @@
 import { LfcpError } from "./errors.js";
+import { secureRandom } from "./random.js";
 
 /**
  * Shared Object ID (SHARED-OBJECTS-PROFILE-01 §19): a UUIDv7 (RFC 9562) in its
@@ -36,14 +37,6 @@ export interface GenerateObjectIdOptions {
   readonly now?: number;
   /** Source of 10 random bytes; defaults to globalThis.crypto.getRandomValues. */
   readonly random?: (length: number) => Uint8Array;
-}
-
-function secureRandom(length: number): Uint8Array {
-  const c = (globalThis as { crypto?: { getRandomValues?: (a: Uint8Array) => Uint8Array } }).crypto;
-  if (typeof c?.getRandomValues !== "function") {
-    throw new LfcpError("NO_SECURE_RANDOM", "globalThis.crypto.getRandomValues is not available");
-  }
-  return c.getRandomValues(new Uint8Array(length));
 }
 
 /**
