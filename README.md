@@ -9,8 +9,9 @@ stay portable to browsers and editors; Node-only code goes into separate
 ## Status
 
 Workspace scaffold (LFCP-011). `@openlfcp/core` has its identifier
-primitives (LFCP-012) and `@openlfcp/wire` its deterministic CBOR codec
-(LFCP-013); the other packages still export only a `PACKAGE`
+primitives (LFCP-012), `@openlfcp/crypto` the Principal key material and
+`@openlfcp/wire` its deterministic CBOR codec (LFCP-013) and the Principal
+Descriptor (LFCP-014); the other packages still export only a `PACKAGE`
 placeholder. Protocol code arrives with the backlog tasks that own each
 package.
 
@@ -19,25 +20,39 @@ package.
 | Package | Purpose | Depends on | Exports |
 | --- | --- | --- | --- |
 | `@openlfcp/core` | Identifiers, shared types, errors, byte helpers | none | 32-byte ids (`ResourceId`, `PrincipalId`, `Hash32`, `ControlRecordId`, `DataUnitId`), `ObjectId` (UUIDv7), hex/base64url, `LfcpError` |
-| `@openlfcp/wire` | Deterministic CBOR, COSE, LFCP Wire structures and codecs | core | `PACKAGE`; low-level deterministic CBOR (`encode`, `decodeStrict`, `isDeterministic`, `cborMap`) under the `@openlfcp/wire/cbor` subpath |
+| `@openlfcp/crypto` | Thin wrapper over the audited `@noble` libraries | core | `sha256`; `SigningKeyPair` (Ed25519) and `AgreementKeyPair` (X25519) with redacted diagnostics; `generate*KeyPair`, `import*Key`, `exportSecretKeyBytes`, `verifyEd25519` |
+| `@openlfcp/wire` | Deterministic CBOR, COSE, LFCP Wire structures and codecs | core, crypto | Principal Descriptor (`principalDescriptor*`, `encode/decodePrincipalDescriptor`, `derivePrincipalId`); low-level deterministic CBOR (`encode`, `decodeStrict`, `isDeterministic`, `cborMap`) under the `@openlfcp/wire/cbor` subpath |
 | `@openlfcp/storage` | Storage interfaces only (adapters such as a future `@openlfcp/storage-node` live elsewhere) | core | `PACKAGE` |
-| `@openlfcp/shared-objects` | SHARED-OBJECTS-PROFILE-01 (`org.openlfcp.shared-objects.v1`) | core | `PACKAGE` |
-| `@openlfcp/client` | Session, Control Plane and Data Plane synchronization | core, wire, storage | `PACKAGE` |
+| `@openlfcp/shared-objects` | SHARED-OBJECTS-PROFILE-01 (`org.openlfcp.shared-objects.v1`) | core, crypto | `PACKAGE` |
+| `@openlfcp/client` | Session, Control Plane and Data Plane synchronization | core, wire, storage, crypto | `PACKAGE` |
 
 ```text
-core ◀── wire ◀──────┐
-  ▲  ◀── storage ◀───┤
-  │                  client
-  └──── shared-objects
+core ◀── crypto ◀── wire ◀──────────┐
+  ▲ ▲       ▲                       │
+  │ │       └──── shared-objects    client  (also → core, storage, crypto)
+  │ └──── storage ◀─────────────────┘
+  └──── (every package)
 ```
 
+Allowed edges: crypto → core; wire → core, crypto; storage → core;
+shared-objects → core, crypto; client → core, wire, storage, crypto.
 Nothing depends on `client`. Future profiles get their own package next to
 `shared-objects`.
 
 `pnpm lint` enforces these edges with `scripts/check-boundaries.mjs`. It
-fails on an edge outside the graph, any `obsidian` dependency or import, and
-any `node:` or Node built-in import or Node-only global (`process`, `Buffer`,
-…) in these packages. Its self-tests live in `scripts/boundary-fixtures/`.
+fails on:
+
+- an edge outside the graph;
+- any `obsidian` dependency or import;
+- any `@noble/*` dependency or import outside `@openlfcp/crypto`;
+- any `node:` or Node built-in import or Node-only global (`process`,
+  `Buffer`, …) in these packages.
+
+Its self-tests live in `scripts/boundary-fixtures/`.
+
+Runtime dependencies are deliberately few. Only `@openlfcp/crypto` has
+external ones: `@noble/hashes` and `@noble/curves`. They are audited, pure
+JavaScript and run unchanged in Node.js, browsers and Obsidian.
 
 Each package is ESM-only and publish-ready in shape:
 
