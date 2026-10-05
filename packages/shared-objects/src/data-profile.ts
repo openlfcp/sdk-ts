@@ -7,7 +7,7 @@ import {
 } from "@openlfcp/core";
 import { type CheckedChange, frameChange, unframeChange } from "./automerge-bytes.js";
 import { type ObjectChange, type ReplicaOptions, SharedObjectsReplica } from "./replica.js";
-import type { Json } from "./validate.js";
+import { type Json, ProfileInvalidError } from "./validate.js";
 import { deriveActorId, PROFILE_ID } from "./values.js";
 
 /**
@@ -17,7 +17,7 @@ import { deriveActorId, PROFILE_ID } from "./values.js";
  * structurally; this package depends on neither client nor wire.
  *
  * - decode: the §11 plaintext is one checked Automerge change, written by
- *   the §8 actor of the unit's signing Principal (SO-SEC1);
+ *   the §8 actor of the unit's signing Principal (§8, §11, SO-SEC1);
  * - apply: the change merges into the replica, or waits in a buffer until
  *   the changes it depends on arrive in other units (profile-pending), and
  *   every buffered change it unblocks merges with it;
@@ -160,14 +160,14 @@ export class SharedObjectsDataProfile {
     readonly actor: PrincipalId;
   }): SharedObjectsCodec {
     const actor = toHex(deriveActorId(unit.resourceId, unit.actor));
-    // PROVISIONAL (SO-SEC1): a unit carries only changes of its signer's §8
+    // §8, §11 (SO-SEC1): a unit carries only changes of its signer's §8
     // actor, so no Principal can write into another Principal's Automerge
-    // history.
+    // history. Anything else is PROFILE_INVALID / CHANGE_ACTOR_MISMATCH.
     const bound = (change: CheckedChange): CheckedChange => {
       if (change.actor !== actor)
-        throw new LfcpError(
-          "PROFILE_INVALID",
-          `the change's Automerge actor ${change.actor} is not the §8 actor ${actor} of the unit's signer (SO-SEC1)`,
+        throw new ProfileInvalidError(
+          "CHANGE_ACTOR_MISMATCH",
+          `the change's Automerge actor ${change.actor} is not the §8 actor ${actor} of the unit's signer (§11, SO-SEC1)`,
         );
       return change;
     };

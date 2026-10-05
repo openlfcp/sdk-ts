@@ -1,4 +1,4 @@
-import { isObjectId } from "@openlfcp/core";
+import { isObjectId, LfcpError } from "@openlfcp/core";
 import {
   isLocalDate,
   isNamespacedValue,
@@ -31,7 +31,9 @@ export type ProfileDiagnostic =
   | "INVALID_LOCAL_DATE"
   | "INVALID_COLLECTION_REPRESENTATION"
   | "INVALID_TAG"
-  | "IMMUTABLE_FIELD_MUTATED";
+  | "IMMUTABLE_FIELD_MUTATED"
+  /** §8, §11: a Data Unit's Automerge change is not of its signer's actor; it is not merged. */
+  | "CHANGE_ACTOR_MISMATCH";
 
 /** One profile validation failure: PROFILE_INVALID with its §74.1 diagnostic. */
 export interface ProfileProblem {
@@ -40,6 +42,17 @@ export interface ProfileProblem {
   /** JSON Pointer of the offending value (of its container, for a missing field). */
   readonly pointer: string;
   readonly message: string;
+}
+
+/** PROFILE_INVALID thrown for a rejected profile plaintext, with its §74.1 diagnostic. */
+export class ProfileInvalidError extends LfcpError {
+  readonly diagnostic: ProfileDiagnostic;
+
+  constructor(diagnostic: ProfileDiagnostic, message: string) {
+    super("PROFILE_INVALID", message);
+    this.name = "ProfileInvalidError";
+    this.diagnostic = diagnostic;
+  }
 }
 
 export type Json =

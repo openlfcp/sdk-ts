@@ -75,6 +75,7 @@ export {
   type Json,
   objectProblems,
   type ProfileDiagnostic,
+  ProfileInvalidError,
   type ProfileProblem,
   pointerToken,
   type RootValidation,

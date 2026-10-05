@@ -16,6 +16,7 @@ import {
   type LocalChange,
   type ObjectChange,
   PROFILE_ID,
+  ProfileInvalidError,
   SharedObjectsDataProfile,
   SharedObjectsReplica,
   setStatus,
@@ -56,8 +57,13 @@ describe("SharedObjectsDataProfile", () => {
     expect(alice.decode(init.plaintext).hash).toBe(init.hash);
     expect(alice.encode(checkChange(init.change))).toEqual(init.plaintext);
     const bob = profile.codecFor({ resourceId: RESOURCE, actor: BOB });
-    expect(() => bob.decode(init.plaintext)).toThrow(/SO-SEC1/);
-    expect(() => bob.encode(checkChange(init.change))).toThrow(/SO-SEC1/);
+    const mismatch = expect.objectContaining({
+      code: "PROFILE_INVALID",
+      diagnostic: "CHANGE_ACTOR_MISMATCH",
+    });
+    expect(() => bob.decode(init.plaintext)).toThrow(mismatch);
+    expect(() => bob.encode(checkChange(init.change))).toThrow(mismatch);
+    expect(() => bob.decode(init.plaintext)).toThrow(ProfileInvalidError);
     expect(() => alice.decode(frameProfilePayload(Uint8Array.of(1)))).toThrow(
       expect.objectContaining({ code: "PROFILE_FRAMING" }),
     );
