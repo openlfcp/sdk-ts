@@ -7,7 +7,7 @@ import {
   type PrincipalId,
   type ResourceId,
 } from "@openlfcp/core";
-import type { ResourceDEK } from "@openlfcp/crypto";
+import { decryptDataUnit, deriveActorDataKey, type ResourceDEK } from "@openlfcp/crypto";
 import type { DataUnitRow, DataUnitStatus, LfcpStorage, StorageWrite } from "@openlfcp/storage";
 import {
   type ControlView,
@@ -17,6 +17,8 @@ import {
   type DataUnitCheckOptions,
   type DataUnitEquivocation,
   type DataUnitQuarantined,
+  dataUnitAad,
+  parseDataUnit,
   type ReceivedDataUnit,
   receiveDataUnit,
 } from "@openlfcp/wire";
@@ -105,6 +107,12 @@ export interface DataProfileHandler<T> {
    * the state equals the state built from the remaining accepted units.
    */
   exclude(unitIds: readonly DataUnitId[]): ProfileExcludeResult;
+  /**
+   * Whether the profile state holds this unit's content. With it, units
+   * merged after the last persisted checkpoint can be replayed from storage
+   * after a restart (DataUnitApplier.replayStored).
+   */
+  has?(unitId: DataUnitId): boolean;
 }
 
 interface Applied {
@@ -414,6 +422,85 @@ export class DataUnitApplier {
       objects: result.objects,
       pending: result.pending,
     });
+  }
+
+  /**
+   * After a restart: the stored, LFCP-accepted units (merged or buffered by
+   * the profile) whose content the restored profile state does not hold
+   * (merged after its last checkpoint), decrypted again from their exact
+   * stored bytes and applied, in (actor, seq) order. Units covered by a
+   * Snapshot are not replayed (their content came with it). Needs the
+   * handler's has(); returns what was replayed and what could not be (no
+   * DEK, refused). LFCP checks are not repeated: the units passed them when
+   * they were accepted.
+   */
+  async replayStored(view: ControlView): Promise<{
+    readonly replayed: readonly DataUnitId[];
+    readonly skipped: readonly { readonly unitId: DataUnitId; readonly reason: string }[];
+  }> {
+    const handler = this.#handlers.get(view.state.dataProfile);
+    const replayed: DataUnitId[] = [];
+    const skipped: { unitId: DataUnitId; reason: string }[] = [];
+    if (handler?.has === undefined) return { replayed, skipped };
+    const resource = view.state.resourceId;
+    // Also units accepted by LFCP whose merge was never recorded (a crash
+    // between the accepted mark and the status write leaves them "seen" or "held").
+    const stored = [
+      ...(await this.#storage.dataUnits.withStatus(resource, "merged")),
+      ...(await this.#storage.dataUnits.withStatus(resource, "profile-pending")),
+      ...(await this.#storage.dataUnits.withStatus(resource, "seen")),
+      ...(await this.#storage.dataUnits.withStatus(resource, "held")),
+    ]
+      .filter((u) => u.accepted && u.detail !== "covered by a Snapshot" && !handler.has?.(u.unitId))
+      .sort((a, b) => (a.actorSeq < b.actorSeq ? -1 : a.actorSeq > b.actorSeq ? 1 : 0));
+    const merged: DataUnitId[] = [];
+    const pendingNow: DataUnitId[] = [];
+    for (const u of stored) {
+      const dek = await this.#options.dek(u.dataEpoch);
+      if (dek === undefined) {
+        skipped.push({ unitId: u.unitId, reason: `no DEK for epoch ${u.dataEpoch}` });
+        continue;
+      }
+      try {
+        const p = parseDataUnit(u.bytes).payload;
+        const key = deriveActorDataKey(dek, p.resourceId, p.dataEpoch, p.actor);
+        const plaintext = decryptDataUnit(key, p.actorSeq, dataUnitAad(p), p.ciphertext);
+        const value = handler
+          .codecFor({ resourceId: p.resourceId, actor: p.actor })
+          .decode(plaintext);
+        const r = handler.apply(
+          {
+            unitId: u.unitId,
+            resourceId: p.resourceId,
+            actor: p.actor,
+            seq: p.actorSeq,
+            epoch: p.dataEpoch,
+          },
+          value,
+        );
+        merged.push(...r.merged);
+        if (!r.merged.some((id) => bytesEqual(id, u.unitId))) pendingNow.push(u.unitId);
+        replayed.push(u.unitId);
+      } catch (e) {
+        skipped.push({ unitId: u.unitId, reason: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    await this.#write([
+      ...pendingNow
+        .filter((id) => !merged.some((m) => bytesEqual(m, id)))
+        .map(
+          (unitId): StorageWrite => ({
+            op: "set-data-unit-status",
+            unitId,
+            status: "profile-pending",
+            detail: "replayed; waiting for content it builds on",
+          }),
+        ),
+      ...merged.map(
+        (unitId): StorageWrite => ({ op: "set-data-unit-status", unitId, status: "merged" }),
+      ),
+    ]);
+    return { replayed: Object.freeze(replayed), skipped: Object.freeze(skipped) };
   }
 
   /**

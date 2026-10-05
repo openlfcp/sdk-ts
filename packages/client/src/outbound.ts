@@ -665,7 +665,10 @@ export async function resourceSyncState(
 ): Promise<ResourceSyncState> {
   // Units held through a stored (loaded or published) Snapshot count too (§29).
   let have: HaveVector = await snapshotFrontier(storage, resource);
-  for (const status of ["merged", "profile-pending", "profile-rejected"] as const)
+  // Every LFCP-accepted unit is held here, whatever its profile status: a
+  // crash between accepting and recording the merge leaves it "seen" or
+  // "held" until replayStored applies it.
+  for (const status of ["merged", "profile-pending", "profile-rejected", "seen", "held"] as const)
     for (const u of await storage.dataUnits.withStatus(resource, status))
       if (u.accepted) have = addSequence(have, u.actor, u.actorSeq);
   const items = await storage.outbound.list(resource);

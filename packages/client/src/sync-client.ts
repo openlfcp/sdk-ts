@@ -2,6 +2,7 @@ import {
   actorSequence,
   type ControlRecordId,
   type DataEpoch,
+  type DataUnitId,
   dataEpoch,
   type Hash32,
   LfcpError,
@@ -169,6 +170,13 @@ export type SyncEvent =
       readonly type: "snapshot-published";
       readonly resourceId: ResourceId;
       readonly snapshotId: Hash32;
+    }
+  /** Stored accepted units applied again to a profile state that lacked them (restart). */
+  | {
+      readonly type: "replayed";
+      readonly resourceId: ResourceId;
+      readonly replayed: readonly DataUnitId[];
+      readonly skipped: readonly { readonly unitId: DataUnitId; readonly reason: string }[];
     }
   | { readonly type: "ack"; readonly outcome: AckOutcome }
   /** A NACK of an outbound object: stale, equivocation alarm, rejected, repropose, … */
@@ -849,6 +857,15 @@ export class SyncClient {
   // Data (§48-§51, §68, §69)
 
   async #startData(ctx: ResourceContext): Promise<void> {
+    // Accepted units on disk that the profile state lacks (a crash before
+    // the checkpoint caught up) are applied again before any new unit.
+    if (ctx.view !== null) {
+      const r = await ctx.binding.applier.replayStored(ctx.view);
+      if (r.replayed.length > 0 || r.skipped.length > 0) {
+        ctx.binding.checkpointer?.noteChange();
+        this.#emit({ type: "replayed", resourceId: ctx.binding.resourceId, ...r });
+      }
+    }
     await this.#flush(ctx); // §88 step 6: upload locally queued valid units
     if (await this.#snapshotUseful(ctx)) {
       // §66 step 3: the preferred Snapshot first, then the units beyond it.

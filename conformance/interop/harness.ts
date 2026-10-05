@@ -137,6 +137,7 @@ export class Side {
           codecFor: (u) => profile.codecFor(u),
           apply: (u, v) => profile.apply(u, v as never),
           exclude: (ids) => profile.exclude(ids),
+          has: (id) => profile.has(id),
         },
       ],
     });
