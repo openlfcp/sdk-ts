@@ -1,0 +1,16 @@
+{
+  "name": "openlfcp-sdk-ts",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reusable TypeScript LFCP implementation.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.33.4",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "echo \"sdk-ts: nothing to build yet (workspace layout is LFCP-011)\"",
+    "test": "node --test"
+  }
+}
