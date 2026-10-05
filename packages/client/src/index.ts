@@ -47,3 +47,8 @@ export {
   saveControlChain,
   saveControlConflict,
 } from "./storage.js";
+export {
+  type ResourcePhase,
+  type ResourcePhaseEvent,
+  resourcePhaseTransition,
+} from "./resource-state.js";
