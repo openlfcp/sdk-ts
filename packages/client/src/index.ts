@@ -37,6 +37,11 @@ export {
   queueKeyPackage,
   queueSnapshot,
 } from "./queue.js";
+export {
+  type ResourcePhase,
+  type ResourcePhaseEvent,
+  resourcePhaseTransition,
+} from "./resource-state.js";
 export { type CreatedSnapshot, type CreateSnapshotOptions, createSnapshot } from "./snapshot.js";
 export {
   createQueuedDataUnit,
@@ -47,8 +52,3 @@ export {
   saveControlChain,
   saveControlConflict,
 } from "./storage.js";
-export {
-  type ResourcePhase,
-  type ResourcePhaseEvent,
-  resourcePhaseTransition,
-} from "./resource-state.js";
