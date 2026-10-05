@@ -1,0 +1,37 @@
+{
+  "name": "@openlfcp/storage-node",
+  "version": "0.0.0",
+  "description": "Durable Node.js storage for LFCP clients: SQLite (better-sqlite3) and a file secret store. Node only.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openlfcp/sdk-ts.git",
+    "directory": "packages/storage-node"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@openlfcp/core": "workspace:^",
+    "@openlfcp/storage": "workspace:^",
+    "better-sqlite3": "13.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "24.19.1"
+  }
+}
