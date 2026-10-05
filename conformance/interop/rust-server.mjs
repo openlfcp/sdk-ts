@@ -6,7 +6,9 @@
 // is built with `cargo build` into a shared temporary target directory
 // ($LFCP_SERVER_TARGET_DIR, default <tmp>/openlfcp-sdk-ts-server-target),
 // so only the first run compiles. When cargo or the checkout is missing,
-// startRustServer resolves { skip: "<why>" } and the test is skipped.
+// startRustServer resolves { skip: "<why>" } and the test is skipped,
+// unless LFCP_REQUIRE_LIVE=1: then it throws, so a gate that must run the
+// live tests cannot pass by skipping them.
 
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -77,7 +79,11 @@ async function waitHealthy(base, child, deadline) {
 /** Starts a fresh server on a free loopback port with its own state directory. */
 export async function startRustServer() {
   const built = build();
-  if (built.skip !== undefined) return { skip: built.skip };
+  if (built.skip !== undefined) {
+    if (process.env.LFCP_REQUIRE_LIVE === "1")
+      throw new Error(`LFCP_REQUIRE_LIVE=1 but the live tests would skip: ${built.skip}`);
+    return { skip: built.skip };
+  }
   const port = await freePort();
   const dir = mkdtempSync(join(tmpdir(), "lfcp-rust-server-"));
   const url = `ws://127.0.0.1:${port}/v1/ws`;
