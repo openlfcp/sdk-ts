@@ -303,6 +303,48 @@ export function runStorageContract(
       );
     });
 
+    test("refuses a local unit whose previous unit is no longer the actor's latest accepted one", async ({
+      storage: s,
+    }) => {
+      const expect = (previous: number | null, actor = ALICE) =>
+        ({
+          op: "expect-previous-unit",
+          resourceId: R,
+          actor,
+          previous: previous === null ? null : dataUnitId(id(150 + previous)),
+        }) as const;
+      const put = (u: DataUnitRow, accepted: boolean) =>
+        ({ op: "put-data-unit", unit: u, status: "merged", accepted }) as const;
+      await ok(s, [expect(null), put(unit(1, 1n), true)], "first unit, none before");
+      // Units of another actor, and units not accepted, do not count.
+      await ok(s, [put(unit(9, 1n, BOB), true), put(unit(3, 3n), false)], "others");
+      await ok(s, [expect(1), put(unit(2, 2n, ALICE, 1), true)], "names the latest");
+      // A second writer that read unit 1 as the latest: nothing is stored.
+      eq(
+        await s.commit([expect(1), put(unit(4, 4n, ALICE, 1), true)]),
+        {
+          ok: false,
+          reason: "PREVIOUS_UNIT_MISMATCH",
+          resourceId: R,
+          actor: ALICE,
+          current: dataUnitId(id(152)),
+        },
+        "superseded",
+      );
+      eq(await s.dataUnits.get(dataUnitId(id(154))), undefined, "nothing written");
+      eq(
+        await s.commit([expect(null, BOB)]),
+        {
+          ok: false,
+          reason: "PREVIOUS_UNIT_MISMATCH",
+          resourceId: R,
+          actor: BOB,
+          current: dataUnitId(id(159)),
+        },
+        "null after an accepted unit",
+      );
+    });
+
     test("never reopens a closed epoch with a null closedBy (a DEK reference from an older row)", async ({
       storage: s,
     }) => {

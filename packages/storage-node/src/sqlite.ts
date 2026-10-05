@@ -288,6 +288,27 @@ export class SqliteLfcpStorage implements LfcpStorage {
             current: current as ControlRecordId | null,
           });
       }
+      for (const w of writes) {
+        if (w.op !== "expect-previous-unit") continue;
+        const row = this.#get(
+          "SELECT unit_id FROM data_units WHERE resource_id = ? AND actor = ? AND accepted = 1 ORDER BY actor_seq DESC LIMIT 1",
+          blob(w.resourceId),
+          blob(w.actor),
+        );
+        const current = row === undefined ? null : bytes(row.unit_id);
+        const matches =
+          current === null
+            ? w.previous === null
+            : w.previous !== null && bytesEqual(current, w.previous);
+        if (!matches)
+          return Object.freeze({
+            ok: false,
+            reason: "PREVIOUS_UNIT_MISMATCH",
+            resourceId: Uint8Array.from(w.resourceId) as ResourceId,
+            actor: Uint8Array.from(w.actor) as PrincipalId,
+            current: current as DataUnitId | null,
+          });
+      }
       for (const w of writes) this.#apply(w);
       return Object.freeze({ ok: true });
     });
@@ -340,6 +361,8 @@ export class SqliteLfcpStorage implements LfcpStorage {
             "INSERT INTO control_conflicts (resource_id, heads) VALUES (?, ?) ON CONFLICT (resource_id) DO UPDATE SET heads = excluded.heads",
           ).run(blob(w.resourceId), joinIds(w.conflict.heads));
         return;
+      case "expect-previous-unit":
+        return; // a precondition, checked by commit()
       case "put-epoch": {
         const e = w.epoch;
         db.prepare(

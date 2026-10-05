@@ -274,6 +274,32 @@ export async function latestAcceptedOwnUnit(
   return mine.filter((u) => u.accepted).at(-1)?.unitId ?? null;
 }
 
+/**
+ * Local units of one (storage, Resource, actor) are created one at a time
+ * in this process: each must name the previous one (§26.2). Across
+ * processes sharing a store, the commit's expect-previous-unit refuses a
+ * unit whose previous was superseded meanwhile.
+ */
+const localWriters = new WeakMap<object, Map<string, Promise<unknown>>>();
+
+function serialized<R>(storage: object, key: string, run: () => Promise<R>): Promise<R> {
+  let tails = localWriters.get(storage);
+  if (tails === undefined) {
+    tails = new Map();
+    localWriters.set(storage, tails);
+  }
+  const done = (tails.get(key) ?? Promise.resolve()).then(run, run);
+  const tail = done.then(
+    () => undefined,
+    () => undefined,
+  );
+  tails.set(key, tail);
+  void tail.then(() => {
+    if (tails.get(key) === tail) tails.delete(key);
+  });
+  return done;
+}
+
 export async function createQueuedDataUnit<T>(
   storage: Pick<LfcpStorage, "actorSequences" | "commit" | "dataUnits">,
   options: Omit<CreateDataUnitOptions<T>, "sequences" | "previousUnitId"> & {
@@ -288,15 +314,25 @@ export async function createQueuedDataUnit<T>(
   },
   also: readonly StorageWrite[] | ((created: CreatedDataUnit) => readonly StorageWrite[]) = [],
 ): Promise<CreatedDataUnit> {
+  const resource = options.view.state.resourceId;
+  const actor = options.actor.descriptor.principalId;
+  return serialized(storage, `${toHex(resource)}:${toHex(actor)}`, () =>
+    createQueuedDataUnitNow(storage, options, also, resource, actor),
+  );
+}
+
+async function createQueuedDataUnitNow<T>(
+  storage: Pick<LfcpStorage, "actorSequences" | "commit" | "dataUnits">,
+  options: Parameters<typeof createQueuedDataUnit<T>>[1],
+  also: readonly StorageWrite[] | ((created: CreatedDataUnit) => readonly StorageWrite[]),
+  resource: ResourceId,
+  actor: PrincipalId,
+): Promise<CreatedDataUnit> {
   const { onCreated, previousUnitId, ...create } = options;
   const previous =
     previousUnitId !== undefined
       ? previousUnitId
-      : await latestAcceptedOwnUnit(
-          storage,
-          options.view.state.resourceId,
-          options.actor.descriptor.principalId,
-        );
+      : await latestAcceptedOwnUnit(storage, resource, actor);
   const created = await createDataUnit({
     ...create,
     previousUnitId: previous,
@@ -306,6 +342,11 @@ export async function createQueuedDataUnit<T>(
   const extra = typeof also === "function" ? also(created) : also;
   const row = dataUnitRow(created.bytes);
   const result = await storage.commit([
+    // Unless the caller named its own previous unit, it must still be the
+    // latest when this unit is stored (another writer, e.g. another process).
+    ...(previousUnitId !== undefined
+      ? []
+      : [{ op: "expect-previous-unit", resourceId: resource, actor, previous } as const]),
     { op: "put-data-unit", unit: row, status: "merged", detail: "local", accepted: true },
     {
       op: "enqueue",

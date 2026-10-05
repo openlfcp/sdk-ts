@@ -25,6 +25,7 @@ import {
 } from "@openlfcp/wire";
 import { describe, expect, it } from "vitest";
 import {
+  type CreatedDataUnit,
   createQueuedDataUnit,
   dataUnitRow,
   dekResolver,
@@ -282,6 +283,65 @@ describe("client over storage", () => {
     expect(
       toHex((await latestAcceptedOwnUnit(storage, R, WRITER.descriptor.principalId)) as Uint8Array),
     ).toBe(toHex(u6.unitId));
+  });
+
+  it("links concurrent local writes one after the other (no two units name the same previous)", async () => {
+    const storage = new InMemoryLfcpStorage();
+    const view = linear(records);
+    const base = { view, controlHead: view.state.head, actor: WRITER, dek: DEK0, profile: TEXT };
+    const prevOf = (bytes: Uint8Array) => parseDataUnit(bytes).payload.prevDataUnitId;
+    // Both start before either commits: without serialization both read
+    // "no previous unit" and the second could never link at receivers.
+    const [a, b, c] = await Promise.all(
+      ["one", "two", "three"].map((value) => createQueuedDataUnit(storage, { ...base, value })),
+    );
+    expect(prevOf((a as CreatedDataUnit).bytes)).toBeNull();
+    expect(toHex(prevOf((b as CreatedDataUnit).bytes) as Uint8Array)).toBe(
+      toHex((a as CreatedDataUnit).unitId),
+    );
+    expect(toHex(prevOf((c as CreatedDataUnit).bytes) as Uint8Array)).toBe(
+      toHex((b as CreatedDataUnit).unitId),
+    );
+  });
+
+  it("refuses a local unit when another writer of the same store linked one meanwhile", async () => {
+    const storage = new InMemoryLfcpStorage();
+    const other = new InMemoryLfcpStorage();
+    const view = linear(records);
+    const base = { view, controlHead: view.state.head, actor: WRITER, dek: DEK0, profile: TEXT };
+    const u1 = await createQueuedDataUnit(storage, { ...base, value: "one" });
+    // Another process on the same store (here: the same rows written
+    // directly) links its unit 2 to unit 1 while this writer is between
+    // reading the previous unit and committing.
+    await other.actorSequences.reserveNext(R, WRITER.descriptor.principalId); // its sequence 1 is unit 1
+    const theirs = await createQueuedDataUnit(other, {
+      ...base,
+      previousUnitId: u1.unitId,
+      value: "theirs",
+    });
+    const reserve = storage.actorSequences.reserveNext.bind(storage.actorSequences);
+    storage.actorSequences.reserveNext = async (resource, principal) => {
+      const seq = await reserve(resource, principal);
+      await storage.commit([
+        {
+          op: "put-data-unit",
+          unit: dataUnitRow(theirs.bytes),
+          status: "merged",
+          accepted: true,
+        },
+      ]);
+      return seq;
+    };
+    await expect(createQueuedDataUnit(storage, { ...base, value: "mine" })).rejects.toThrow(
+      "PREVIOUS_UNIT_MISMATCH",
+    );
+    // Nothing of the refused unit was stored or queued; the next write links.
+    expect((await storage.outbound.list(R)).length).toBe(1);
+    storage.actorSequences.reserveNext = reserve;
+    const next = await createQueuedDataUnit(storage, { ...base, value: "mine" });
+    expect(toHex(parseDataUnit(next.bytes).payload.prevDataUnitId as Uint8Array)).toBe(
+      toHex(theirs.unitId),
+    );
   });
 
   it("runs the wire receive pipeline on durable SeenUnits with un-accept", async () => {

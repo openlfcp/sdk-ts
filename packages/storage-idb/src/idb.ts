@@ -290,6 +290,35 @@ export class IdbLfcpStorage implements LfcpStorage {
               }),
             );
         }
+        for (const w of writes) {
+          if (w.op !== "expect-previous-unit") continue;
+          const [r, a] = [hex(w.resourceId), hex(w.actor)];
+          let cursor = await req(
+            tx
+              .objectStore("units")
+              .index("ras")
+              .openCursor(IDBKeyRange.bound([r, a, LOW], [r, a, HIGH]), "prev"),
+          );
+          while (cursor !== null && !(cursor.value as UnitValue).row.accepted) {
+            cursor.continue();
+            cursor = await req(cursor.request as IDBRequest<IDBCursorWithValue | null>);
+          }
+          const current = cursor === null ? null : (cursor.value as UnitValue).row.unitId;
+          const matches =
+            current === null
+              ? w.previous === null
+              : w.previous !== null && bytesEqual(current, w.previous);
+          if (!matches)
+            throw new HeadMismatch(
+              Object.freeze({
+                ok: false,
+                reason: "PREVIOUS_UNIT_MISMATCH",
+                resourceId: own(w.resourceId),
+                actor: own(w.actor),
+                current: current === null ? null : own(current),
+              }),
+            );
+        }
         for (const w of writes) await this.#apply(tx, w);
         return Object.freeze({ ok: true }) as CommitResult;
       });
@@ -339,6 +368,8 @@ export class IdbLfcpStorage implements LfcpStorage {
         if (w.conflict === null) await req(s("conflicts").delete(hex(w.resourceId)));
         else await req(s("conflicts").put(w.conflict, hex(w.resourceId)));
         return;
+      case "expect-previous-unit":
+        return; // a precondition, checked by commit()
       case "put-epoch": {
         const key = `${hex(w.resourceId)}:${pad(BigInt(w.epoch.epoch))}`;
         // A null dekRef or closedBy never clears a stored one (read and write

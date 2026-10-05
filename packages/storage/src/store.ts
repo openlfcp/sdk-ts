@@ -28,7 +28,8 @@ import type { SnapshotSequenceReservation } from "./snapshot-sequence.js";
  *   same ID again with other bytes fails the batch.
  * - ATOMIC BATCHES. Everything that must persist together goes into one
  *   commit(), which applies every write or none, and checks its
- *   preconditions (the expected Control Head) first.
+ *   preconditions (the expected Control Head, a local unit's previous
+ *   unit) first.
  * - SEQUENCE SAFETY. Actor and Snapshot sequences come only from their
  *   reservation contracts (durable before they resolve). A reserved
  *   sequence that a crash leaves unused is abandoned, never reissued, so
@@ -263,6 +264,20 @@ export type StorageWrite =
       readonly epoch: EpochRow;
     }
   | {
+      /**
+       * Compare-and-set for a local unit (§26.2): fails the batch unless
+       * `previous` is still `actor`'s latest unit stored as accepted in the
+       * Resource (null: none). Two writers that read the same previous unit
+       * would otherwise both link to it, and receivers hold the second one
+       * forever (PREV_MISMATCH). Checked with set-control-head, before any
+       * write.
+       */
+      readonly op: "expect-previous-unit";
+      readonly resourceId: ResourceId;
+      readonly actor: PrincipalId;
+      readonly previous: DataUnitId | null;
+    }
+  | {
       /** Stores the unit if new (exact bytes) and sets its status. */
       readonly op: "put-data-unit";
       readonly unit: DataUnitRow;
@@ -306,6 +321,14 @@ export type CommitResult =
       readonly reason: "CONTROL_HEAD_MISMATCH";
       readonly resourceId: ResourceId;
       readonly current: ControlRecordId | null;
+    }
+  /** Nothing was written: another unit of `actor` was accepted since `previous` was read. */
+  | {
+      readonly ok: false;
+      readonly reason: "PREVIOUS_UNIT_MISMATCH";
+      readonly resourceId: ResourceId;
+      readonly actor: PrincipalId;
+      readonly current: DataUnitId | null;
     };
 
 export interface ControlReader {

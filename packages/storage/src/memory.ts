@@ -146,6 +146,8 @@ function apply(s: State, w: StorageWrite): void {
       s.epochs.set(key, epochs);
       return;
     }
+    case "expect-previous-unit":
+      return; // a precondition, checked by commit()
     case "put-data-unit": {
       const old = s.units.get(hex(w.unit.unitId));
       if (old !== undefined && !bytesEqual(old.bytes, w.unit.bytes))
@@ -306,6 +308,33 @@ export class InMemoryLfcpStorage implements LfcpStorage {
             ok: false,
             reason: "CONTROL_HEAD_MISMATCH",
             resourceId: own(w.resourceId),
+            current: current === null ? null : own(current),
+          }),
+        );
+    }
+    for (const w of writes) {
+      if (w.op !== "expect-previous-unit") continue;
+      let latest: StoredDataUnit | undefined;
+      for (const u of next.units.values())
+        if (
+          u.accepted &&
+          bytesEqual(u.resourceId, w.resourceId) &&
+          bytesEqual(u.actor, w.actor) &&
+          (latest === undefined || u.actorSeq > latest.actorSeq)
+        )
+          latest = u;
+      const current = latest?.unitId ?? null;
+      const matches =
+        current === null
+          ? w.previous === null
+          : w.previous !== null && bytesEqual(current, w.previous);
+      if (!matches)
+        return Promise.resolve(
+          Object.freeze({
+            ok: false,
+            reason: "PREVIOUS_UNIT_MISMATCH",
+            resourceId: own(w.resourceId),
+            actor: own(w.actor),
             current: current === null ? null : own(current),
           }),
         );
