@@ -2,6 +2,28 @@
 export const PACKAGE = "@openlfcp/wire";
 
 export {
+  type ControlBody,
+  type ControlBodyType,
+  type ControlRecord,
+  type ControlRecordHeader,
+  controlBodyFromCbor,
+  controlBodyToCbor,
+  controlRecordSigner,
+  controlTypeOf,
+  decodeControlRecord,
+  encodeControlRecordPayload,
+  isMvpSupported,
+  type OwnerTransferAcceptPayload,
+  type OwnerTransferOfferPayload,
+  ownerTransferAcceptPayloadFromCbor,
+  ownerTransferOfferPayloadFromCbor,
+  parseOwnerTransferAccept,
+  parseOwnerTransferOffer,
+  type SignedControlRecord,
+  signControlRecord,
+  verifyGenesis,
+} from "./control.js";
+export {
   COSE_ALG_EDDSA,
   objectId,
   parseSignedObject,
@@ -13,11 +35,19 @@ export {
   type VerifyResult,
   verifySignedObject,
 } from "./cose.js";
-export { type Endpoint, endpointFromCbor } from "./endpoint.js";
+export {
+  checkWriterUrl,
+  ENDPOINT_FLAGS,
+  type Endpoint,
+  endpointFromCbor,
+  endpointToCbor,
+} from "./endpoint.js";
 export {
   type ActorHave,
   actorHaveFromCbor,
+  actorHaveToCbor,
   canonicalFrontierFromCbor,
+  canonicalFrontierToCbor,
   type SequenceRange,
 } from "./have.js";
 export {

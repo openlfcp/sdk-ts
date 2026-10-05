@@ -1,5 +1,5 @@
 import { compareCanonicalFrontierOrder, type PrincipalId, principalId } from "@openlfcp/core";
-import type { CborValue } from "./cbor/index.js";
+import { type CborValue, cborMap } from "./cbor/index.js";
 import { Fields, invalid } from "./fields.js";
 
 /** An inclusive range of actor sequence numbers (§28 `sequence-range`). */
@@ -81,4 +81,32 @@ export function canonicalFrontierFromCbor(value: CborValue): readonly ActorHave[
       invalid("canonical frontier", "entries must be sorted by raw Principal ID (§28.2)");
   }
   return Object.freeze(entries);
+}
+
+/** The canonical CBOR of an actor-have (§28.1): key 2 only when there are ranges. Checked like a received one. */
+export function actorHaveToCbor(have: ActorHave): CborValue {
+  const value = cborMap(
+    have.extras.length === 0
+      ? [
+          [0, have.principalId],
+          [1, have.contiguous],
+        ]
+      : [
+          [0, have.principalId],
+          [1, have.contiguous],
+          [2, have.extras.map(([start, end]) => [start, end])],
+        ],
+  );
+  actorHaveFromCbor(value);
+  return value;
+}
+
+/** A canonical frontier (§28.2): entries sorted by raw Principal ID; duplicates are refused. */
+export function canonicalFrontierToCbor(frontier: readonly ActorHave[]): CborValue {
+  const sorted = [...frontier].sort((a, b) =>
+    compareCanonicalFrontierOrder(a.principalId, b.principalId),
+  );
+  const value = sorted.map(actorHaveToCbor);
+  canonicalFrontierFromCbor(value);
+  return value;
 }

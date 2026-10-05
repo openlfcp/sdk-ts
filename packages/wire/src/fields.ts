@@ -72,4 +72,16 @@ export class Fields {
     if (!Array.isArray(v)) this.fail(key, "must be an array");
     return v as readonly CborValue[];
   }
+
+  /** An array of unsigned integers; `nonEmpty` for CDDL `[1* uint]`. */
+  uintArray(key: number, nonEmpty: boolean): readonly bigint[] {
+    const list = this.array(key);
+    if (nonEmpty && list.length === 0) this.fail(key, "must not be empty");
+    return Object.freeze(
+      list.map((v) => {
+        if ((typeof v === "number" || typeof v === "bigint") && v >= 0) return BigInt(v);
+        return this.fail(key, "must hold unsigned integers only");
+      }),
+    );
+  }
 }

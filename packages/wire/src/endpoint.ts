@@ -1,4 +1,5 @@
-import type { CborValue } from "./cbor/index.js";
+import { LfcpError } from "@openlfcp/core";
+import { type CborValue, cborMap } from "./cbor/index.js";
 import { Fields } from "./fields.js";
 
 /** A sync endpoint (LFCP-WIRE-01 §16). */
@@ -23,4 +24,82 @@ export function endpointFromCbor(value: CborValue): Endpoint {
   const url = f.text(0);
   const priority = f.uint(1);
   return Object.freeze(f.has(2) ? { url, priority, flags: f.uint(2) } : { url, priority });
+}
+
+/** The §16 flag bits LFCP-WIRE-01 defines (0-5); all other bits are reserved. */
+export const ENDPOINT_FLAGS = Object.freeze({
+  DATA_PLANE_STORAGE: 1n << 0n,
+  CONTROL_PLANE_STORAGE: 1n << 1n,
+  SNAPSHOTS: 1n << 2n,
+  PRESENCE: 1n << 3n,
+  PREFERRED_FOR_READS: 1n << 4n,
+  PREFERRED_FOR_WRITES: 1n << 5n,
+});
+const DEFINED_FLAGS = 0b11_1111n;
+const UINT64_MAX = 2n ** 64n - 1n;
+
+function refuse(why: string): never {
+  throw new LfcpError("INVALID_STRUCTURE", `refusing to write an endpoint: ${why}`);
+}
+
+/**
+ * Checks a URL an LFCP writer puts in an endpoint or a coordinator field.
+ * §16 states it as a usage rule ("For non-loopback network communication,
+ * endpoints MUST use wss://"; "ws:// MAY be used for local development or
+ * loopback-only deployments"), not as a receiver check, so only writers
+ * apply it: the decoders keep any text string.
+ *
+ * Accepted: an absolute URI (RFC 3986 §4.3: no fragment) with scheme wss,
+ * or ws on a loopback host (localhost, 127.0.0.0/8, [::1]).
+ */
+export function checkWriterUrl(url: string): void {
+  if (typeof url !== "string") refuse("the URL must be a text string");
+  const control = [...url].some((ch) => {
+    const c = ch.codePointAt(0) as number;
+    return c < 0x20 || c === 0x7f;
+  });
+  if (control || /\s/.test(url)) refuse("the URL contains whitespace or control characters");
+  const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]+)([^#]*)$/.exec(url);
+  if (m === null) refuse("not an absolute URL with an authority and no fragment");
+  const scheme = (m[1] as string).toLowerCase();
+  const authority = m[2] as string;
+  if (authority.includes("@")) refuse("user information is not allowed in the URL");
+  const host = (/^(\[[^\]]*\]|[^:]*)(:\d*)?$/.exec(authority)?.[1] ?? "").toLowerCase();
+  if (host === "") refuse("the URL has no host");
+  const loopback =
+    host === "localhost" || host === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+  if (scheme === "wss") return;
+  if (scheme === "ws" && loopback) return;
+  refuse(
+    scheme === "ws"
+      ? "ws:// is only for loopback hosts; use wss://"
+      : `scheme ${scheme} is not wss`,
+  );
+}
+
+/**
+ * Encodes an endpoint for a record this SDK writes. Writer rules: the URL
+ * passes checkWriterUrl, the priority and flags are uint64, and no
+ * reserved flag bit (6 and up) is set.
+ */
+export function endpointToCbor(endpoint: Endpoint): CborValue {
+  checkWriterUrl(endpoint.url);
+  const uint = (what: string, n: unknown): bigint => {
+    if (typeof n !== "bigint" || n < 0n || n > UINT64_MAX)
+      refuse(`${what} must be a uint64 bigint`);
+    return n;
+  };
+  const priority = uint("the priority", endpoint.priority);
+  if (endpoint.flags === undefined)
+    return cborMap([
+      [0, endpoint.url],
+      [1, priority],
+    ]);
+  const flags = uint("the flags", endpoint.flags);
+  if ((flags & ~DEFINED_FLAGS) !== 0n) refuse("reserved flag bits (6 and up) must not be set");
+  return cborMap([
+    [0, endpoint.url],
+    [1, priority],
+    [2, flags],
+  ]);
 }
