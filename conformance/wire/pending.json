@@ -23,13 +23,6 @@
         "uri/assemble": "LFCP-053"
       }
     },
-    "AUTH": {
-      "reason": "The typed message, deterministic CBOR and the auth proof's COSE signature run here; the transcript and the handshake binding do not.",
-      "parts": {
-        "auth_transcript_cbor/construct": "LFCP-027",
-        "auth_proof_cose_sign1/session-binding": "LFCP-027"
-      }
-    },
     "data_have_reversed_range": {
       "reason": "The message decodes (the reversed range is structurally valid, CDDL pass); §48 (G-MSG6, G-HV1) live-Have validation rejects it.",
       "parts": {

@@ -19,9 +19,11 @@ import {
   resourceId,
 } from "@openlfcp/core";
 import {
+  authTranscript,
   canonicalFrontierFromCbor,
   controlBodyFromCbor,
   dataUnitAad,
+  decodeAuthTranscript,
   decodeControlRecord,
   decodeControlRecordPayload,
   decodeDataUnitPayload,
@@ -143,6 +145,17 @@ const RULES: Readonly<Record<string, (bytes: Uint8Array) => unknown>> = {
   "canonical-frontier": (b) => canonicalFrontierFromCbor(decodeDeterministic(b)),
   "snapshot-payload": decodeSnapshotPayload,
   snapshot: parseSnapshot,
+  // §36: the item must be exactly what authTranscript builds from its fields.
+  "auth-transcript": (b) => {
+    if (!bytesEqual(authTranscript(decodeAuthTranscript(b)), b))
+      throw new Error("not the §36 transcript");
+  },
+  // §36: lfcp-signed<auth-transcript>.
+  "auth-proof": (b) => {
+    const signed = parseSignedObject(b);
+    if (!bytesEqual(authTranscript(decodeAuthTranscript(signed.payloadBytes)), signed.payloadBytes))
+      throw new Error("the payload is not the §36 transcript");
+  },
   // §32: the generic envelope (any type code, untyped body).
   "lfcp-message": decodeEnvelope,
   // §32-§61: a registry type with its typed body.

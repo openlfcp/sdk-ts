@@ -32,9 +32,12 @@ import {
 } from "@openlfcp/crypto";
 import {
   type AnyMessage,
+  type AuthTranscriptFields,
+  authTranscript,
   type ControlPutBody,
   type ControlRecord,
   canonicalFrontierFromCbor,
+  clientReceive,
   type DataProfileCodec,
   dataUnitAad,
   decodeControlRecord,
@@ -74,13 +77,18 @@ import {
   type ReceivedDataUnit,
   receiveDataUnit,
   type Signer,
+  serverReceive,
   signControlRecord,
   signObject,
   sigStructureBytes,
+  startClientHandshake,
+  startServerSession,
   validateControlChain,
+  verifyAuthProof,
   verifyGenesis,
   verifyKeyPackage,
   verifySignedObject,
+  WIRE_PROFILE,
 } from "@openlfcp/wire";
 import {
   type CborValue,
@@ -1037,10 +1045,13 @@ const wireMessage: Handler = (c, context) => {
       checks.push(check("message_cbor/current-head", () => nackCurrentHead(context, m)));
   }
   if (has(e, "auth_transcript_cbor")) {
+    const transcript = hexOf(e, "auth_transcript_cbor");
     checks.push(
-      deterministic("auth_transcript_cbor/deterministic", hexOf(e, "auth_transcript_cbor")),
+      deterministic("auth_transcript_cbor/deterministic", transcript),
+      sameBytes("auth_transcript_cbor/construct", transcript, () =>
+        authTranscript(handshakeFields(context)),
+      ),
     );
-    pending.push("auth_transcript_cbor/construct");
   }
   if (has(e, "auth_proof_cose_sign1")) {
     const proof = hexOf(e, "auth_proof_cose_sign1");
@@ -1054,11 +1065,108 @@ const wireMessage: Handler = (c, context) => {
         kidOf,
         transcript,
       ).checks,
+      check("auth_proof_cose_sign1/session-binding", () => {
+        if (message?.type !== "AUTH") return "the message is not an AUTH";
+        if (!bytesEqual(message.body.proof, proof)) return "the AUTH body does not carry the proof";
+        const hello = handshakeMessage(context, "HELLO");
+        const v = verifyAuthProof(proof, handshakeFields(context), hello.body.principal);
+        return v.valid || `the proof does not bind this session: ${v.reason}`;
+      }),
+      check("handshake/replay", () => replayHandshake(context)),
     );
-    pending.push("auth_proof_cose_sign1/session-binding");
   }
   return { checks, pending };
 };
+
+/** The published handshake message of `type` (one each of HELLO, CHALLENGE, AUTH, READY). */
+function handshakeMessage<T extends "HELLO" | "CHALLENGE" | "AUTH" | "READY">(
+  context: HandlerContext,
+  type: T,
+): LfcpMessage<T> {
+  for (const c of context.suite.cases) {
+    if (c.type !== "bytes" || c.kind !== "wire_message") continue;
+    const m = decodeMessage(hexOf(c.expected, "message_cbor"));
+    if (m.type === type) return m as LfcpMessage<T>;
+  }
+  throw new Error(`the suite has no ${type} message`);
+}
+
+/** The §36 transcript fields of the published handshake: HELLO's nonce and Principal, CHALLENGE's values. */
+function handshakeFields(context: HandlerContext): AuthTranscriptFields {
+  const hello = handshakeMessage(context, "HELLO").body;
+  const challenge = handshakeMessage(context, "CHALLENGE").body;
+  return {
+    sessionId: challenge.sessionId,
+    clientNonce: hello.clientNonce,
+    serverNonce: challenge.serverNonce,
+    serverId: challenge.serverId,
+    principalId: hello.principal.principalId,
+  };
+}
+
+/**
+ * LFCP-027: the published HELLO, CHALLENGE, AUTH and READY re-created by
+ * the pure client and server handshakes, byte for byte once the vectors'
+ * message IDs are substituted. The nonces and session ID come from a
+ * test-only random source that returns the published values; the server ID
+ * and READY parameters are the server's configuration.
+ */
+function replayHandshake(context: HandlerContext): true | string {
+  const published = {
+    HELLO: handshakeMessage(context, "HELLO"),
+    CHALLENGE: handshakeMessage(context, "CHALLENGE"),
+    AUTH: handshakeMessage(context, "AUTH"),
+    READY: handshakeMessage(context, "READY"),
+  };
+  const queue =
+    (...values: Uint8Array[]) =>
+    () => {
+      const next = values.shift();
+      if (next === undefined) throw new Error("the replay asked for more random bytes");
+      return next;
+    };
+  const signer = signerFor(context, published.HELLO.body.principal.principalId);
+  const ready = published.READY.body;
+  const client = {
+    signer,
+    wireProfiles: published.HELLO.body.wireProfiles,
+    ...(published.HELLO.body.dataProfiles
+      ? { dataProfiles: published.HELLO.body.dataProfiles }
+      : {}),
+    random: queue(published.HELLO.body.clientNonce),
+  };
+  const server = {
+    serverId: published.CHALLENGE.body.serverId,
+    wireProfiles: [WIRE_PROFILE],
+    maxMessageBytes: ready.maxMessageBytes,
+    durability: ready.durability,
+    heartbeatMs: ready.heartbeatMs,
+    ...(ready.extensions ? { extensions: ready.extensions } : {}),
+    random: queue(published.CHALLENGE.body.serverNonce, published.CHALLENGE.body.sessionId),
+  };
+  const same = (ours: AnyMessage | undefined, theirs: AnyMessage): boolean =>
+    ours !== undefined &&
+    bytesEqual(
+      encodeMessage({
+        ...ours,
+        messageId: theirs.messageId,
+        ...(theirs.correlationId ? { correlationId: theirs.correlationId } : {}),
+      } as AnyMessage),
+      encodeMessage(theirs),
+    );
+  const start = startClientHandshake(client);
+  if (!same(start.send[0], published.HELLO)) return "HELLO differs";
+  const s1 = serverReceive(startServerSession(), published.HELLO, server);
+  if (!same(s1.send[0], published.CHALLENGE)) return "CHALLENGE differs";
+  const c1 = clientReceive(start.session, published.CHALLENGE, client);
+  if (!same(c1.send[0], published.AUTH)) return "AUTH differs";
+  const s2 = serverReceive(s1.session, published.AUTH, server);
+  if (!same(s2.send[0], published.READY)) return "READY differs";
+  const c2 = clientReceive(c1.session, published.READY, client);
+  if (s2.session.phase !== "READY" || c2.session.phase !== "READY")
+    return "the handshake did not reach READY on both sides";
+  return true;
+}
 
 /**
  * G-MSG5: the NACK correlates to a CONTROL_PUT vector that expects
