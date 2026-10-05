@@ -6,6 +6,9 @@
       "path": "packages/core"
     },
     {
+      "path": "packages/crypto"
+    },
+    {
       "path": "packages/wire"
     },
     {

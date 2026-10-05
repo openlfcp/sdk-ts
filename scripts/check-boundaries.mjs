@@ -25,12 +25,13 @@ import ts from "typescript";
 // Allowed @openlfcp/* edges. Nothing may depend on client.
 export const ALLOWED = {
   core: [],
+  crypto: ["core"],
   wire: ["core"],
   storage: ["core"],
   "shared-objects": ["core"],
   client: ["core", "wire", "storage"],
 };
-const PORTABLE = new Set(["core", "wire", "storage", "shared-objects", "client"]);
+const PORTABLE = new Set(["core", "crypto", "wire", "storage", "shared-objects", "client"]);
 const NODE_GLOBALS = new Set([
   "process",
   "Buffer",
