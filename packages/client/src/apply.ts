@@ -4,26 +4,22 @@ import {
   bytesEqual,
   type DataEpoch,
   type DataUnitId,
-  dataUnitId,
   type PrincipalId,
   type ResourceId,
-  toHex,
 } from "@openlfcp/core";
 import type { ResourceDEK } from "@openlfcp/crypto";
+import type { DataUnitRow, DataUnitStatus, LfcpStorage, StorageWrite } from "@openlfcp/storage";
 import {
   type ControlView,
   checkDataUnit,
   classifyDataUnit,
   type DataProfileCodec,
   type DataUnitCheckOptions,
-  type DataUnitHeader,
-  type DataUnitPayload,
   type DataUnitQuarantined,
-  parseDataUnit,
   type ReceivedDataUnit,
   receiveDataUnit,
-  type SeenUnits,
 } from "@openlfcp/wire";
+import { dataUnitRow, StoredSeenUnits } from "./storage.js";
 
 /**
  * Applying received Data Units to the Resource's Data Profile (LFCP-033).
@@ -110,76 +106,6 @@ export interface DataProfileHandler<T> {
   exclude(unitIds: readonly DataUnitId[]): ProfileExcludeResult;
 }
 
-/** Where a unit stands for this receiver. */
-export type UnitStatus =
-  | "merged"
-  | "profile-pending"
-  | "held"
-  | "quarantined"
-  | "equivocation"
-  | "local-failure"
-  | "profile-rejected"
-  | "profile-unsupported";
-
-/** One signature-valid unit: its exact bytes, header and status. */
-export interface UnitRecord {
-  readonly unitId: DataUnitId;
-  /** The exact signed bytes, kept whatever the profile state (§10.6). */
-  readonly bytes: Uint8Array;
-  readonly header: DataUnitHeader;
-  readonly dataProfile: string;
-  readonly status: UnitStatus;
-  readonly detail?: string;
-}
-
-/**
- * The receiver's record of the units it verified. Durable implementations
- * are storage work (LFCP-034 to LFCP-036).
- */
-export interface UnitLedger {
-  /** Records a unit or changes its status; the bytes of a unit never change. */
-  put(record: UnitRecord): Promise<void>;
-  get(unitId: DataUnitId): Promise<UnitRecord | undefined>;
-  withStatus(status: UnitStatus): Promise<UnitRecord[]>;
-  /** Held units of (resource, actor, seq). */
-  heldAt(resource: ResourceId, actor: PrincipalId, seq: ActorSequence): Promise<UnitRecord[]>;
-}
-
-/**
- * FOR TESTS AND DEVELOPMENT ONLY: everything is lost on restart, including
- * the exact bytes of held and quarantined units.
- */
-export class InMemoryUnitLedger implements UnitLedger {
-  readonly #records = new Map<string, UnitRecord>();
-
-  put(record: UnitRecord): Promise<void> {
-    const old = this.#records.get(toHex(record.unitId));
-    const bytes = old?.bytes ?? Uint8Array.from(record.bytes);
-    this.#records.set(toHex(record.unitId), Object.freeze({ ...record, bytes }));
-    return Promise.resolve();
-  }
-
-  get(unitId: DataUnitId): Promise<UnitRecord | undefined> {
-    return Promise.resolve(this.#records.get(toHex(unitId)));
-  }
-
-  withStatus(status: UnitStatus): Promise<UnitRecord[]> {
-    return Promise.resolve([...this.#records.values()].filter((r) => r.status === status));
-  }
-
-  heldAt(resource: ResourceId, actor: PrincipalId, seq: ActorSequence): Promise<UnitRecord[]> {
-    return Promise.resolve(
-      [...this.#records.values()].filter(
-        (r) =>
-          r.status === "held" &&
-          r.header.actorSeq === seq &&
-          bytesEqual(r.header.actor, actor) &&
-          bytesEqual(r.header.resourceId, resource),
-      ),
-    );
-  }
-}
-
 interface Applied {
   readonly unitId: DataUnitId;
   readonly dataProfile: string;
@@ -188,7 +114,8 @@ interface Applied {
   readonly epoch: DataEpoch;
   /**
    * Whether the unit may be advertised in Haves. Always false here: a unit
-   * is advertised only once durable storage keeps it (LFCP-036).
+   * is advertised only once the sync layer knows its storage is durable
+   * (LFCP-036).
    */
   readonly haveEligible: false;
   /** Buffered units this one unblocked, merged now. */
@@ -240,22 +167,17 @@ export interface EpochReconciliation {
 }
 
 export interface DataUnitApplierOptions extends DataUnitCheckOptions {
-  readonly seen: SeenUnits;
-  /** The DEK of a Data Epoch, if this client holds it (from a Key Package, LFCP-024). */
+  /**
+   * Where verified units, their exact bytes, statuses and the accepted
+   * marks live (the wire SeenUnits runs on it). InMemoryLfcpStorage for
+   * tests and development only.
+   */
+  readonly storage: Pick<LfcpStorage, "dataUnits" | "commit">;
+  /** The DEK of a Data Epoch, if this client holds it (e.g. dekResolver). */
   readonly dek: (epoch: DataEpoch) => ResourceDEK | undefined | Promise<ResourceDEK | undefined>;
   /** The profiles this client implements. */
   readonly handlers: readonly DataProfileHandler<unknown>[];
-  /** Defaults to an InMemoryUnitLedger (tests and development only). */
-  readonly ledger?: UnitLedger;
 }
-
-const headerOf = (p: DataUnitPayload): DataUnitHeader => ({
-  resourceId: p.resourceId,
-  dataEpoch: p.dataEpoch,
-  actor: p.actor,
-  actorSeq: p.actorSeq,
-  controlHead: p.controlHead,
-});
 
 /** A codec for bytes that do not parse: receiveDataUnit rejects them before any decode. */
 const unreachableCodec = (dataProfile: string): DataProfileCodec<never> => ({
@@ -271,12 +193,20 @@ const unreachableCodec = (dataProfile: string): DataProfileCodec<never> => ({
 export class DataUnitApplier {
   readonly #options: DataUnitApplierOptions;
   readonly #handlers: ReadonlyMap<string, DataProfileHandler<unknown>>;
-  readonly ledger: UnitLedger;
+  readonly #storage: Pick<LfcpStorage, "dataUnits" | "commit">;
+  readonly #seen: StoredSeenUnits;
 
   constructor(options: DataUnitApplierOptions) {
     this.#options = options;
     this.#handlers = new Map(options.handlers.map((h) => [h.dataProfile, h]));
-    this.ledger = options.ledger ?? new InMemoryUnitLedger();
+    this.#storage = options.storage;
+    this.#seen = new StoredSeenUnits(options.storage);
+  }
+
+  async #write(writes: readonly StorageWrite[]): Promise<void> {
+    if (writes.length === 0) return;
+    const r = await this.#storage.commit(writes);
+    if (!r.ok) throw new Error(`unexpected storage precondition failure: ${r.reason}`);
   }
 
   /**
@@ -285,58 +215,51 @@ export class DataUnitApplier {
    */
   async receive(view: ControlView, bytes: Uint8Array): Promise<ApplyOutcome> {
     const dataProfile = view.state.dataProfile;
+    let row: DataUnitRow | undefined;
+    try {
+      row = dataUnitRow(bytes);
+      this.#seen.expect(row);
+    } catch {
+      row = undefined; // receiveDataUnit reports it as MALFORMED_MESSAGE
+    }
     const handler = this.#handlers.get(dataProfile);
     if (handler === undefined) return this.#unsupported(view, bytes, dataProfile);
 
-    let payload: DataUnitPayload | undefined;
-    try {
-      payload = parseDataUnit(bytes).payload;
-    } catch {
-      payload = undefined; // receiveDataUnit reports it as MALFORMED_MESSAGE
-    }
     const codec =
-      payload === undefined
+      row === undefined
         ? unreachableCodec(dataProfile)
-        : handler.codecFor({ resourceId: payload.resourceId, actor: payload.actor });
-    const r = await receiveDataUnit(view, bytes, { ...this.#options, profile: codec });
-    const record = (status: UnitStatus, detail?: string) =>
-      payload === undefined || !("unitId" in r)
-        ? Promise.resolve()
-        : this.ledger.put({
-            unitId: r.unitId as DataUnitId,
-            bytes,
-            header: headerOf(payload),
-            dataProfile,
-            status,
-            ...(detail === undefined ? {} : { detail }),
-          });
+        : handler.codecFor({ resourceId: row.resourceId, actor: row.actor });
+    const r = await receiveDataUnit(view, bytes, {
+      ...this.#options,
+      seen: this.#seen,
+      profile: codec,
+    });
+    const status = (unitId: DataUnitId, s: DataUnitStatus, detail?: string): StorageWrite => ({
+      op: "set-data-unit-status",
+      unitId,
+      status: s,
+      ...(detail === undefined ? {} : { detail }),
+    });
 
     switch (r.kind) {
       case "accepted":
-        return this.#apply(view, handler, r, record);
+        return this.#apply(view, handler, r);
       case "held":
-        await record("held", r.reason);
+        await this.#write([status(r.unitId, "held", r.reason)]);
         return r;
       case "quarantined":
-        await record("quarantined", r.reason);
+        await this.#write([status(r.unitId, "quarantined", r.reason)]);
         return r;
       case "local-failure":
-        await record("local-failure", `${r.reason}: ${r.message}`);
+        await this.#write([status(r.unitId, "local-failure", `${r.reason}: ${r.message}`)]);
         return r;
       case "equivocation":
         // Never merged and no winner chosen: this unit is kept as evidence,
         // and every ID (and the one merged earlier, if any) is surfaced.
-        if (payload !== undefined)
-          await this.ledger.put({
-            unitId: parseDataUnitId(bytes),
-            bytes,
-            header: headerOf(payload),
-            dataProfile,
-            status: "equivocation",
-          });
+        if (row !== undefined) await this.#write([status(row.unitId, "equivocation")]);
         return r;
       default:
-        return r; // duplicate (harmless replay) or rejected (not kept)
+        return r; // duplicate (harmless replay) or rejected (never stored)
     }
   }
 
@@ -344,7 +267,6 @@ export class DataUnitApplier {
     view: ControlView,
     handler: DataProfileHandler<unknown>,
     r: Extract<ReceivedDataUnit<unknown>, { kind: "accepted" }>,
-    record: (status: UnitStatus, detail?: string) => Promise<void>,
   ): Promise<ApplyOutcome> {
     const dataProfile = handler.dataProfile;
     let result: ProfileApplyResult;
@@ -362,7 +284,14 @@ export class DataUnitApplier {
     } catch (e) {
       const code = (e as { code?: unknown }).code;
       const message = e instanceof Error ? e.message : String(e);
-      await record("profile-rejected", message);
+      await this.#write([
+        {
+          op: "set-data-unit-status",
+          unitId: r.unitId,
+          status: "profile-rejected",
+          detail: message,
+        },
+      ]);
       return Object.freeze({
         kind: "profile-rejected",
         unitId: r.unitId,
@@ -372,19 +301,28 @@ export class DataUnitApplier {
       });
     }
     const mergedNow = result.merged.some((id) => bytesEqual(id, r.unitId));
-    await record(mergedNow ? "merged" : "profile-pending", result.pending);
     const alsoMerged = result.merged.filter((id) => !bytesEqual(id, r.unitId));
-    for (const id of alsoMerged) {
-      const other = await this.ledger.get(id);
-      if (other !== undefined) await this.ledger.put({ ...other, status: "merged" });
-    }
+    await this.#write([
+      mergedNow
+        ? { op: "set-data-unit-status", unitId: r.unitId, status: "merged" }
+        : {
+            op: "set-data-unit-status",
+            unitId: r.unitId,
+            status: "profile-pending",
+            detail: result.pending ?? "buffered by the profile",
+          },
+      ...alsoMerged.map(
+        (unitId): StorageWrite => ({ op: "set-data-unit-status", unitId, status: "merged" }),
+      ),
+    ]);
     // §26.2, G-DP1: a held unit of this actor at seq + 1 may link now.
-    const released: ApplyOutcome[] = [];
-    for (const held of await this.ledger.heldAt(
+    const next = await this.#storage.dataUnits.at(
       view.state.resourceId,
       r.actor,
       actorSequence(r.seq + 1n),
-    ))
+    );
+    const released: ApplyOutcome[] = [];
+    for (const held of next.filter((u) => u.status === "held"))
       released.push(await this.receive(view, held.bytes));
     const base = {
       unitId: r.unitId,
@@ -398,8 +336,17 @@ export class DataUnitApplier {
     };
     return Object.freeze(
       mergedNow
-        ? { ...base, kind: "applied", objects: result.objects, diagnostics: result.diagnostics }
-        : { ...base, kind: "profile-pending", detail: result.pending ?? "buffered by the profile" },
+        ? {
+            ...base,
+            kind: "applied",
+            objects: result.objects,
+            diagnostics: result.diagnostics,
+          }
+        : {
+            ...base,
+            kind: "profile-pending",
+            detail: result.pending ?? "buffered by the profile",
+          },
     );
   }
 
@@ -409,15 +356,11 @@ export class DataUnitApplier {
     dataProfile: string,
   ): Promise<ApplyOutcome> {
     // DEK-free checks only: the plaintext of an unknown profile is never decrypted.
-    const c = await checkDataUnit(view, bytes, this.#options.seen, this.#options);
+    const c = await checkDataUnit(view, bytes, this.#seen, this.#options);
     if (c.kind !== "valid") return c;
-    await this.ledger.put({
-      unitId: c.unitId,
-      bytes,
-      header: headerOf(c.parsed.payload),
-      dataProfile,
-      status: "profile-unsupported",
-    });
+    await this.#write([
+      { op: "set-data-unit-status", unitId: c.unitId, status: "profile-unsupported" },
+    ]);
     return Object.freeze({
       kind: "profile-unsupported",
       code: "PROFILE_UNSUPPORTED",
@@ -431,19 +374,21 @@ export class DataUnitApplier {
    * every newly validated Control view that may carry a new Key Epoch.
    * Merged (or profile-buffered) units that the view now puts beyond an
    * epoch cutoff are taken out of the profile state, which is rebuilt from
-   * the remaining accepted units, and are quarantined (STALE_DATA_EPOCH).
+   * the remaining accepted units; they are quarantined (STALE_DATA_EPOCH)
+   * and un-accepted.
    */
   async reconcileEpochs(view: ControlView): Promise<EpochReconciliation> {
     const handler = this.#handlers.get(view.state.dataProfile);
     const empty: EpochReconciliation = Object.freeze({ excluded: [], objects: [], pending: [] });
     if (handler === undefined) return empty;
+    const resource = view.state.resourceId;
     const candidates = [
-      ...(await this.ledger.withStatus("merged")),
-      ...(await this.ledger.withStatus("profile-pending")),
-    ].filter((u) => bytesEqual(u.header.resourceId, view.state.resourceId));
+      ...(await this.#storage.dataUnits.withStatus(resource, "merged")),
+      ...(await this.#storage.dataUnits.withStatus(resource, "profile-pending")),
+    ].filter((u) => u.accepted);
     const excluded: ExcludedUnit[] = [];
     for (const u of candidates) {
-      const c = classifyDataUnit(view, u.header);
+      const c = classifyDataUnit(view, u);
       if (c.kind === "quarantine")
         excluded.push({
           unitId: u.unitId,
@@ -452,19 +397,25 @@ export class DataUnitApplier {
     }
     if (excluded.length === 0) return empty;
     const result = handler.exclude(excluded.map((e) => e.unitId));
-    for (const e of excluded) {
-      const u = (await this.ledger.get(e.unitId)) as UnitRecord;
-      await this.ledger.put({ ...u, status: "quarantined", detail: e.quarantine.reason });
-    }
-    for (const id of result.pending) {
-      const u = await this.ledger.get(id);
-      if (u !== undefined && u.status === "merged")
-        await this.ledger.put({
-          ...u,
+    await this.#write([
+      ...excluded.flatMap((e): StorageWrite[] => [
+        {
+          op: "set-data-unit-status",
+          unitId: e.unitId,
+          status: "quarantined",
+          detail: e.quarantine.reason,
+        },
+        { op: "set-accepted", unitId: e.unitId, accepted: false },
+      ]),
+      ...result.pending.map(
+        (unitId): StorageWrite => ({
+          op: "set-data-unit-status",
+          unitId,
           status: "profile-pending",
           detail: "builds on an excluded unit",
-        });
-    }
+        }),
+      ),
+    ]);
     return Object.freeze({
       excluded: Object.freeze(excluded),
       objects: result.objects,
@@ -472,6 +423,3 @@ export class DataUnitApplier {
     });
   }
 }
-
-const parseDataUnitId = (bytes: Uint8Array): DataUnitId =>
-  dataUnitId(parseDataUnit(bytes).signed.id);

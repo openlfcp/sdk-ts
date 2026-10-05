@@ -44,11 +44,11 @@ import {
   setTitle,
   type Task,
 } from "@openlfcp/shared-objects";
+import { InMemoryLfcpStorage } from "@openlfcp/storage";
 import {
   type ChainResult,
   type ControlBody,
   type DataProfileCodec,
-  InMemorySeenUnits,
   principalDescriptorFromKeys,
   rotateEpoch,
   type Signer,
@@ -204,15 +204,16 @@ function receiver(chain: Chain, who: Signer = READER) {
     ["0", DEK0],
     ["1", DEK1],
   ]);
+  const storage = new InMemoryLfcpStorage();
   const applier = new DataUnitApplier({
-    seen: new InMemorySeenUnits(),
+    storage,
     dek: (epoch) => {
       counts.dek++;
       return deks.get(String(epoch));
     },
     handlers: [handler as DataProfileHandler<unknown>],
   });
-  return { applier, profile, counts };
+  return { applier, profile, counts, storage };
 }
 
 /** Alice's Resource: the owner initializes it, Alice creates a Task; their two units. */
@@ -291,7 +292,7 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
 
   it("4. a second unit for one (resource, actor, seq) is equivocation: surfaced, not merged, no winner", async () => {
     const { chain, initUnit, createUnit, alice } = await resource();
-    const { applier, profile, counts } = receiver(chain);
+    const { applier, profile, counts, storage } = receiver(chain);
     const view = chain.view();
     for (const u of [initUnit, createUnit]) await applier.receive(view, u.bytes);
     // Alice's lost-state twin reuses her sequence 1 with other content.
@@ -316,7 +317,7 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
     }
     expect(counts.apply).toBe(applies);
     expect(profile.replica.objectIds()).toEqual([TASK_A]);
-    expect((await applier.ledger.get(forged.unitId))?.status).toBe("equivocation");
+    expect((await storage.dataUnits.get(forged.unitId))?.status).toBe("equivocation");
   });
 
   it("5, 6, 8. invalid signature, missing data/write and AEAD failure never reach the profile", async () => {
@@ -372,7 +373,7 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
       setStatus(taskOf(alice.replica), "in_progress").intent,
     ) as LocalChange;
     const lateUnit = await alice.send(late); // epoch 0, sequence 2: beyond the frontier
-    const { applier, counts } = receiver(chain);
+    const { applier, counts, storage } = receiver(chain);
     const rotated = chain.view([rotation.bytes]);
     for (const u of [initUnit, createUnit]) await applier.receive(rotated, u.bytes);
     const applies = counts.apply;
@@ -383,7 +384,7 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
       reason: "BEYOND_CUTOFF",
     });
     expect(counts.apply).toBe(applies);
-    expect((await applier.ledger.get(lateUnit.unitId))?.status).toBe("quarantined");
+    expect((await storage.dataUnits.get(lateUnit.unitId))?.status).toBe("quarantined");
   });
 
   it("9. a Resource of an unknown Data Profile is PROFILE_UNSUPPORTED, never decrypted", async () => {
@@ -400,19 +401,19 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
       checkChange(SharedObjectsReplica.create(owner.options()).change.change),
       { codec: opaque },
     );
-    const { applier, counts } = receiver(chain);
+    const { applier, counts, storage } = receiver(chain);
     expect(await applier.receive(chain.view(), u.bytes)).toMatchObject({
       kind: "profile-unsupported",
       code: "PROFILE_UNSUPPORTED",
       dataProfile: "org.example.unknown.v1",
     });
     expect(counts).toEqual({ apply: 0, dek: 0 });
-    expect((await applier.ledger.get(u.unitId))?.bytes).toEqual(u.bytes);
+    expect((await storage.dataUnits.get(u.unitId))?.bytes).toEqual(u.bytes);
   });
 
   it("10, 11, 14. bad framing or Automerge bytes are rejected, not merged, and the exact unit is kept", async () => {
     const { chain, initUnit, alice } = await resource();
-    const { applier, profile, counts } = receiver(chain);
+    const { applier, profile, counts, storage } = receiver(chain);
     const view = chain.view();
     await applier.receive(view, initUnit.bytes);
     const raw = (plaintext: Uint8Array): DataProfileCodec<CheckedChange> => ({
@@ -432,7 +433,7 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
         kind: "local-failure",
         reason: "PROFILE_REJECTED",
       });
-      const kept = await applier.ledger.get(u.unitId);
+      const kept = await storage.dataUnits.get(u.unitId);
       expect([kept?.status, kept?.bytes]).toEqual(["local-failure", u.bytes]);
     }
     expect(counts.apply).toBe(1);
@@ -492,15 +493,15 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
     const tagged = await bob.send(
       bob.replica.apply(addTag(taskOf(bob.replica), "backend").intent) as LocalChange,
     );
-    const { applier, profile } = receiver(chain);
+    const { applier, profile, storage } = receiver(chain);
     const view = chain.view();
     await applier.receive(view, initUnit.bytes);
     const early = await applier.receive(view, tagged.bytes);
     expect(early).toMatchObject({ kind: "profile-pending", haveEligible: false });
-    expect((await applier.ledger.get(tagged.unitId))?.status).toBe("profile-pending");
+    expect((await storage.dataUnits.get(tagged.unitId))?.status).toBe("profile-pending");
     const r = await applier.receive(view, createUnit.bytes);
     expect(r.kind === "applied" && r.alsoMerged.map(toHex)).toEqual([toHex(tagged.unitId)]);
-    expect((await applier.ledger.get(tagged.unitId))?.status).toBe("merged");
+    expect((await storage.dataUnits.get(tagged.unitId))?.status).toBe("merged");
     expect(profile.replica.task(TASK_A)?.tags).toEqual(["backend"]);
     expect(profile.pendingUnits()).toEqual([]);
   });
@@ -554,7 +555,7 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
     const d = await alice.send(
       alice.replica.apply(setStatus(taskOf(alice.replica), "done").intent) as LocalChange,
     );
-    const { applier, profile } = receiver(chain);
+    const { applier, profile, storage } = receiver(chain);
     const view = chain.view();
     for (const u of [initUnit, createUnit, d])
       expect(await applier.receive(view, u.bytes)).toMatchObject({ kind: "applied" });
@@ -582,7 +583,7 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
     expect(notified).toEqual([
       expect.objectContaining({ objectId: TASK_A, fields: ["status"], origin: "rebuild" }),
     ]);
-    expect((await applier.ledger.get(d.unitId))?.status).toBe("quarantined");
+    expect((await storage.dataUnits.get(d.unitId))?.status).toBe("quarantined");
     // Idempotent: nothing more to exclude.
     expect((await applier.reconcileEpochs(chain.view([rotation.bytes]))).excluded).toEqual([]);
   });
@@ -622,7 +623,7 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
       return seed / 0x80000000;
     };
     for (let run = 0; run < 25; run++) {
-      const { applier, profile, counts } = receiver(chain);
+      const { applier, profile, counts, storage } = receiver(chain);
       // Every unit at least once, with replays, in a random order.
       const deliveries = [...units, ...units.filter(() => random() < 0.5)];
       for (let i = deliveries.length - 1; i > 0; i--) {
@@ -634,7 +635,9 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
       }
       for (const u of deliveries) await applier.receive(view, u.bytes);
       expect(counts.apply).toBe(units.length);
-      expect((await applier.ledger.withStatus("merged")).length).toBe(units.length);
+      expect((await storage.dataUnits.withStatus(chain.resource, "merged")).length).toBe(
+        units.length,
+      );
       expect(profile.replica.root()).toEqual(reference.root());
       for (const u of units)
         expect(await applier.receive(view, u.bytes)).toMatchObject({ kind: "duplicate" });

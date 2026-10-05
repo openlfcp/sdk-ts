@@ -8,14 +8,19 @@ export {
   type DataUnitApplierOptions,
   type EpochReconciliation,
   type ExcludedUnit,
-  InMemoryUnitLedger,
   type ProfileApplyResult,
   type ProfileDiagnostic,
   type ProfileExcludeResult,
   type ProfileUnit,
-  type UnitLedger,
-  type UnitRecord,
-  type UnitStatus,
 } from "./apply.js";
 export { type CreateDataUnitOptions, type CreatedDataUnit, createDataUnit } from "./data-unit.js";
 export { type CreatedSnapshot, type CreateSnapshotOptions, createSnapshot } from "./snapshot.js";
+export {
+  createQueuedDataUnit,
+  dataUnitRow,
+  dekResolver,
+  loadControlChain,
+  StoredSeenUnits,
+  saveControlChain,
+  saveControlConflict,
+} from "./storage.js";

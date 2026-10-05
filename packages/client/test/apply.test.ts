@@ -11,12 +11,11 @@ import {
   importResourceDEK,
   importSigningKey,
 } from "@openlfcp/crypto";
-import { InMemoryActorSequenceReservation } from "@openlfcp/storage";
+import { InMemoryActorSequenceReservation, InMemoryLfcpStorage } from "@openlfcp/storage";
 import {
   type ChainResult,
   type ControlBody,
   type DataProfileCodec,
-  InMemorySeenUnits,
   principalDescriptorFromKeys,
   type Signer,
   signControlRecord,
@@ -107,8 +106,9 @@ async function units(...values: string[]) {
 describe("DataUnitApplier (profile-agnostic)", () => {
   it("dispatches accepted units to the Resource's profile once, and replays are duplicates", async () => {
     const merged: string[] = [];
+    const storage = new InMemoryLfcpStorage();
     const applier = new DataUnitApplier({
-      seen: new InMemorySeenUnits(),
+      storage,
       dek: () => DEK0,
       handlers: [textHandler(merged) as DataProfileHandler<unknown>],
     });
@@ -129,8 +129,9 @@ describe("DataUnitApplier (profile-agnostic)", () => {
 
   it("reports a profile refusal as profile-rejected and keeps the exact unit", async () => {
     const merged: string[] = [];
+    const storage = new InMemoryLfcpStorage();
     const applier = new DataUnitApplier({
-      seen: new InMemorySeenUnits(),
+      storage,
       dek: () => DEK0,
       handlers: [textHandler(merged) as DataProfileHandler<unknown>],
     });
@@ -140,7 +141,7 @@ describe("DataUnitApplier (profile-agnostic)", () => {
       kind: "profile-rejected",
       code: "TEXT_REFUSED",
     });
-    const kept = await applier.ledger.get(unit.unitId);
+    const kept = await storage.dataUnits.get(unit.unitId);
     expect([kept?.status, toHex(kept?.bytes ?? new Uint8Array())]).toEqual([
       "profile-rejected",
       toHex(unit.bytes),
@@ -150,8 +151,9 @@ describe("DataUnitApplier (profile-agnostic)", () => {
 
   it("verifies a unit of an unsupported profile without a DEK", async () => {
     let deks = 0;
+    const storage = new InMemoryLfcpStorage();
     const applier = new DataUnitApplier({
-      seen: new InMemorySeenUnits(),
+      storage,
       dek: () => {
         deks++;
         return DEK0;

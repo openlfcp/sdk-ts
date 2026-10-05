@@ -1,0 +1,203 @@
+import { type ControlRecordId, dataEpoch, hash32, resourceId, toHex } from "@openlfcp/core";
+import {
+  dekCommitment,
+  importAgreementKey,
+  importResourceDEK,
+  importSigningKey,
+} from "@openlfcp/crypto";
+import {
+  dekSecretRef,
+  type EpochRow,
+  InMemoryLfcpStorage,
+  InMemorySecretStore,
+} from "@openlfcp/storage";
+import {
+  type ChainResult,
+  type ControlBody,
+  type DataProfileCodec,
+  principalDescriptorFromKeys,
+  receiveDataUnit,
+  rotateEpoch,
+  type Signer,
+  signControlRecord,
+  validateControlChain,
+} from "@openlfcp/wire";
+import { describe, expect, it } from "vitest";
+import {
+  createQueuedDataUnit,
+  dataUnitRow,
+  dekResolver,
+  loadControlChain,
+  StoredSeenUnits,
+  saveControlChain,
+  saveControlConflict,
+} from "../src/index.js";
+
+// Client code over the storage interfaces (LFCP-034), on the in-memory
+// adapter (tests and development only).
+
+const bytes32 = (from: number) => Uint8Array.from({ length: 32 }, (_, i) => (from + i) & 0xff);
+const signer = (seed: number): Signer => {
+  const key = importSigningKey(bytes32(seed));
+  return {
+    key,
+    descriptor: principalDescriptorFromKeys(key, importAgreementKey(bytes32(seed + 100))),
+  };
+};
+const OWNER = signer(1);
+const WRITER = signer(33);
+const R = resourceId(bytes32(200));
+const PROFILE = "org.example.text.v1";
+const DEK0 = importResourceDEK(bytes32(90));
+const DEK1 = importResourceDEK(bytes32(91));
+
+const records: Uint8Array[] = [];
+let head: ControlRecordId | null = null;
+function add(body: ControlBody) {
+  const s = signControlRecord(
+    { resourceId: R, controlSeq: BigInt(records.length), prevControlId: head },
+    body,
+    OWNER,
+  );
+  records.push(s.bytes);
+  head = s.recordId;
+}
+add({
+  type: "GENESIS",
+  dataProfile: PROFILE,
+  owner: OWNER.descriptor,
+  dekCommitment: dekCommitment(R, dataEpoch(0n), DEK0),
+  endpoints: [{ url: "wss://a.example.test", priority: 0n }],
+  coordinatorUrl: "wss://a.example.test",
+});
+add({ type: "CAPABILITY_GRANT", subject: WRITER.descriptor, abilities: [1n, 2n], delegable: [] });
+
+type Linear = Extract<ChainResult, { kind: "linear" }>;
+const linear = (list: readonly Uint8Array[]): Linear => {
+  const r = validateControlChain(list);
+  if (r.kind !== "linear") throw new Error(r.kind);
+  return r;
+};
+const ascii = (s: string) => Uint8Array.from(s, (c) => c.charCodeAt(0));
+const TEXT: DataProfileCodec<string> = {
+  dataProfile: PROFILE,
+  encode: ascii,
+  decode: (p) => String.fromCharCode(...p),
+};
+
+describe("client over storage", () => {
+  it("saves a validated chain atomically and loads it back from the exact bytes", async () => {
+    const storage = new InMemoryLfcpStorage();
+    const chain = linear(records);
+    expect(await loadControlChain(storage, R)).toBeUndefined();
+    expect(await saveControlChain(storage, chain, null)).toEqual({ ok: true });
+    const loaded = await loadControlChain(storage, R);
+    expect(loaded?.kind).toBe("linear");
+    expect(loaded?.kind === "linear" && toHex(loaded.state.head)).toBe(toHex(chain.state.head));
+    expect((await storage.control.records(R)).map((r) => toHex(r.bytes))).toEqual(
+      records.map(toHex),
+    );
+    expect(await storage.resources.route(R)).toMatchObject({
+      routeVersion: 0n,
+      coordinatorUrl: "wss://a.example.test",
+    });
+    expect((await storage.control.epochs(R)).map((e) => e.epoch)).toEqual([0n]);
+    // A writer that read an older head loses the compare-and-set and writes nothing.
+    const rotation = rotateEpoch(chain.state, OWNER, { reason: 0n, finalFrontier: [], dek: DEK1 });
+    const longer = linear([...records, rotation.bytes]);
+    expect(await saveControlChain(storage, longer, null)).toMatchObject({
+      ok: false,
+      reason: "CONTROL_HEAD_MISMATCH",
+    });
+    expect(await storage.control.records(R)).toHaveLength(2);
+    expect(await saveControlChain(storage, longer, chain.state.head)).toEqual({ ok: true });
+    expect((await storage.control.epochs(R)).map((e) => [e.epoch, e.closedBy !== null])).toEqual([
+      [0n, true],
+      [1n, false],
+    ]);
+  });
+
+  it("records a Control conflict", async () => {
+    const storage = new InMemoryLfcpStorage();
+    const other = signControlRecord(
+      { resourceId: R, controlSeq: 1n, prevControlId: linear(records.slice(0, 1)).state.head },
+      { type: "CAPABILITY_GRANT", subject: OWNER.descriptor, abilities: [1n], delegable: [] },
+      OWNER,
+    );
+    const conflict = validateControlChain([...records, other.bytes]);
+    if (conflict.kind !== "conflict") throw new Error(conflict.kind);
+    expect(await saveControlConflict(storage, R, conflict)).toEqual({ ok: true });
+    expect((await storage.control.conflict(R))?.heads.map(toHex)).toEqual(
+      conflict.competing.map(toHex),
+    );
+  });
+
+  it("resolves an epoch's DEK through its secret reference only", async () => {
+    const storage = new InMemoryLfcpStorage();
+    const secrets = new InMemorySecretStore();
+    await saveControlChain(storage, linear(records), null);
+    const dek = dekResolver(storage, secrets, R);
+    expect(await dek(dataEpoch(0n))).toBeUndefined();
+    const epoch0 = (await storage.control.epochs(R))[0] as EpochRow;
+    await secrets.put(dekSecretRef(R, dataEpoch(0n)), bytes32(90));
+    await storage.commit([
+      {
+        op: "put-epoch",
+        resourceId: R,
+        epoch: { ...epoch0, dekRef: dekSecretRef(R, dataEpoch(0n)) },
+      },
+    ]);
+    expect(await dek(dataEpoch(0n))).toBeDefined();
+    // Saving the chain again keeps the reference.
+    await saveControlChain(storage, linear(records), linear(records).state.head);
+    expect((await storage.control.epochs(R))[0]?.dekRef).toBe(dekSecretRef(R, dataEpoch(0n)));
+  });
+
+  it("creates a local unit with a stored sequence and commits it with its outbound entry", async () => {
+    const storage = new InMemoryLfcpStorage();
+    const view = linear(records);
+    const base = { view, controlHead: view.state.head, actor: WRITER, dek: DEK0, profile: TEXT };
+    const u1 = await createQueuedDataUnit(storage, { ...base, previousUnitId: null, value: "one" });
+    const u2 = await createQueuedDataUnit(storage, {
+      ...base,
+      previousUnitId: u1.unitId,
+      value: "two",
+    });
+    expect([u1.seq, u2.seq]).toEqual([1n, 2n]);
+    expect(await storage.dataUnits.get(u1.unitId)).toMatchObject({
+      status: "merged",
+      accepted: true,
+      bytes: u1.bytes,
+    });
+    expect((await storage.outbound.list(R)).map((o) => [o.kind, toHex(o.bytes)])).toEqual([
+      ["data-unit", toHex(u1.bytes)],
+      ["data-unit", toHex(u2.bytes)],
+    ]);
+    expect((await storage.outbound.get(hash32(u2.unitId)))?.attempts).toBe(0);
+  });
+
+  it("runs the wire receive pipeline on durable SeenUnits with un-accept", async () => {
+    const storage = new InMemoryLfcpStorage();
+    const view = linear(records);
+    const writer = new InMemoryLfcpStorage();
+    const u = await createQueuedDataUnit(writer, {
+      view,
+      controlHead: view.state.head,
+      actor: WRITER,
+      dek: DEK0,
+      profile: TEXT,
+      previousUnitId: null,
+      value: "hello",
+    });
+    const seen = new StoredSeenUnits(storage);
+    const receive = () => {
+      seen.expect(dataUnitRow(u.bytes));
+      return receiveDataUnit(view, u.bytes, { seen, dek: () => DEK0, profile: TEXT });
+    };
+    expect(await receive()).toMatchObject({ kind: "accepted", value: "hello" });
+    expect(await receive()).toMatchObject({ kind: "duplicate" });
+    expect(await storage.dataUnits.get(u.unitId)).toMatchObject({ accepted: true, bytes: u.bytes });
+    await storage.commit([{ op: "set-accepted", unitId: u.unitId, accepted: false }]);
+    expect(await receive()).toMatchObject({ kind: "accepted" });
+  });
+});
