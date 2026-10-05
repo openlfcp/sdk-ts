@@ -1,0 +1,4 @@
+packages/wire/package.json:1 hpke: only @openlfcp/crypto may depend on hpke
+packages/wire/package.json:1 hpke: only @openlfcp/crypto may depend on @panva/hpke-noble
+packages/wire/package.json:1 noble: only @openlfcp/crypto may depend on @noble/ciphers
+packages/wire/package.json:1 noble: only @openlfcp/crypto may depend on @noble/post-quantum

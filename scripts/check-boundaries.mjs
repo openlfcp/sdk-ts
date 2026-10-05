@@ -7,6 +7,9 @@
 //   node-import      a node:* or Node built-in import in a portable package
 //   node-global      a Node-only global (process, Buffer, ...) in a portable package
 //   noble            an @noble/* dependency or import outside @openlfcp/crypto
+//   hpke             an hpke or @panva/hpke-noble dependency or import outside
+//                    @openlfcp/crypto (LFCP-024; @noble/ciphers and
+//                    @noble/post-quantum are covered by the noble rule)
 //
 // The portable packages must run in browsers and editors; Node-only code
 // belongs in future *-node packages, which still have to be listed in ALLOWED.
@@ -32,7 +35,7 @@ export const ALLOWED = {
   "shared-objects": ["core", "crypto"],
   client: ["core", "wire", "storage", "crypto"],
 };
-// The only package allowed to use the @noble cryptography libraries.
+// The only package allowed to use the @noble cryptography libraries and HPKE.
 const NOBLE_OWNER = "crypto";
 const PORTABLE = new Set(["core", "crypto", "wire", "storage", "shared-objects", "client"]);
 const NODE_GLOBALS = new Set([
@@ -51,6 +54,7 @@ const SOURCE = /\.(ts|tsx|mts|cts|js|mjs|cjs)$/;
 
 const isObsidian = (spec) => /(^|[@/])obsidian($|[-/])/i.test(spec);
 const isNoble = (spec) => spec.startsWith("@noble/");
+const isHpke = (spec) => /^(hpke|@panva\/hpke-noble)($|\/)/.test(spec);
 const scopeName = (spec) => /^@openlfcp\/([^/]+)/.exec(spec)?.[1];
 const isNodeBuiltin = (spec) => spec.startsWith("node:") || NODE_BUILTINS.has(spec.split("/")[0]);
 
@@ -157,6 +161,9 @@ export function check(root) {
           `${rel(pkgPath)}:1 noble: only @openlfcp/${NOBLE_OWNER} may depend on ${dep}`,
         );
       }
+      if (isHpke(dep) && name !== NOBLE_OWNER) {
+        problems.push(`${rel(pkgPath)}:1 hpke: only @openlfcp/${NOBLE_OWNER} may depend on ${dep}`);
+      }
       const target = scopeName(dep);
       if (known && target && !allowed.has(target))
         problems.push(`${rel(pkgPath)}:1 graph: @openlfcp/${name} may not depend on ${dep}`);
@@ -169,6 +176,9 @@ export function check(root) {
         if (isObsidian(spec)) problems.push(`${where} obsidian: import of ${spec}`);
         if (isNoble(spec) && name !== NOBLE_OWNER) {
           problems.push(`${where} noble: only @openlfcp/${NOBLE_OWNER} may import ${spec}`);
+        }
+        if (isHpke(spec) && name !== NOBLE_OWNER) {
+          problems.push(`${where} hpke: only @openlfcp/${NOBLE_OWNER} may import ${spec}`);
         }
         const target = scopeName(spec);
         if (known && target && !allowed.has(target))
