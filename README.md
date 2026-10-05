@@ -18,9 +18,10 @@ Epoch keys (LFCP-018), `@openlfcp/wire` its deterministic CBOR codec
 Control Record codec with Genesis (LFCP-019), Control Chain validation
 with the Control state (LFCP-020) and the capability engine with
 ownership transfer verification (LFCP-021), and
-`@openlfcp/storage` the actor sequence reservation contract (LFCP-018).
-`@openlfcp/shared-objects` and `@openlfcp/client` still export only a
-`PACKAGE` placeholder. Protocol code arrives with the backlog tasks that
+`@openlfcp/storage` the actor sequence reservation contract (LFCP-018),
+and `@openlfcp/shared-objects` the Shared Task model and profile
+validation over logical state (LFCP-030). `@openlfcp/client` still
+exports only a `PACKAGE` placeholder. Protocol code arrives with the backlog tasks that
 own each package. The official vectors run through the conformance runner
 (LFCP-017; see [Conformance](#conformance)).
 
@@ -32,7 +33,7 @@ own each package. The official vectors run through the conformance runner
 | `@openlfcp/crypto` | Thin wrapper over the audited `@noble` libraries | core | `sha256`; `SigningKeyPair` (Ed25519) and `AgreementKeyPair` (X25519) with redacted diagnostics; `generate*KeyPair`, `import*Key`, `exportSecretKeyBytes`, `verifyEd25519`; HKDF-SHA256 (`hkdfExtract`, `hkdfExpand`); Data Epoch keys (`ResourceDEK`, `generateResourceDEK`, `importResourceDEK`, `dekCommitment`, `ActorDataKey`/`deriveActorDataKey`, `SnapshotKey`/`deriveSnapshotKey`, `dataUnitNonce`, `snapshotNonce`) |
 | `@openlfcp/wire` | Deterministic CBOR, COSE, LFCP Wire structures and codecs | core, crypto | Principal Descriptor (`principalDescriptor*`, `encode/decodePrincipalDescriptor`, `derivePrincipalId`); canonical COSE_Sign1 (`signObject`, `parseSignedObject`, `verifySignedObject`, `sigStructureBytes`, `objectId`); typed payloads (`parseControlRecord`, `parseDataUnit`, `parseKeyPackage`, `parseSnapshot`, `decode*Payload`, `*PayloadFromCbor`, `expectedSignerOf`, `actorHaveFromCbor`/`actorHaveToCbor`, `canonicalFrontierFromCbor`/`canonicalFrontierToCbor`, `endpointFromCbor`/`endpointToCbor`, `checkWriterUrl`, `ENDPOINT_FLAGS`, `CONTROL_TYPE`); typed Control Records (`decodeControlRecord`, `signControlRecord`, `encodeControlRecordPayload`, `controlBodyFromCbor`/`controlBodyToCbor`, `isMvpSupported`, `controlRecordSigner`, `verifyGenesis`, ownership-transfer offer/accept parsers); Control Chain validation (`validateControlChain` → linear `ControlState` with `stateAt(head)` / `CONTROL_CONFLICT` / invalid, authority enforced); capabilities (`ABILITY`, `ABILITY_NAMES`, `hasAbility`, `abilitiesOf`, `authorizeControlRecord`, `canDistributeKey`, `verifyOwnerTransfer`); low-level deterministic CBOR (`encode`, `decodeStrict`, `decodeDeterministic`, `isDeterministic`, `cborMap`) under the `@openlfcp/wire/cbor` subpath |
 | `@openlfcp/storage` | Storage interfaces only (adapters such as a future `@openlfcp/storage-node` live elsewhere) | core | `ActorSequenceReservation` (durable-before-use contract; durable implementations are LFCP-034 to LFCP-036), `nextActorSequence`, `SequenceReuseGuard`, and `InMemoryActorSequenceReservation` for tests and development only (not crash-safe) |
-| `@openlfcp/shared-objects` | SHARED-OBJECTS-PROFILE-01 (`org.openlfcp.shared-objects.v1`) | core, crypto | `PACKAGE` |
+| `@openlfcp/shared-objects` | SHARED-OBJECTS-PROFILE-01 (`org.openlfcp.shared-objects.v1`) | core, crypto | Task over logical state (`Task`, `parseTask`, `createTask`, intent mutators `setTitle`, `setStatus`, `complete`, `reopen`, `cancel`, `setDue`/`clearDue`, `setScheduled`/`clearScheduled`, `setPriority`, `addTag`/`removeTag`, `assign`/`unassign`, `deleteTask`/`restoreTask`); profile validation (`validateRoot`, `objectProblems`, `validateTransition`: `PROFILE_INVALID` with §74.1 diagnostics); `principalRef`, `deriveActorId`, `frameProfilePayload`/`unframeProfilePayload`, Local Date and timestamp checks. The Automerge binding is LFCP-031 |
 | `@openlfcp/client` | Session, Control Plane and Data Plane synchronization | core, wire, storage, crypto | `PACKAGE` |
 
 ```text
@@ -105,11 +106,12 @@ pnpm test:conformance   # only the conformance run and its self-tests
 ```
 
 `conformance/runner.ts` runs a suite through handlers keyed by
-`<type>/<kind>` (`conformance/wire/handlers.ts` for LFCP-TEST-VECTORS-01).
+`<type>/<kind>` (`conformance/wire/handlers.ts` for LFCP-TEST-VECTORS-01,
+`conformance/shared-objects/handlers.ts` for SHARED-OBJECTS-TEST-VECTORS-01).
 Every case must resolve to exactly one of:
 
 - a handler, whose checks must all pass;
-- an entry in `conformance/wire/pending.json` naming the task that will
+- an entry in the suite's `pending.json` naming the task that will
   implement it;
 - nothing, which fails the run as an unclassified vector.
 
@@ -118,7 +120,9 @@ yet; those parts must be in the pending entry with their task. A pending
 entry for something now handled fails as stale, so when a task lands it
 removes its entries. Pending cases and parts are reported as todos, never
 as passes. The CDDL fixture manifest runs the same way, with
-`conformance/wire/cddl-pending.json`.
+`conformance/wire/cddl-pending.json`, and the Shared Objects contract
+fixtures (`profiles/shared-objects-01/schema/fixtures/`) must fail at
+exactly the pointers and diagnostics the spec lists.
 
 The run prints the suite, baseline tag and commit, and writes a summary
 to `conformance/.results/` (gitignored). A failure names the vector ID
