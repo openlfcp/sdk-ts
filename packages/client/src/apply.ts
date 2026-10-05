@@ -101,7 +101,7 @@ export interface DataProfileHandler<T> {
   /** Merges one accepted unit's decoded value. Throws when the profile refuses it. */
   apply(unit: ProfileUnit, value: T): ProfileApplyResult;
   /**
-   * PROVISIONAL (G-EP7): takes merged or buffered units out again, so that
+   * LFCP-WIRE-01 §19.1 (G-EP7): takes merged or buffered units out again, so that
    * the state equals the state built from the remaining accepted units.
    */
   exclude(unitIds: readonly DataUnitId[]): ProfileExcludeResult;
@@ -127,7 +127,7 @@ interface Applied {
 
 /**
  * Two or more signature-valid units for one (resource, actor, seq).
- * PROVISIONAL (G-DP5): no unit of the set stays merged, since keeping the
+ * LFCP-WIRE-01 §26.2 (G-DP5): no unit of the set stays merged, since keeping the
  * first one would choose by arrival order (§26.2 forbids choosing). Every
  * unit is marked "equivocation" and un-accepted; merged ones were taken out
  * of the profile state.
@@ -367,7 +367,7 @@ export class DataUnitApplier {
     );
   }
 
-  // PROVISIONAL (G-DP5): exclude every merged unit of an equivocating set.
+  // §26.2 (G-DP5): exclude every merged unit of an equivocating set.
   async #equivocation(
     handler: DataProfileHandler<unknown>,
     r: DataUnitEquivocation,
@@ -427,7 +427,7 @@ export class DataUnitApplier {
   }
 
   /**
-   * PROVISIONAL (G-EP7): the single entry point the sync engine calls with
+   * LFCP-WIRE-01 §19.1 (G-EP7): the single entry point the sync engine calls with
    * every newly validated Control view that may carry a new Key Epoch.
    * Merged (or profile-buffered) units that the view now puts beyond an
    * epoch cutoff are taken out of the profile state, which is rebuilt from

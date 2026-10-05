@@ -316,7 +316,7 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
       expect(toHex(r.accepted as DataUnitId)).toBe(toHex(createUnit.unitId));
     }
     expect(counts.apply).toBe(applies);
-    // PROVISIONAL (G-DP5): the merged unit is taken out too, so no arrival order wins.
+    // LFCP-WIRE-01 §26.2 (G-DP5): the merged unit is taken out too, so no arrival order wins.
     expect(r.kind === "equivocation" && r.excluded.map(toHex)).toEqual([toHex(createUnit.unitId)]);
     expect(r.kind === "equivocation" && r.objects).toEqual([TASK_A]);
     expect(profile.replica.objectIds()).toEqual([]);
@@ -566,7 +566,7 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
     expect(profile.replica.apply(setStatus(taskOf(profile.replica), "done").intent)).not.toBeNull();
   });
 
-  // PROVISIONAL (G-EP7)
+  // LFCP-WIRE-01 §19.1, SHARED-OBJECTS-PROFILE-01 §14.1 (G-EP7)
   it("rebuilds without a merged unit that a new Key Epoch puts beyond its cutoff, and notifies", async () => {
     const { chain, initUnit, createUnit, alice } = await resource();
     const d = await alice.send(
