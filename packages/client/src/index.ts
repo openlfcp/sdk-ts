@@ -15,6 +15,15 @@ export {
   type ProfileUnit,
 } from "./apply.js";
 export { type CheckpointSource, ProfileCheckpointer } from "./checkpoint.js";
+export {
+  type ConnectionEvents,
+  type ConnectionOptions,
+  LFCP_SUBPROTOCOL,
+  LfcpConnection,
+  platformWebSocket,
+  type WebSocketFactory,
+  type WebSocketLike,
+} from "./connection.js";
 export { type CreateDataUnitOptions, type CreatedDataUnit, createDataUnit } from "./data-unit.js";
 export {
   type AckOutcome,
