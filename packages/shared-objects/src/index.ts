@@ -16,6 +16,7 @@ export {
 } from "./automerge-bytes.js";
 export {
   type SharedObjectsApplyResult,
+  type SharedObjectsCheckpoint,
   type SharedObjectsCodec,
   SharedObjectsDataProfile,
   type SharedObjectsDiagnostic,

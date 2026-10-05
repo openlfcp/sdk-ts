@@ -6,7 +6,7 @@ import {
   toHex,
 } from "@openlfcp/core";
 import { type CheckedChange, frameChange, unframeChange } from "./automerge-bytes.js";
-import type { ObjectChange, SharedObjectsReplica } from "./replica.js";
+import { type ObjectChange, type ReplicaOptions, SharedObjectsReplica } from "./replica.js";
 import type { Json } from "./validate.js";
 import { deriveActorId, PROFILE_ID } from "./values.js";
 
@@ -51,6 +51,15 @@ export interface SharedObjectsExcludeResult {
   readonly pending: readonly DataUnitId[];
 }
 
+/** A persisted handler state (structurally the storage ProfileCheckpoint). */
+export interface SharedObjectsCheckpoint {
+  readonly resourceId: ResourceId;
+  readonly dataProfile: string;
+  readonly state: Uint8Array;
+  readonly actorSeq: number;
+  readonly units: readonly { readonly unitId: DataUnitId; readonly ref: string }[];
+}
+
 /** The §11 codec of one unit (structurally the wire DataProfileCodec). */
 export interface SharedObjectsCodec {
   readonly dataProfile: string;
@@ -74,6 +83,56 @@ export class SharedObjectsDataProfile {
 
   constructor(replica: SharedObjectsReplica) {
     this.#replica = replica;
+  }
+
+  /**
+   * The local state to persist (structurally the storage ProfileCheckpoint,
+   * LFCP-034/035): the Automerge full save, this actor's sequence (the §9
+   * minSeq on restore) and which unit carried which merged change (for a
+   * G-EP7 rebuild). Units buffered for Automerge dependencies are not in it:
+   * they stay "profile-pending" in storage and are offered again on restore.
+   */
+  checkpoint(): SharedObjectsCheckpoint {
+    return Object.freeze({
+      resourceId: this.#replica.resource,
+      dataProfile: PROFILE_ID,
+      state: this.#replica.save(),
+      actorSeq: this.#replica.actorSeq,
+      units: Object.freeze(
+        [...this.#merged.values()]
+          .map((m) => Object.freeze({ unitId: m.unitId, ref: m.hash }))
+          .sort((a, b) => (toHex(a.unitId) < toHex(b.unitId) ? -1 : 1)),
+      ),
+    });
+  }
+
+  /**
+   * The handler of a persisted checkpoint. The replica refuses local writes
+   * if its actor is behind the checkpoint's sequence (§9).
+   */
+  static restore(
+    checkpoint: SharedObjectsCheckpoint,
+    options: Pick<ReplicaOptions, "resource" | "principal">,
+  ): SharedObjectsDataProfile {
+    if (checkpoint.dataProfile !== PROFILE_ID)
+      throw new LfcpError(
+        "DATA_PROFILE_MISMATCH",
+        `a ${checkpoint.dataProfile} checkpoint is not ${PROFILE_ID}`,
+      );
+    const replica = SharedObjectsReplica.fromSave(checkpoint.state, {
+      ...options,
+      minSeq: checkpoint.actorSeq,
+    });
+    const profile = new SharedObjectsDataProfile(replica);
+    for (const u of checkpoint.units) {
+      if (!replica.hasChange(u.ref))
+        throw new LfcpError(
+          "PROFILE_INVALID",
+          `the checkpoint names change ${u.ref}, which its state lacks`,
+        );
+      profile.#merged.set(toHex(u.unitId), { unitId: u.unitId, hash: u.ref });
+    }
+    return profile;
   }
 
   /** The current replica (a G-EP7 rebuild replaces it). */

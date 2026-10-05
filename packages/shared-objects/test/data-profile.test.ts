@@ -129,4 +129,38 @@ describe("SharedObjectsDataProfile", () => {
     expect(profile.exclude([unit(2).unitId])).toEqual({ objects: [], pending: [] });
     expect(profile.dataProfile).toBe(PROFILE_ID);
   });
+
+  it("checkpoints and restores the replica, its unit refs and the §9 sequence", () => {
+    const { init, a, b } = source();
+    const profile = new SharedObjectsDataProfile(SharedObjectsReplica.empty(opts(BOB)));
+    for (const [i, c] of [init, a, b].entries()) profile.apply(unit(i + 1), checkChange(c.change));
+    const local = profile.replica.apply(setStatus(taskOf(profile.replica, ID_B), "done").intent);
+    expect(local?.seq).toBe(1);
+    const cp = profile.checkpoint();
+    expect([cp.dataProfile, cp.actorSeq, cp.units.length]).toEqual([PROFILE_ID, 1, 3]);
+
+    const restored = SharedObjectsDataProfile.restore(cp, opts(BOB));
+    expect(restored.replica.root()).toEqual(profile.replica.root());
+    expect(restored.replica.writable).toBe(true);
+    expect(
+      restored.replica.apply(setStatus(taskOf(restored.replica, ID_A), "done").intent)?.seq,
+    ).toBe(2);
+    // Unit refs survive: G-EP7 can still exclude a unit merged before the checkpoint.
+    // Bob's later local writes build on it, so they leave with it (both Tasks change).
+    expect(restored.exclude([unit(3).unitId]).objects).toEqual([ID_A, ID_B]);
+    expect(restored.replica.objectIds()).toEqual([ID_A]);
+
+    // A checkpoint ahead of its state (a lost write) blocks local writes (§9).
+    const ahead = SharedObjectsDataProfile.restore({ ...cp, actorSeq: 5 }, opts(BOB));
+    expect(ahead.replica.writable).toBe(false);
+    expect(() =>
+      SharedObjectsDataProfile.restore(
+        { ...cp, units: [{ unitId: unit(9).unitId, ref: "00".repeat(32) }] },
+        opts(BOB),
+      ),
+    ).toThrow(expect.objectContaining({ code: "PROFILE_INVALID" }));
+    expect(() => SharedObjectsDataProfile.restore({ ...cp, dataProfile: "x" }, opts(BOB))).toThrow(
+      expect.objectContaining({ code: "DATA_PROFILE_MISMATCH" }),
+    );
+  });
 });
