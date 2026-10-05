@@ -18,3 +18,4 @@ export {
   type UnitStatus,
 } from "./apply.js";
 export { type CreateDataUnitOptions, type CreatedDataUnit, createDataUnit } from "./data-unit.js";
+export { type CreatedSnapshot, type CreateSnapshotOptions, createSnapshot } from "./snapshot.js";
