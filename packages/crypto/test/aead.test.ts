@@ -10,8 +10,11 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   decryptDataUnit,
+  decryptSnapshot,
   deriveActorDataKey,
+  deriveSnapshotKey,
   encryptDataUnit,
+  encryptSnapshot,
   exportSecretKeyBytes,
   importResourceDEK,
 } from "../src/index.js";
@@ -89,5 +92,39 @@ describe("Data Unit ChaCha20-Poly1305 (§12, §26)", () => {
     const key = exportSecretKeyBytes(keyA);
     expect(text).not.toContain(toHex(key));
     expect(text).not.toContain(toBase64url(key));
+  });
+});
+
+describe("Snapshot ChaCha20-Poly1305 (§29.1)", () => {
+  const snapA = deriveSnapshotKey(dek, R, dataEpoch(0n), A);
+  const snapB = deriveSnapshotKey(dek, R, dataEpoch(0n), B);
+
+  it("encrypts to ciphertext || tag under the Snapshot Sequence nonce and decrypts back", () => {
+    const ct = encryptSnapshot(snapA, 1n, aad, plaintext);
+    expect(ct).toHaveLength(plaintext.length + 16);
+    expect(toHex(decryptSnapshot(snapA, 1n, aad, ct))).toBe(toHex(plaintext));
+    expect(toHex(encryptSnapshot(snapA, 2n, aad, plaintext))).not.toBe(toHex(ct));
+  });
+
+  it("a changed AAD, sequence, key or ciphertext fails authentication (client-local)", () => {
+    const ct = encryptSnapshot(snapA, 1n, aad, plaintext);
+    const flipped = Uint8Array.from(ct);
+    flipped[3] = (flipped[3] as number) ^ 1;
+    for (const fn of [
+      () => decryptSnapshot(snapA, 1n, Uint8Array.of(9), ct),
+      () => decryptSnapshot(snapA, 2n, aad, ct),
+      () => decryptSnapshot(snapB, 1n, aad, ct),
+      () => decryptSnapshot(snapA, 1n, aad, flipped),
+    ])
+      expect(codeOf(fn)).toBe("AEAD_AUTHENTICATION_FAILED");
+  });
+
+  it("Snapshot Sequences start at 1 and fit in uint64; only a SnapshotKey is accepted", () => {
+    for (const s of [0n, 2n ** 64n])
+      expect(codeOf(() => encryptSnapshot(snapA, s, aad, plaintext))).toBe("OUT_OF_RANGE");
+    expect(codeOf(() => encryptSnapshot(keyA as never, 1n, aad, plaintext))).toBe("CRYPTO_FAILURE");
+    expect(codeOf(() => encryptDataUnit(snapA as never, seq1, aad, plaintext))).toBe(
+      "CRYPTO_FAILURE",
+    );
   });
 });
