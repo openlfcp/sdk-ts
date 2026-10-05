@@ -180,7 +180,7 @@ export interface ControlPutBody {
  * Decodes a control-put-body: {0 resource-id, 1 hash32, 2 bstr} (§47).
  * "A CONTROL_PUT always names an expected head; a null expected head is
  * invalid" (§47): null is INVALID_STRUCTURE (MALFORMED_MESSAGE).
- * Structure only; the envelope is LFCP-026.
+ * Structure only; decodeMessage (message.ts) reads it from a CONTROL_PUT.
  */
 export function controlPutBodyFromCbor(value: CborValue): ControlPutBody {
   const f = new Fields(value, "control-put-body", [0, 1, 2]);
@@ -210,6 +210,6 @@ export function proposeControlPut(state: ControlState, body: ControlPutBody): Tr
   return proposeControlTransition(state, body.expectedHead, body.record);
 }
 
-/** Decodes a CONTROL_PUT body from its CBOR bytes (deterministic CBOR required by the envelope decoder, LFCP-026). */
+/** Decodes a CONTROL_PUT body from its CBOR bytes (a bare body; decodeMessage decodes whole messages). */
 export const decodeControlPutBody = (bytes: Uint8Array): ControlPutBody =>
   controlPutBodyFromCbor(decodeStrict(bytes));

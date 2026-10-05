@@ -27,6 +27,7 @@ export {
   type ObjectId,
   parseObjectId,
 } from "./object-id.js";
+export { secureRandom } from "./random.js";
 export {
   type ActorSequence,
   actorSequence,

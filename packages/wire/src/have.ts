@@ -27,7 +27,8 @@ export interface ActorHave {
  *   ranges are sorted, non-overlapping and non-adjacent.
  *
  * A violation is INVALID_STRUCTURE (MALFORMED_MESSAGE on the wire, §28.1, N6).
- * Live DATA_HAVE messages (LFCP-026, LFCP-028) are not covered here.
+ * Live Haves in messages are decoded as received by message.ts and
+ * normalized by LFCP-028; they are not covered here.
  */
 export function actorHaveFromCbor(value: CborValue): ActorHave {
   const what = "actor-have";
