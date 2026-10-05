@@ -17,6 +17,7 @@ import {
   type SyncEvent,
   saveControlChain,
   startSyncDriver,
+  type WebSocketFactory,
 } from "@openlfcp/client";
 import {
   actorSequence,
@@ -102,6 +103,8 @@ export interface SideOptions {
   readonly snapshots?: boolean;
   /** Checkpoint the replica (debounced, every tick). */
   readonly checkpoints?: boolean;
+  /** The WebSocket to use (default the platform's): e.g. a tap or a fault injector. */
+  readonly webSocket?: WebSocketFactory;
 }
 
 /** One client: storage, secrets, replica, applier, queue, sync session and its driver. */
@@ -156,6 +159,7 @@ export class Side {
       now: () => Date.now(),
       reconnect: () => 200,
       antiEntropyMs: 1000,
+      ...(o.webSocket === undefined ? {} : { webSocket: o.webSocket }),
     });
     this.client.on((e) => this.events.push(e));
   }

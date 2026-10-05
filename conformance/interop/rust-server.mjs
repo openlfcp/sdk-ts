@@ -11,7 +11,7 @@
 // live tests cannot pass by skipping them.
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -76,6 +76,17 @@ async function waitHealthy(base, child, deadline) {
   return false;
 }
 
+/** Every file under `root`, recursively, with its bytes (what the server persisted). */
+function readTree(root) {
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile())
+    .map((e) => {
+      const path = join(e.parentPath ?? e.path, e.name);
+      return { path: path.slice(root.length + 1), bytes: new Uint8Array(readFileSync(path)) };
+    });
+}
+
 /** Starts a fresh server on a free loopback port with its own state directory. */
 export async function startRustServer() {
   const built = build();
@@ -116,6 +127,8 @@ export async function startRustServer() {
   }
   return {
     url,
+    stateDir: join(dir, "state"),
+    files: () => readTree(join(dir, "state")),
     log: () => log,
     stop: async () => {
       if (child.exitCode === null) {

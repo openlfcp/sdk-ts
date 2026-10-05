@@ -3,6 +3,10 @@
 export interface RunningRustServer {
   /** The server's WebSocket URL (ws://127.0.0.1:<port>/v1/ws). */
   readonly url: string;
+  /** The server's state directory (its database and any other files it persists). */
+  readonly stateDir: string;
+  /** Every file under the state directory now, with its bytes (database, WAL, SHM, …). */
+  files(): { readonly path: string; readonly bytes: Uint8Array }[];
   /** Everything the server logged so far (debug level: message types and codes, never payloads). */
   log(): string;
   /** Stops the server and deletes its state directory. */
