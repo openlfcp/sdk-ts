@@ -14,7 +14,8 @@ primitives (LFCP-012), `@openlfcp/crypto` the Principal key material and
 Descriptor (LFCP-014), canonical COSE_Sign1 (LFCP-015) and the typed
 signed-object payloads (LFCP-016); the other packages still export only a `PACKAGE`
 placeholder. Protocol code arrives with the backlog tasks that own each
-package.
+package. The official vectors run through the conformance runner
+(LFCP-017; see [Conformance](#conformance)).
 
 ## Packages
 
@@ -67,13 +68,56 @@ Each package is ESM-only and publish-ready in shape:
 pnpm install --frozen-lockfile
 pnpm build    # tsc -b: strict, project references, dist/ with .d.ts and sourcemaps
 pnpm lint     # Biome, then the boundary check and its self-tests
-pnpm test     # vitest
+pnpm test     # vitest, including the conformance run
 ```
 
 `pnpm typecheck` also type-checks the tests. `pnpm format` applies Biome
 formatting.
 
-Requires Node.js 24 or later and pnpm 10.
+Requires Node.js 24 or later and pnpm 10, and a checkout of
+`openlfcp/spec` with its tags next to this repository (see below).
+
+## Conformance
+
+The official vectors belong to `openlfcp/spec` and are never copied into
+sdk-ts. `spec.lock` pins the spec version the SDK implements:
+
+```json
+{ "tag": "mvp-0.1-baseline.2", "commit": "1527feda3f4cc3accb62b3fe0ea3ab2e0d40c0f6" }
+```
+
+`conformance/spec.mjs` reads spec files with `git show <commit>:<path>`
+from `$LFCP_SPEC_DIR`, or `../spec` by default (a relative value resolves
+from the sdk-ts root). It first checks that the tag still resolves to the
+locked commit and fails loudly if not. Moving to a new baseline means
+changing `spec.lock` deliberately.
+
+```sh
+pnpm build
+pnpm test:conformance   # only the conformance run and its self-tests
+```
+
+`conformance/runner.ts` runs a suite through handlers keyed by
+`<type>/<kind>` (`conformance/wire/handlers.ts` for LFCP-TEST-VECTORS-01).
+Every case must resolve to exactly one of:
+
+- a handler, whose checks must all pass;
+- an entry in `conformance/wire/pending.json` naming the task that will
+  implement it;
+- nothing, which fails the run as an unclassified vector.
+
+A handler may check part of a case and name the parts it cannot check
+yet; those parts must be in the pending entry with their task. A pending
+entry for something now handled fails as stale, so when a task lands it
+removes its entries. Pending cases and parts are reported as todos, never
+as passes. The CDDL fixture manifest runs the same way, with
+`conformance/wire/cddl-pending.json`.
+
+The run prints the suite, baseline tag and commit, and writes a summary
+to `conformance/.results/` (gitignored). A failure names the vector ID
+and check. For bytes it shows the first differing offset and the hex
+around it on both sides; for a negative it shows the expected code and
+the actual one, or "unexpected success".
 
 ## Consuming from sibling repos
 
