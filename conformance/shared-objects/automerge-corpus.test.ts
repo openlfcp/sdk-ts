@@ -22,13 +22,17 @@
 
 import { fromHex, principalId, resourceId, toHex } from "@openlfcp/core";
 import {
+  CHANGE_LIMITS,
   checkChange,
+  checkChangeExpansion,
+  checkSnapshotExpansion,
   deriveActorId,
   frameChange,
   frameSnapshot,
   SharedObjectsReplica as Replica,
   SharedObjectsDataProfile,
   type SharedObjectsReplica,
+  SNAPSHOT_LIMITS_FLOOR,
   unframeChange,
 } from "@openlfcp/shared-objects";
 import { describe, expect, it } from "vitest";
@@ -166,8 +170,10 @@ describe(`Automerge reference corpus negatives at ${spec.lock.tag}`, () => {
         const own = profile.codecFor({ resourceId: options.resource, actor: id(author as string) });
         expect(own.decode(plaintext).hash).toBe(change.hash);
       }
+      // Refused when the signer's codec decodes it (§11) or, for a rule that needs the
+      // document (§11.1: an actor it does not know), when the replica receives it.
       const codec = profile.codecFor({ resourceId: options.resource, actor: signer });
-      expect(() => codec.decode(plaintext)).toThrow(
+      expect(() => profile.replica.receiveChange(codec.decode(plaintext).bytes)).toThrow(
         expect.objectContaining({ code, ...(diagnostic !== undefined ? { diagnostic } : {}) }),
       );
       if (change !== undefined) expect(profile.replica.hasChange(change.hash)).toBe(false);
@@ -190,6 +196,53 @@ describe(`Automerge reference corpus validations at ${spec.lock.tag}`, () => {
         .problems.map((p) => ({ pointer: p.pointer, code: p.code, diagnostic: p.diagnostic }))
         .sort((a, b) => (a.pointer < b.pointer ? -1 : a.pointer > b.pointer ? 1 : 0));
       expect(problems).toEqual(validation.expected_problems);
+    });
+  }
+});
+
+describe(`Automerge reference corpus expansion limits at ${spec.lock.tag}`, () => {
+  it("has the cases", () => {
+    expect(corpus.expansion.cases.length).toBeGreaterThan(0);
+    expect(corpus.expansion.limits.change.max_rows).toBe(CHANGE_LIMITS.maxRows);
+    expect(corpus.expansion.limits.change.max_group_sum).toBe(CHANGE_LIMITS.maxGroupSum);
+    expect(corpus.expansion.limits.change.max_string_bytes).toBe(CHANGE_LIMITS.maxStringBytes);
+    expect(corpus.expansion.limits.snapshot_floor.max_rows).toBe(SNAPSHOT_LIMITS_FLOOR.maxRows);
+    expect(corpus.expansion.limits.snapshot_floor.max_inflated_bytes).toBe(
+      SNAPSHOT_LIMITS_FLOOR.maxInflatedBytes,
+    );
+  });
+
+  for (const x of corpus.expansion.cases) {
+    it(`${x.id}: ${x.expected.within_limits ? "within the limits" : "refused"}`, () => {
+      // The expansion check alone (§11.1 for a change; §13.1 at the floor for a Snapshot).
+      const bytes = fromHex(x.bytes_hex);
+      const check = () =>
+        x.kind === "change" ? checkChangeExpansion(bytes) : checkSnapshotExpansion(bytes);
+      if (x.expected.within_limits) expect(check).not.toThrow();
+      else
+        expect(check).toThrow(
+          expect.objectContaining({
+            code: "PROFILE_INVALID",
+            diagnostic: "INVALID_AUTOMERGE_BYTES",
+          }),
+        );
+      // The measured bombs (security review H1): refused fast, in bounded memory.
+      if (x.id === "EXP-change-rle-bomb" || x.id === "EXP-snapshot-inflated-over-floor") {
+        const memory = process.memoryUsage();
+        const t = performance.now();
+        expect(check).toThrow();
+        expect(performance.now() - t).toBeLessThan(2_000);
+        const grown =
+          process.memoryUsage().heapUsed +
+          process.memoryUsage().arrayBuffers -
+          (memory.heapUsed + memory.arrayBuffers);
+        expect(grown).toBeLessThan(2 * SNAPSHOT_LIMITS_FLOOR.maxInflatedBytes);
+      }
+      // A refused change never reaches Automerge through the public paths either.
+      if (x.kind === "change" && !x.expected.within_limits)
+        expect(() => checkChange(bytes)).toThrow(
+          expect.objectContaining({ diagnostic: "INVALID_AUTOMERGE_BYTES" }),
+        );
     });
   }
 });

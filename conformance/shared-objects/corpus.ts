@@ -70,6 +70,17 @@ export interface CorpusValidation {
   }[];
 }
 
+/** A chunk checked against the expansion limits alone (§11.1, §13.1; since mvp-0.1-baseline.7). */
+export interface CorpusExpansion {
+  readonly id: string;
+  readonly kind: "change" | "snapshot";
+  readonly description: string;
+  readonly rule: string;
+  readonly bytes_hex: string;
+  readonly sha256: string;
+  readonly expected: { readonly within_limits: boolean };
+}
+
 export interface Corpus {
   readonly automerge_version: string;
   readonly profile: string;
@@ -79,6 +90,14 @@ export interface Corpus {
   readonly negatives: readonly CorpusNegative[];
   /** Since mvp-0.1-baseline.6. */
   readonly validations: readonly CorpusValidation[];
+  /** Since mvp-0.1-baseline.7. */
+  readonly expansion: {
+    readonly limits: {
+      readonly change: Readonly<Record<string, number>>;
+      readonly snapshot_floor: Readonly<Record<string, number>>;
+    };
+    readonly cases: readonly CorpusExpansion[];
+  };
 }
 
 let cached: Corpus | undefined;
