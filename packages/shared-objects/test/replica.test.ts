@@ -683,12 +683,12 @@ describe("rebuild from an accepted change set (G-EP7)", () => {
     expect(without.heads()).toEqual(fromAC.heads());
   });
 
-  it("leaves dependents unapplied and blocks own-actor reuse", () => {
+  it("leaves dependents unapplied and writes on from the removed sequence (§9)", () => {
     const { replica: a, create } = aliceWithTask();
     const after = a.apply(setTitle(taskOf(a), "later").intent) as LocalChange;
     const { replica, unapplied } = a.rebuildWithout([create.hash]);
     expect(unapplied.map((u) => u.hash)).toEqual([after.hash]);
     expect(replica.objectIds()).toEqual([]);
-    expect(replica.writable).toBe(false);
+    expect([replica.actorSeq, replica.writable]).toEqual([1, true]);
   });
 });

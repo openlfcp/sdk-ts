@@ -4,8 +4,10 @@
 // the unit is created (recordLocal through createQueuedDataUnit's
 // onCreated), and that reference survives in the checkpoint written in
 // the same commit. Later local changes that build on an excluded one go
-// with it, and the replica refuses to write again under sequences already
-// used (§9 minSeq).
+// with it. Removed own changes are not lost state (§9, SPEC-PATCH-06 item
+// 7): the writer re-applies the stale work under the removed sequence, and
+// a receiver that merged the old changes holds the new unit until it
+// learns the Key Epoch.
 
 import {
   createQueuedDataUnit,
@@ -14,7 +16,14 @@ import {
   OutboundQueue,
   ProfileCheckpointer,
 } from "@openlfcp/client";
-import { type DataUnitId, dataEpoch, type ObjectId, resourceId } from "@openlfcp/core";
+import {
+  type DataUnitId,
+  dataEpoch,
+  type ObjectId,
+  principalId,
+  resourceId,
+  toHex,
+} from "@openlfcp/core";
 import {
   dekCommitment,
   importAgreementKey,
@@ -35,6 +44,7 @@ import {
 } from "@openlfcp/shared-objects";
 import { InMemoryLfcpStorage } from "@openlfcp/storage";
 import {
+  parseDataUnit,
   principalDescriptorFromKeys,
   rotateEpoch,
   type Signer,
@@ -53,9 +63,10 @@ const R = resourceId(bytes32(210));
 const DEK0 = importResourceDEK(bytes32(90));
 const DEK1 = importResourceDEK(bytes32(91));
 const TASK = "017f22e2-79b0-7cc3-98c4-dc0c0c07398f" as ObjectId;
+const PEER = principalId(bytes32(150));
 
 describe("own units under G-EP7", () => {
-  it("leave the replica when a new Key Epoch cuts them off, with their dependents, and §9 blocks reuse", async () => {
+  it("leave the replica when a new Key Epoch cuts them off, with their dependents, and the writer re-applies", async () => {
     const genesis = signControlRecord(
       { resourceId: R, controlSeq: 0n, prevControlId: null },
       {
@@ -135,20 +146,74 @@ describe("own units under G-EP7", () => {
     expect(applied.excluded.map((e) => e.unitId)).toEqual([units[2], units[3]]);
     // The replica no longer holds the cut-off changes: the Task is back to its state at sequence 2.
     expect(task()).toMatchObject({ title: "Draft", status: "todo" });
-    expect(profile.replica.writable).toBe(false); // sequences 3 and 4 were used (§9)
-    expect(() => profile.replica.apply(setTitle(task(), "again").intent)).toThrow(
-      expect.objectContaining({ code: "SEQUENCE_REUSE" }),
-    );
     expect((await storage.dataUnits.get(units[2] as DataUnitId))?.status).toBe("quarantined");
+    const restoredBefore = (await storage.profileState.checkpoint(R)) as never;
+
+    // §9 (SPEC-PATCH-06 item 7): removed own changes are not lost state. The
+    // stale work is re-applied as a new unit in epoch 1 (G-EP5): Automerge
+    // sequence 3 again, LFCP sequence 5 naming unit 2 (§26.2).
+    expect(profile.replica.writable).toBe(true);
+    const again = profile.replica.apply(setTitle(task(), "Final again").intent) as LocalChange;
+    expect(again.seq).toBe(3);
+    const reapplied = await createQueuedDataUnit(
+      storage,
+      {
+        view: next,
+        controlHead: next.state.head,
+        actor: OWNER,
+        dek: DEK1,
+        profile: profile.codecFor({ resourceId: R, actor: OWNER.descriptor.principalId }),
+        value: checkChange(again.change),
+        onCreated: (created, value) => profile.recordLocal(created.unitId, value),
+      },
+      () => [checkpoints.write()],
+    );
+    expect(reapplied.seq).toBe(5n);
+    expect(toHex(parseDataUnit(reapplied.bytes).payload.prevDataUnitId as Uint8Array)).toBe(
+      toHex(units[1] as DataUnitId),
+    );
+
+    // A receiver that merged 1..4 holds the new unit (PREV_MISMATCH) until it
+    // learns the Key Epoch, then rebuilds without 3 and 4 and merges it.
+    const theirs = new InMemoryLfcpStorage();
+    const receiver = new SharedObjectsDataProfile(
+      SharedObjectsReplica.empty({ resource: R, principal: PEER }),
+    );
+    const receiverApplier = new DataUnitApplier({
+      storage: theirs,
+      dek: (epoch) => (epoch === 0n ? DEK0 : DEK1),
+      handlers: [
+        {
+          dataProfile: receiver.dataProfile,
+          codecFor: (u) => receiver.codecFor(u),
+          apply: (u, v) => receiver.apply(u, v),
+          exclude: (ids) => receiver.exclude(ids),
+        } as DataProfileHandler<CheckedChange> as DataProfileHandler<unknown>,
+      ],
+    });
+    for (const id of units) {
+      const u = await storage.dataUnits.get(id);
+      expect((await receiverApplier.receive(chain, u?.bytes as Uint8Array)).kind).toBe("applied");
+    }
+    expect(receiver.replica.task(TASK)?.task).toMatchObject({ title: "Final", status: "done" });
+    expect(await receiverApplier.receive(next, reapplied.bytes)).toMatchObject({
+      kind: "held",
+      reason: "PREV_MISMATCH",
+    });
+    const reconciled = await receiverApplier.reconcileEpochs(next);
+    expect(reconciled.excluded.map((e) => e.unitId)).toEqual([units[2], units[3]]);
+    expect(reconciled.released.map((x) => x.kind)).toEqual(["applied"]);
+    expect(receiver.replica.task(TASK)?.task).toMatchObject({
+      title: "Final again",
+      status: "todo",
+    });
+    expect(JSON.stringify(receiver.replica.root())).toBe(JSON.stringify(profile.replica.root()));
 
     // The reference also survives a restart: restore from the checkpoint written with the units.
-    const restored = SharedObjectsDataProfile.restore(
-      (await storage.profileState.checkpoint(R)) as never,
-      {
-        resource: R,
-        principal: OWNER.descriptor.principalId,
-      },
-    );
+    const restored = SharedObjectsDataProfile.restore(restoredBefore, {
+      resource: R,
+      principal: OWNER.descriptor.principalId,
+    });
     expect(restored.exclude([units[3] as DataUnitId]).objects).toEqual([TASK]);
     expect(restored.replica.task(TASK)?.task).toMatchObject({ title: "Final", status: "todo" });
   });
