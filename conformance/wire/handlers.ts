@@ -29,7 +29,9 @@ import {
 import {
   type ControlRecord,
   canonicalFrontierFromCbor,
+  classifyDataUnit,
   controlPutBodyFromCbor,
+  type DataUnitPayload,
   decodeControlRecord,
   decodeControlRecordPayload,
   decodeDataUnitPayload,
@@ -757,18 +759,41 @@ function negative(c: VectorCase, actual: string | null): { checks: Check[]; pend
   return { checks: [outcomeCheck("outcome", expected, actual)], pending: [] };
 }
 
+/**
+ * A layer applied after structure and signature accept an object: the wire
+ * code it fails with, or null. LFCP-023 adds the epoch cutoff for Data Units.
+ */
+type AfterReceive<P> = (context: HandlerContext, parsed: Parsed<P>) => string | null;
+
+/** The published Data Unit case whose unit_id is `unitId` (for vectors that name a unit by ID). */
+function publishedUnit(context: HandlerContext, unitId: Uint8Array): Uint8Array | undefined {
+  const c = context.suite.cases.find(
+    (x) =>
+      x.type === "bytes" &&
+      x.kind === "data_unit" &&
+      bytesEqual(hexOf(x.expected, "unit_id"), unitId),
+  );
+  return c === undefined ? undefined : hexOf(c.expected, "cose_sign1");
+}
+
 function signedNegative<P>(
   parse: (bytes: Uint8Array) => Parsed<P>,
   signerOf: (p: Parsed<P>) => PrincipalId,
+  after?: AfterReceive<P>,
 ): Handler {
   return (c, context) => {
     const inputs = c.inputs;
     const extra: Check[] = [];
-    let coseField: string | undefined;
-    if (has(inputs, "cose_sign1")) coseField = "cose_sign1";
-    else if (has(inputs, "conflicting_D2_cose")) coseField = "conflicting_D2_cose";
-    if (coseField === undefined) return { checks: [], pending: ["outcome"] }; // no object to receive
-    const cose = hexOf(inputs, coseField);
+    let cose: Uint8Array | undefined;
+    if (has(inputs, "cose_sign1")) cose = hexOf(inputs, "cose_sign1");
+    else if (has(inputs, "conflicting_D2_cose")) cose = hexOf(inputs, "conflicting_D2_cose");
+    else if (has(inputs, "unit_id")) {
+      // The vector names a published unit by its ID (stale_epoch: D3).
+      cose = publishedUnit(context, hexOf(inputs, "unit_id"));
+      if (cose !== undefined)
+        extra.push(bytesCheck("inputs.unit_id", hexOf(inputs, "unit_id"), objectId(cose)));
+    }
+    if (cose === undefined) return { checks: [], pending: ["outcome"] }; // no object to receive
     if (has(inputs, "record_id"))
       extra.push(bytesCheck("inputs.record_id", hexOf(inputs, "record_id"), objectId(cose)));
     if (has(inputs, "conflicting_D2_id"))
@@ -783,10 +808,27 @@ function signedNegative<P>(
         ),
       );
     }
-    const result = negative(c, receive(context, cose, parse, signerOf));
+    let actual = receive(context, cose, parse, signerOf);
+    if (actual === null && after !== undefined) actual = after(context, parse(cose));
+    const result = negative(c, actual);
     return { checks: [...extra, ...result.checks], pending: result.pending };
   };
 }
+
+/**
+ * LFCP-023: a received Data Unit against the epoch cutoff of the latest
+ * published Control state (C6; G-EP1). A quarantined unit is
+ * STALE_DATA_EPOCH (§19.1, §75); an unknown head or epoch is the reject's
+ * code (G-EP2).
+ */
+const dataUnitEpoch: AfterReceive<DataUnitPayload> = (context, parsed) => {
+  // A suite without a valid Control Chain has no cutoff to apply; the
+  // published chain's own validity is asserted by every control_record case.
+  const chain = validateControlChain(publishedChain(context));
+  if (chain.kind !== "linear") return null;
+  const c = classifyDataUnit(chain, parsed.payload);
+  return c.kind === "accept" ? null : c.kind === "quarantine" ? c.code : c.wireCode;
+};
 
 const principalNegative: Handler = (c) => {
   let actual: string | null = null;
@@ -808,7 +850,11 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   "bytes/snapshot": snapshot,
   "bytes/invite_uri": inviteUri,
   "bytes/wire_message": wireMessage,
-  "validation/data_unit": signedNegative(parseDataUnit, (p) => expectedSignerOf(p.payload)),
+  "validation/data_unit": signedNegative(
+    parseDataUnit,
+    (p) => expectedSignerOf(p.payload),
+    dataUnitEpoch,
+  ),
   "validation/control_record": controlRecordNegative,
   "validation/control_put": controlPutNegative,
   "validation/key_package": signedNegative(parseKeyPackage, (p) => expectedSignerOf(p.payload)),

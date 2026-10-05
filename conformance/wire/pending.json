@@ -263,12 +263,6 @@
         "outcome": "LFCP-025"
       }
     },
-    "stale_epoch": {
-      "reason": "No signed object in the inputs; the outcome is epoch cutoff.",
-      "parts": {
-        "outcome": "LFCP-023"
-      }
-    },
     "noncanonical_aad_D1": {
       "reason": "The unit parses and verifies and the input AAD is confirmed non-deterministic; the AEAD outcome is client-local (N3).",
       "parts": {
@@ -291,12 +285,6 @@
       "reason": "The package parses and verifies against the sender; the HPKE outcome is client-local (N5).",
       "parts": {
         "outcome": "LFCP-024"
-      }
-    },
-    "stale_epoch_absent_actor": {
-      "reason": "The unit parses and verifies; the outcome is the epoch cutoff frontier.",
-      "parts": {
-        "outcome": "LFCP-023"
       }
     }
   }
