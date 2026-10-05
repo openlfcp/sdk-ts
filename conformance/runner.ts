@@ -47,7 +47,11 @@ export interface HandlerContext {
   readonly caseById: (id: string) => VectorCase | undefined;
 }
 
-export type Handler = (vector: VectorCase, context: HandlerContext) => HandlerResult;
+/** A handler may be async (HPKE, AEAD); the runner awaits it. */
+export type Handler = (
+  vector: VectorCase,
+  context: HandlerContext,
+) => HandlerResult | Promise<HandlerResult>;
 
 /**
  * A pending case. Either the whole case is pending (`task`), or a handler
@@ -111,11 +115,11 @@ export function requiredParts(vector: VectorCase): readonly string[] {
 
 const fieldOf = (part: string): string => part.split("/")[0] as string;
 
-export function runSuite(
+export async function runSuite(
   suite: VectorSuite,
   handlers: Readonly<Record<string, Handler>>,
   pendingFile: PendingFile,
-): RunResult {
+): Promise<RunResult> {
   const byId = new Map(suite.cases.map((c) => [c.id, c]));
   const context: HandlerContext = { suite, caseById: (id) => byId.get(id) };
   const globalProblems: string[] = [];
@@ -128,90 +132,94 @@ export function runSuite(
     if (!byId.has(id)) globalProblems.push(`pending entry for ${id}, which is not in the suite`);
   }
 
-  const cases = suite.cases.map((vector): CaseResult => {
-    const key = `${vector.type}/${vector.kind}`;
-    const handler = Object.hasOwn(handlers, key) ? handlers[key] : undefined;
-    const entry = Object.hasOwn(pendingFile.cases, vector.id)
-      ? pendingFile.cases[vector.id]
-      : undefined;
-    const base = { id: vector.id, type: vector.type, kind: vector.kind };
+  const cases = await Promise.all(
+    suite.cases.map(async (vector): Promise<CaseResult> => {
+      const key = `${vector.type}/${vector.kind}`;
+      const handler = Object.hasOwn(handlers, key) ? handlers[key] : undefined;
+      const entry = Object.hasOwn(pendingFile.cases, vector.id)
+        ? pendingFile.cases[vector.id]
+        : undefined;
+      const base = { id: vector.id, type: vector.type, kind: vector.kind };
 
-    if (handler === undefined) {
-      if (entry === undefined) {
+      if (handler === undefined) {
+        if (entry === undefined) {
+          return {
+            ...base,
+            status: "failed",
+            checks: [],
+            pending: [],
+            problems: [`unclassified vector: no handler for ${key} and no pending entry`],
+          };
+        }
+        if (entry.parts !== undefined || entry.task === undefined) {
+          return {
+            ...base,
+            status: "failed",
+            checks: [],
+            pending: [],
+            problems: [
+              entry.parts !== undefined
+                ? `pending entry lists parts, but no handler for ${key} runs the rest`
+                : "pending entry names no task",
+            ],
+          };
+        }
         return {
           ...base,
-          status: "failed",
+          status: "pending",
           checks: [],
-          pending: [],
-          problems: [`unclassified vector: no handler for ${key} and no pending entry`],
+          pending: [{ part: WHOLE_CASE, task: entry.task }],
+          problems: [],
         };
       }
-      if (entry.parts !== undefined || entry.task === undefined) {
-        return {
-          ...base,
-          status: "failed",
-          checks: [],
-          pending: [],
-          problems: [
-            entry.parts !== undefined
-              ? `pending entry lists parts, but no handler for ${key} runs the rest`
-              : "pending entry names no task",
-          ],
-        };
+
+      const problems: string[] = [];
+      let result: HandlerResult;
+      try {
+        result = await handler(vector, context);
+      } catch (e) {
+        result = { checks: [] };
+        problems.push(`handler ${key} threw: ${e instanceof Error ? e.message : String(e)}`);
       }
-      return {
-        ...base,
-        status: "pending",
-        checks: [],
-        pending: [{ part: WHOLE_CASE, task: entry.task }],
-        problems: [],
-      };
-    }
+      const handlerPending = [...new Set(result.pending ?? [])].sort();
 
-    const problems: string[] = [];
-    let result: HandlerResult;
-    try {
-      result = handler(vector, context);
-    } catch (e) {
-      result = { checks: [] };
-      problems.push(`handler ${key} threw: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    const handlerPending = [...new Set(result.pending ?? [])].sort();
-
-    if (entry !== undefined && entry.parts === undefined) {
-      problems.push(
-        `pending but now handled by ${key}: remove ${vector.id} from pending, or list only the parts still pending`,
-      );
-    }
-    const parts: Readonly<Record<string, string>> = entry?.parts ?? {};
-    const listed = new Set(Object.keys(parts));
-    for (const part of handlerPending) {
-      if (!listed.has(part))
+      if (entry !== undefined && entry.parts === undefined) {
         problems.push(
-          `unclassified part "${part}": the handler cannot run it and it is not pending`,
+          `pending but now handled by ${key}: remove ${vector.id} from pending, or list only the parts still pending`,
         );
-    }
-    for (const part of [...listed].sort()) {
-      if (!handlerPending.includes(part))
-        problems.push(`stale pending part "${part}": now handled, remove it from pending`);
-    }
-    const covered = new Set([...result.checks.map((c) => c.name), ...handlerPending].map(fieldOf));
-    for (const part of requiredParts(vector)) {
-      if (!covered.has(part))
-        problems.push(`expected field "${part}" is neither checked nor pending`);
-    }
+      }
+      const parts: Readonly<Record<string, string>> = entry?.parts ?? {};
+      const listed = new Set(Object.keys(parts));
+      for (const part of handlerPending) {
+        if (!listed.has(part))
+          problems.push(
+            `unclassified part "${part}": the handler cannot run it and it is not pending`,
+          );
+      }
+      for (const part of [...listed].sort()) {
+        if (!handlerPending.includes(part))
+          problems.push(`stale pending part "${part}": now handled, remove it from pending`);
+      }
+      const covered = new Set(
+        [...result.checks.map((c) => c.name), ...handlerPending].map(fieldOf),
+      );
+      for (const part of requiredParts(vector)) {
+        if (!covered.has(part))
+          problems.push(`expected field "${part}" is neither checked nor pending`);
+      }
 
-    const failedCheck = result.checks.some((c) => !c.ok);
-    const pending = handlerPending.map((part) => ({
-      part,
-      task: Object.hasOwn(parts, part) ? (parts[part] as string) : "unclassified",
-    }));
-    let status: CaseStatus;
-    if (failedCheck || problems.length > 0) status = "failed";
-    else if (pending.length === 0) status = "passed";
-    else status = result.checks.length === 0 ? "pending" : "partial";
-    return { ...base, status, checks: result.checks, pending, problems };
-  });
+      const failedCheck = result.checks.some((c) => !c.ok);
+      const pending = handlerPending.map((part) => ({
+        part,
+        task: Object.hasOwn(parts, part) ? (parts[part] as string) : "unclassified",
+      }));
+      let status: CaseStatus;
+      if (failedCheck || problems.length > 0) status = "failed";
+      else if (pending.length === 0) status = "passed";
+      else status = result.checks.length === 0 ? "pending" : "partial";
+      return { ...base, status, checks: result.checks, pending, problems };
+    }),
+  );
 
   const count = (s: CaseStatus) => cases.filter((c) => c.status === s).length;
   const allChecks = cases.flatMap((c) => c.checks);

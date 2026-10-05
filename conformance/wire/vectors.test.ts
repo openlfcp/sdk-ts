@@ -6,7 +6,7 @@ import { defineSuiteRun } from "../suite-run.js";
 import { WIRE_HANDLERS } from "./handlers.js";
 import pending from "./pending.json" with { type: "json" };
 
-defineSuiteRun(
+await defineSuiteRun(
   "test-vectors/lfcp-wire-01/LFCP-TEST-VECTORS-01.json",
   "lfcp-test-vectors-01",
   WIRE_HANDLERS,

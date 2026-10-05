@@ -7,7 +7,7 @@ import { defineSuiteRun } from "../suite-run.js";
 import { SHARED_OBJECTS_HANDLERS } from "./handlers.js";
 import pending from "./pending.json" with { type: "json" };
 
-defineSuiteRun(
+await defineSuiteRun(
   "test-vectors/shared-objects-01/SHARED-OBJECTS-TEST-VECTORS-01.json",
   "shared-objects-test-vectors-01",
   SHARED_OBJECTS_HANDLERS,

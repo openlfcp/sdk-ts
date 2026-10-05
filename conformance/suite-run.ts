@@ -13,15 +13,15 @@ import {
 } from "./runner.js";
 import { log, openSpec, writeSummary } from "./spec.mjs";
 
-export function defineSuiteRun(
+export async function defineSuiteRun(
   suitePath: string,
   summaryName: string,
   handlers: Readonly<Record<string, Handler>>,
   pending: PendingFile,
-): void {
+): Promise<void> {
   const spec = openSpec();
   const suite = spec.readJson(suitePath) as VectorSuite;
-  const { cases, summary } = runSuite(suite, handlers, pending);
+  const { cases, summary } = await runSuite(suite, handlers, pending);
 
   const header =
     `${suite.suite.id} version ${suite.suite.version} (${suite.format}) from ` +

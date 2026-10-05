@@ -83,8 +83,8 @@ const suiteOf = (...cases: VectorCase[]): VectorSuite => ({
 const noPending: PendingFile = { suite: SUITE_ID, cases: {} };
 const run = (suite: VectorSuite, pending: PendingFile = noPending, handlers = WIRE_HANDLERS) =>
   runSuite(suite, handlers, pending);
-const only = (suite: VectorSuite, pending?: PendingFile): CaseResult => {
-  const r = run(suite, pending).cases[0];
+const only = async (suite: VectorSuite, pending?: PendingFile): Promise<CaseResult> => {
+  const r = (await run(suite, pending)).cases[0];
   if (r === undefined) throw new Error("no result");
   return r;
 };
@@ -95,26 +95,30 @@ const flip = (hex: string, at: number): string => {
 };
 
 describe("runner self-tests", () => {
-  it("passes a correct synthetic principal case", () => {
-    const r = only(suiteOf(principalCase()));
+  it("passes a correct synthetic principal case", async () => {
+    const r = await only(suiteOf(principalCase()));
     expect(r.status).toBe("passed");
     expect(r.checks.length).toBeGreaterThan(0);
   });
 
-  it("detects wrong exact bytes, reporting the vector ID, offset and both sides", () => {
+  it("detects wrong exact bytes, reporting the vector ID, offset and both sides", async () => {
     const c = principalCase();
     const bad = flip((c.expected.descriptor_cbor as { hex: string }).hex, 40);
-    const r = only(suiteOf({ ...c, expected: { ...c.expected, descriptor_cbor: { hex: bad } } }));
+    const r = await only(
+      suiteOf({ ...c, expected: { ...c.expected, descriptor_cbor: { hex: bad } } }),
+    );
     expect(r.status).toBe("failed");
     const text = describeFailure(r);
     expect(text).toContain("principal_synthetic descriptor_cbor: bytes differ at offset 40");
     expect(text).toMatch(/expected: …[0-9a-f]+…\n {6}actual: {3}…[0-9a-f]+…/);
   });
 
-  it("detects a wrong expected hash (Principal ID and object ID)", () => {
+  it("detects a wrong expected hash (Principal ID and object ID)", async () => {
     const c = principalCase();
     const bad = flip((c.expected.principal_id as { hex: string }).hex, 0);
-    const r = only(suiteOf({ ...c, expected: { ...c.expected, principal_id: { hex: bad } } }));
+    const r = await only(
+      suiteOf({ ...c, expected: { ...c.expected, principal_id: { hex: bad } } }),
+    );
     expect(r.status).toBe("failed");
     expect(describeFailure(r)).toContain("principal_id: bytes differ at offset 0");
 
@@ -123,9 +127,9 @@ describe("runner self-tests", () => {
     expect(wrongId.ok).toBe(false);
   });
 
-  it("detects the unexpected success of a negative vector", () => {
+  it("detects the unexpected success of a negative vector", async () => {
     // An implemented layer accepts it, and no task claims the outcome: unclassified.
-    const r = only(
+    const r = await only(
       suiteOf(negativeCase("neg", dataUnit(1).bytes, "MALFORMED_MESSAGE"), principalCase()),
     );
     expect(r.status).toBe("failed");
@@ -138,9 +142,9 @@ describe("runner self-tests", () => {
     });
   });
 
-  it("detects a wrong error class", () => {
+  it("detects a wrong error class", async () => {
     // Actor sequence 0 fails as MALFORMED_MESSAGE, not INVALID_SIGNATURE.
-    const r = only(
+    const r = await only(
       suiteOf(negativeCase("seq0", dataUnit(0).bytes, "INVALID_SIGNATURE"), principalCase()),
     );
     expect(r.status).toBe("failed");
@@ -149,19 +153,19 @@ describe("runner self-tests", () => {
     );
   });
 
-  it("passes a negative that fails with the expected class", () => {
-    const r = only(
+  it("passes a negative that fails with the expected class", async () => {
+    const r = await only(
       suiteOf(negativeCase("seq0", dataUnit(0).bytes, "MALFORMED_MESSAGE"), principalCase()),
     );
     expect(r.status).toBe("passed");
   });
 
-  it("fails an unknown type or kind as an unclassified vector", () => {
+  it("fails an unknown type or kind as an unclassified vector", async () => {
     for (const [type, kind] of [
       ["bytes", "mystery"],
       ["behavioral", "principal"],
     ]) {
-      const r = only(
+      const r = await only(
         suiteOf({ id: "x", type: type as string, kind: kind as string, expected: {} }),
       );
       expect(r.status).toBe("failed");
@@ -171,27 +175,30 @@ describe("runner self-tests", () => {
     }
   });
 
-  it("reports pending as pending, never as passed", () => {
+  it("reports pending as pending, never as passed", async () => {
     const pending: PendingFile = {
       suite: SUITE_ID,
       cases: { x: { task: "LFCP-999", reason: "synthetic" } },
     };
-    const result = run(suiteOf({ id: "x", type: "bytes", kind: "mystery", expected: {} }), pending);
+    const result = await run(
+      suiteOf({ id: "x", type: "bytes", kind: "mystery", expected: {} }),
+      pending,
+    );
     expect(result.cases[0]?.status).toBe("pending");
     expect(result.summary).toMatchObject({ total: 1, passed: 0, pending: 1, failed: 0 });
   });
 
-  it("fails a stale whole-case pending entry", () => {
+  it("fails a stale whole-case pending entry", async () => {
     const pending: PendingFile = {
       suite: SUITE_ID,
       cases: { principal_synthetic: { task: "LFCP-999", reason: "synthetic" } },
     };
-    const r = only(suiteOf(principalCase()), pending);
+    const r = await only(suiteOf(principalCase()), pending);
     expect(r.status).toBe("failed");
     expect(r.problems[0]).toContain("pending but now handled by bytes/principal");
   });
 
-  it("fails a stale pending part and an unclassified part", () => {
+  it("fails a stale pending part and an unclassified part", async () => {
     const handler: Handler = () => ({ checks: [{ name: "a", ok: true }], pending: ["b/later"] });
     const c: VectorCase = { id: "p", type: "bytes", kind: "split", expected: { a: 1, b: 2 } };
     const handlers = { "bytes/split": handler };
@@ -199,38 +206,39 @@ describe("runner self-tests", () => {
       suite: SUITE_ID,
       cases: { p: { reason: "synthetic", parts } },
     });
-    const ok = runSuite(suiteOf(c), handlers, listed({ "b/later": "LFCP-999" })).cases[0];
+    const ok = (await runSuite(suiteOf(c), handlers, listed({ "b/later": "LFCP-999" }))).cases[0];
     expect(ok?.status).toBe("partial");
     expect(ok?.pending).toEqual([{ part: "b/later", task: "LFCP-999" }]);
 
-    const stale = runSuite(suiteOf(c), handlers, listed({ "b/later": "LFCP-999", "a/x": "LFCP-1" }))
-      .cases[0];
+    const stale = (
+      await runSuite(suiteOf(c), handlers, listed({ "b/later": "LFCP-999", "a/x": "LFCP-1" }))
+    ).cases[0];
     expect(stale?.problems).toEqual([
       'stale pending part "a/x": now handled, remove it from pending',
     ]);
 
-    const unlisted = runSuite(suiteOf(c), handlers, noPending).cases[0];
+    const unlisted = (await runSuite(suiteOf(c), handlers, noPending)).cases[0];
     expect(unlisted?.problems).toEqual([
       'unclassified part "b/later": the handler cannot run it and it is not pending',
     ]);
   });
 
-  it("fails an expected field that is neither checked nor pending", () => {
+  it("fails an expected field that is neither checked nor pending", async () => {
     const handler: Handler = () => ({ checks: [{ name: "a", ok: true }] });
     const c: VectorCase = { id: "p", type: "bytes", kind: "split", expected: { a: 1, b: 2 } };
-    const r = runSuite(suiteOf(c), { "bytes/split": handler }, noPending).cases[0];
+    const r = (await runSuite(suiteOf(c), { "bytes/split": handler }, noPending)).cases[0];
     expect(r?.problems).toEqual(['expected field "b" is neither checked nor pending']);
   });
 
-  it("fails invalid vector data instead of crashing", () => {
+  it("fails invalid vector data instead of crashing", async () => {
     const c = principalCase();
-    const r = only(suiteOf({ ...c, inputs: { ed25519_seed: "not-hex-wrapped" } }));
+    const r = await only(suiteOf({ ...c, inputs: { ed25519_seed: "not-hex-wrapped" } }));
     expect(r.status).toBe("failed");
     expect(r.problems[0]).toContain("handler bytes/principal threw");
   });
 
-  it("fails pending entries for unknown cases and a suite mismatch", () => {
-    const result = run(suiteOf(principalCase()), {
+  it("fails pending entries for unknown cases and a suite mismatch", async () => {
+    const result = await run(suiteOf(principalCase()), {
       suite: "OTHER-01",
       cases: { ghost: { task: "LFCP-999", reason: "synthetic" } },
     });
