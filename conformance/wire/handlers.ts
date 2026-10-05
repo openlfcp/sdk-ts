@@ -1,0 +1,539 @@
+// LFCP-TEST-VECTORS-01 handlers for sdk-ts through LFCP-016 (LFCP-017).
+//
+// One handler per "<type>/<kind>". A handler checks what the SDK implements
+// today and names, as pending parts, what later tasks implement (the owner
+// of each part is in pending.json). Values come only from the loaded suite.
+
+import {
+  bytesEqual,
+  fromBase64url,
+  fromHex,
+  type PrincipalId,
+  toBase64url,
+  toHex,
+} from "@openlfcp/core";
+import { importAgreementKey, importSigningKey } from "@openlfcp/crypto";
+import {
+  canonicalFrontierFromCbor,
+  decodeControlRecordPayload,
+  decodeDataUnitPayload,
+  decodeKeyPackagePayload,
+  decodePrincipalDescriptor,
+  decodeSnapshotPayload,
+  derivePrincipalId,
+  encodePrincipalDescriptor,
+  expectedSignerOf,
+  objectId,
+  type Parsed,
+  parseControlRecord,
+  parseDataUnit,
+  parseKeyPackage,
+  parseSignedObject,
+  parseSnapshot,
+  principalDescriptorFromKeys,
+  type Signer,
+  signObject,
+  sigStructureBytes,
+  verifySignedObject,
+} from "@openlfcp/wire";
+import {
+  type CborValue,
+  decodeStrict,
+  encode,
+  isCborMap,
+  isDeterministic,
+} from "@openlfcp/wire/cbor";
+import { bytesCheck, check, describeError, equalCheck, outcomeCheck } from "../checks.js";
+import type { Check, Handler, HandlerContext, VectorCase, VectorSuite } from "../runner.js";
+import { SIGNATURE_FAILURE, wireCodeOf } from "./error-map.js";
+
+type Fields = Readonly<Record<string, unknown>> | undefined;
+
+/** The bytes of a `{hex}` value; throws (failing the case) when absent. */
+function hexOf(fields: Fields, name: string): Uint8Array {
+  const v = fields?.[name] as { hex?: unknown } | undefined;
+  if (typeof v?.hex !== "string") throw new Error(`field ${name} is not a {hex} value`);
+  return fromHex(v.hex);
+}
+
+function b64Of(fields: Fields, name: string): string {
+  const v = fields?.[name] as { b64url?: unknown } | undefined;
+  if (typeof v?.b64url !== "string") throw new Error(`field ${name} is not a {b64url} value`);
+  return v.b64url;
+}
+
+const has = (fields: Fields, name: string): boolean => fields?.[name] !== undefined;
+
+// ---------------------------------------------------------------------------
+// Fixture Principals, from the suite's principal cases (checked by `principal`).
+
+const PRINCIPALS = new WeakMap<VectorSuite, Map<string, Signer>>();
+
+/** Fixture signers by Principal ID hex and by name ("OWNER" for principal_owner). */
+function principals(context: HandlerContext): Map<string, Signer> {
+  let map = PRINCIPALS.get(context.suite);
+  if (map === undefined) {
+    map = new Map();
+    for (const c of context.suite.cases) {
+      if (c.type !== "bytes" || c.kind !== "principal") continue;
+      const key = importSigningKey(hexOf(c.inputs, "ed25519_seed"));
+      const signer: Signer = {
+        key,
+        descriptor: principalDescriptorFromKeys(
+          key,
+          importAgreementKey(hexOf(c.inputs, "x25519_private")),
+        ),
+      };
+      map.set(toHex(signer.descriptor.principalId), signer);
+      map.set(c.id.replace(/^principal_/, "").toUpperCase(), signer);
+    }
+    PRINCIPALS.set(context.suite, map);
+  }
+  return map;
+}
+
+function signerFor(context: HandlerContext, id: PrincipalId): Signer {
+  const s = principals(context).get(toHex(id));
+  if (s === undefined) throw new Error(`no fixture Principal ${toHex(id)} in the suite`);
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+// Check groups.
+
+/** The bytes decode strictly and re-encode to themselves (§5.2). */
+function deterministic(name: string, bytes: Uint8Array): Check {
+  try {
+    return bytesCheck(name, bytes, encode(decodeStrict(bytes)));
+  } catch (e) {
+    return { name, ok: false, message: `does not decode as strict CBOR: ${describeError(e)}` };
+  }
+}
+
+/** The expected value equals one decoded from somewhere else. */
+function sameBytes(name: string, expected: Uint8Array, actual: () => Uint8Array): Check {
+  try {
+    return bytesCheck(name, expected, actual());
+  } catch (e) {
+    return { name, ok: false, message: `threw ${describeError(e)}` };
+  }
+}
+
+/**
+ * A received signed object: parse with `parse`, verify against the signer
+ * named by `signerOf(parsed)`, re-sign `payload` (Ed25519 is deterministic)
+ * and check the exact payload bytes.
+ */
+function signedObject<P>(
+  field: string,
+  context: HandlerContext,
+  cose: Uint8Array,
+  parse: (bytes: Uint8Array) => Parsed<P>,
+  signerOf: (parsed: Parsed<P>) => PrincipalId,
+  payload?: Uint8Array,
+): { checks: Check[]; parsed?: Parsed<P> } {
+  let parsed: Parsed<P>;
+  try {
+    parsed = parse(cose);
+  } catch (e) {
+    return { checks: [{ name: `${field}/parse`, ok: false, message: describeError(e) }] };
+  }
+  const checks: Check[] = [{ name: `${field}/parse`, ok: true }];
+  checks.push(
+    check(`${field}/verify`, () => {
+      const v = verifySignedObject(parsed.signed, signerFor(context, signerOf(parsed)).descriptor);
+      return v.valid || `verification failed: ${v.reason}`;
+    }),
+  );
+  if (payload !== undefined) {
+    checks.push(bytesCheck(`${field}/payload`, payload, parsed.signed.payloadBytes));
+    checks.push(
+      sameBytes(
+        `${field}/sign`,
+        cose,
+        () => signObject(payload, signerFor(context, signerOf(parsed))).bytes,
+      ),
+    );
+  }
+  return { checks, parsed };
+}
+
+const kidOf = (p: Parsed<unknown>): PrincipalId => p.signed.kid;
+
+// ---------------------------------------------------------------------------
+// bytes cases
+
+const principal: Handler = (c) => {
+  const key = importSigningKey(hexOf(c.inputs, "ed25519_seed"));
+  const agreement = importAgreementKey(hexOf(c.inputs, "x25519_private"));
+  const descriptorCbor = hexOf(c.expected, "descriptor_cbor");
+  return {
+    checks: [
+      bytesCheck("ed25519_public", hexOf(c.expected, "ed25519_public"), key.publicKey),
+      bytesCheck("x25519_public", hexOf(c.expected, "x25519_public"), agreement.publicKey),
+      sameBytes("principal_id", hexOf(c.expected, "principal_id"), () =>
+        derivePrincipalId(key.publicKey, agreement.publicKey),
+      ),
+      sameBytes("descriptor_cbor", descriptorCbor, () =>
+        encodePrincipalDescriptor(principalDescriptorFromKeys(key, agreement)),
+      ),
+      deterministic("descriptor_cbor/deterministic", descriptorCbor),
+      sameBytes(
+        "descriptor_cbor/decode",
+        hexOf(c.expected, "principal_id"),
+        () => decodePrincipalDescriptor(descriptorCbor).principalId,
+      ),
+    ],
+  };
+};
+
+const controlRecord: Handler = (c, context) => {
+  const e = c.expected;
+  const payload = hexOf(e, "payload_cbor");
+  const cose = hexOf(e, "cose_sign1");
+  const protectedHeader = hexOf(e, "protected_header_cbor");
+  const signer = principals(context).get(String(c.inputs?.signer));
+  const signed = signedObject(
+    "cose_sign1",
+    context,
+    cose,
+    parseControlRecord,
+    (p) => p.payload.issuer,
+    payload,
+  );
+  return {
+    checks: [
+      deterministic("payload_cbor/deterministic", payload),
+      check("payload_cbor/decode", () => {
+        const p = decodeControlRecordPayload(payload);
+        if (signer === undefined)
+          return `inputs.signer ${String(c.inputs?.signer)} is not a fixture Principal`;
+        return bytesEqual(p.issuer, signer.descriptor.principalId) || "issuer is not inputs.signer";
+      }),
+      deterministic("protected_header_cbor/deterministic", protectedHeader),
+      sameBytes(
+        "protected_header_cbor",
+        protectedHeader,
+        () => parseSignedObject(cose).protectedBytes,
+      ),
+      deterministic("sig_structure_cbor/deterministic", hexOf(e, "sig_structure_cbor")),
+      bytesCheck(
+        "sig_structure_cbor",
+        hexOf(e, "sig_structure_cbor"),
+        sigStructureBytes(protectedHeader, payload),
+      ),
+      ...signed.checks,
+      bytesCheck("record_id", hexOf(e, "record_id"), objectId(cose)),
+      ...(signed.parsed
+        ? [bytesCheck("record_id/parsed", hexOf(e, "record_id"), signed.parsed.signed.id)]
+        : []),
+    ],
+    pending: ["payload_cbor/typed-body"],
+  };
+};
+
+const ownerTransfer: Handler = (c, context) => {
+  const checks: Check[] = [];
+  for (const side of ["offer", "accept"]) {
+    const payload = hexOf(c.expected, `${side}_payload_cbor`);
+    const cose = hexOf(c.expected, `${side}_cose_sign1`);
+    checks.push(deterministic(`${side}_payload_cbor/deterministic`, payload));
+    checks.push(
+      ...signedObject(
+        `${side}_cose_sign1`,
+        context,
+        cose,
+        (b) => ({ signed: parseSignedObject(b), payload: null }),
+        kidOf,
+        payload,
+      ).checks,
+    );
+    checks.push(bytesCheck(`${side}_id`, hexOf(c.expected, `${side}_id`), objectId(cose)));
+  }
+  return { checks, pending: ["offer_payload_cbor/typed", "accept_payload_cbor/typed"] };
+};
+
+const keyPackage: Handler = (c, context) => {
+  const e = c.expected;
+  const payload = hexOf(e, "payload_cbor");
+  const cose = hexOf(e, "cose_sign1");
+  const signed = signedObject(
+    "cose_sign1",
+    context,
+    cose,
+    parseKeyPackage,
+    (p) => expectedSignerOf(p.payload),
+    payload,
+  );
+  return {
+    checks: [
+      deterministic("hpke_info_cbor/deterministic", hexOf(e, "hpke_info_cbor")),
+      deterministic("hpke_aad_cbor/deterministic", hexOf(e, "hpke_aad_cbor")),
+      sameBytes(
+        "hpke_enc/payload-field",
+        hexOf(e, "hpke_enc"),
+        () => decodeKeyPackagePayload(payload).hpkeEnc,
+      ),
+      sameBytes(
+        "hpke_ciphertext/payload-field",
+        hexOf(e, "hpke_ciphertext"),
+        () => decodeKeyPackagePayload(payload).hpkeCiphertext,
+      ),
+      deterministic("payload_cbor/deterministic", payload),
+      check("payload_cbor/decode", () => decodeKeyPackagePayload(payload).kind === "key-package"),
+      ...signed.checks,
+      bytesCheck("package_id", hexOf(e, "package_id"), objectId(cose)),
+    ],
+    pending: [
+      "hpke_info_cbor/construct",
+      "hpke_aad_cbor/construct",
+      "hpke_enc/derive",
+      "hpke_shared_secret/derive",
+      "hpke_key/derive",
+      "hpke_base_nonce/derive",
+      "hpke_ciphertext/seal",
+    ],
+  };
+};
+
+const dataUnit: Handler = (c, context) => {
+  const e = c.expected;
+  const payload = hexOf(e, "payload_cbor");
+  const cose = hexOf(e, "cose_sign1");
+  const signed = signedObject(
+    "cose_sign1",
+    context,
+    cose,
+    parseDataUnit,
+    (p) => expectedSignerOf(p.payload),
+    payload,
+  );
+  return {
+    checks: [
+      deterministic("aad_cbor/deterministic", hexOf(e, "aad_cbor")),
+      sameBytes(
+        "ciphertext/payload-field",
+        hexOf(e, "ciphertext"),
+        () => decodeDataUnitPayload(payload).ciphertext,
+      ),
+      deterministic("payload_cbor/deterministic", payload),
+      check("payload_cbor/decode", () => decodeDataUnitPayload(payload).kind === "data-unit"),
+      ...signed.checks,
+      bytesCheck("unit_id", hexOf(e, "unit_id"), objectId(cose)),
+    ],
+    pending: ["actor_key/derive", "nonce/derive", "aad_cbor/construct", "ciphertext/encrypt"],
+  };
+};
+
+const snapshot: Handler = (c, context) => {
+  const e = c.expected;
+  const payload = hexOf(e, "payload_cbor");
+  const cose = hexOf(e, "cose_sign1");
+  const frontier = hexOf(e, "frontier_cbor");
+  const protectedHeader = hexOf(e, "protected_header_cbor");
+  const signed = signedObject(
+    "cose_sign1",
+    context,
+    cose,
+    parseSnapshot,
+    (p) => expectedSignerOf(p.payload),
+    payload,
+  );
+  const field5 = (): Uint8Array => {
+    const map = decodeStrict(payload);
+    const entry = isCborMap(map) ? map.entries.find(([k]) => k === 5) : undefined;
+    if (entry === undefined) throw new Error("payload has no field 5");
+    return encode(entry[1] as CborValue);
+  };
+  return {
+    checks: [
+      deterministic("frontier_cbor/deterministic", frontier),
+      check("frontier_cbor/canonical", () =>
+        Array.isArray(canonicalFrontierFromCbor(decodeStrict(frontier))),
+      ),
+      sameBytes("frontier_cbor/payload-field", frontier, field5),
+      deterministic("aad_cbor/deterministic", hexOf(e, "aad_cbor")),
+      sameBytes(
+        "ciphertext/payload-field",
+        hexOf(e, "ciphertext"),
+        () => decodeSnapshotPayload(payload).ciphertext,
+      ),
+      deterministic("payload_cbor/deterministic", payload),
+      check("payload_cbor/inputs", () => {
+        const p = decodeSnapshotPayload(payload);
+        return (
+          (p.dataEpoch === BigInt(Number(c.inputs?.data_epoch)) &&
+            p.snapshotSeq === BigInt(Number(c.inputs?.snapshot_sequence)) &&
+            bytesEqual(p.controlHead, hexOf(c.inputs, "control_head"))) ||
+          "payload fields differ from inputs data_epoch, snapshot_sequence, control_head"
+        );
+      }),
+      deterministic("protected_header_cbor/deterministic", protectedHeader),
+      sameBytes(
+        "protected_header_cbor",
+        protectedHeader,
+        () => parseSignedObject(cose).protectedBytes,
+      ),
+      bytesCheck(
+        "sig_structure_cbor",
+        hexOf(e, "sig_structure_cbor"),
+        sigStructureBytes(protectedHeader, payload),
+      ),
+      ...signed.checks,
+      bytesCheck("snapshot_id", hexOf(e, "snapshot_id"), objectId(cose)),
+    ],
+    pending: ["aad_cbor/construct", "snapshot_key/derive", "nonce/derive", "ciphertext/encrypt"],
+  };
+};
+
+const inviteUri: Handler = (c, context) => {
+  const e = c.expected;
+  const secret = hexOf(e, "secret_cbor");
+  const fixtures = context.suite.fixtures as { resource?: { id?: unknown } } | undefined;
+  return {
+    checks: [
+      deterministic("secret_cbor/deterministic", secret),
+      equalCheck("secret_b64url", b64Of(e, "secret_b64url"), toBase64url(secret)),
+      check("resource_b64url", () => {
+        const actual = toBase64url(hexOf(fixtures?.resource as Fields, "id"));
+        return actual === b64Of(e, "resource_b64url") || `actual ${actual}`;
+      }),
+      check("grant_id_b64url/control-record", () => {
+        const id = fromBase64url(b64Of(e, "grant_id_b64url"));
+        const match = context.suite.cases.some(
+          (r) =>
+            r.type === "bytes" &&
+            r.kind === "control_record" &&
+            bytesEqual(hexOf(r.expected, "record_id"), id),
+        );
+        return match || "names no Control Record of this suite";
+      }),
+    ],
+    pending: ["secret_cbor/typed", "uri/assemble"],
+  };
+};
+
+const wireMessage: Handler = (c, context) => {
+  const e = c.expected;
+  const checks: Check[] = [deterministic("message_cbor/deterministic", hexOf(e, "message_cbor"))];
+  const pending = ["message_cbor/typed"];
+  if (has(e, "auth_transcript_cbor")) {
+    checks.push(
+      deterministic("auth_transcript_cbor/deterministic", hexOf(e, "auth_transcript_cbor")),
+    );
+    pending.push("auth_transcript_cbor/construct");
+  }
+  if (has(e, "auth_proof_cose_sign1")) {
+    const proof = hexOf(e, "auth_proof_cose_sign1");
+    const transcript = hexOf(e, "auth_transcript_cbor");
+    checks.push(
+      ...signedObject(
+        "auth_proof_cose_sign1",
+        context,
+        proof,
+        (b) => ({ signed: parseSignedObject(b), payload: null }),
+        kidOf,
+        transcript,
+      ).checks,
+    );
+    pending.push("auth_proof_cose_sign1/session-binding");
+  }
+  return { checks, pending };
+};
+
+// ---------------------------------------------------------------------------
+// validation cases
+
+/**
+ * Runs a received object through this SDK's layers (structure, then the
+ * signature against the payload's expected signer) and returns the wire
+ * code it fails with, or null when every implemented layer accepts it.
+ */
+function receive<P>(
+  context: HandlerContext,
+  cose: Uint8Array,
+  parse: (bytes: Uint8Array) => Parsed<P>,
+  signerOf: (p: Parsed<P>) => PrincipalId,
+): string | null {
+  let parsed: Parsed<P>;
+  try {
+    parsed = parse(cose);
+  } catch (e) {
+    return wireCodeOf(e);
+  }
+  const v = verifySignedObject(parsed.signed, signerFor(context, signerOf(parsed)).descriptor);
+  return v.valid ? null : SIGNATURE_FAILURE;
+}
+
+/** The outcome check when a layer rejects; when all implemented layers accept, the outcome is pending. */
+function negative(c: VectorCase, actual: string | null): { checks: Check[]; pending: string[] } {
+  const e = c.expected as { valid?: unknown; error?: { code?: unknown } };
+  if (e.valid === true) {
+    const ok: Check =
+      actual === null
+        ? { name: "outcome", ok: true }
+        : { name: "outcome", ok: false, message: `expected acceptance, actual ${actual}` };
+    return { checks: [ok], pending: [] };
+  }
+  const expected = typeof e.error?.code === "string" ? e.error.code : null;
+  if (actual === null)
+    return { checks: [{ name: "structure-and-signature", ok: true }], pending: ["outcome"] };
+  return { checks: [outcomeCheck("outcome", expected, actual)], pending: [] };
+}
+
+function signedNegative<P>(
+  parse: (bytes: Uint8Array) => Parsed<P>,
+  signerOf: (p: Parsed<P>) => PrincipalId,
+): Handler {
+  return (c, context) => {
+    const inputs = c.inputs;
+    const extra: Check[] = [];
+    let coseField: string | undefined;
+    if (has(inputs, "cose_sign1")) coseField = "cose_sign1";
+    else if (has(inputs, "conflicting_D2_cose")) coseField = "conflicting_D2_cose";
+    if (coseField === undefined) return { checks: [], pending: ["outcome"] }; // no object to receive
+    const cose = hexOf(inputs, coseField);
+    if (has(inputs, "record_id"))
+      extra.push(bytesCheck("inputs.record_id", hexOf(inputs, "record_id"), objectId(cose)));
+    if (has(inputs, "conflicting_D2_id"))
+      extra.push(
+        bytesCheck("inputs.conflicting_D2_id", hexOf(inputs, "conflicting_D2_id"), objectId(cose)),
+      );
+    if (has(inputs, "noncanonical_aad_cbor")) {
+      extra.push(
+        check(
+          "inputs.noncanonical_aad_cbor/not-deterministic",
+          () => !isDeterministic(hexOf(inputs, "noncanonical_aad_cbor")),
+        ),
+      );
+    }
+    const result = negative(c, receive(context, cose, parse, signerOf));
+    return { checks: [...extra, ...result.checks], pending: result.pending };
+  };
+}
+
+const principalNegative: Handler = (c) => {
+  let actual: string | null = null;
+  try {
+    decodePrincipalDescriptor(hexOf(c.inputs, "descriptor_cbor"));
+  } catch (e) {
+    actual = wireCodeOf(e);
+  }
+  return negative(c, actual);
+};
+
+export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
+  "bytes/principal": principal,
+  "bytes/control_record": controlRecord,
+  "bytes/owner_transfer": ownerTransfer,
+  "bytes/key_package": keyPackage,
+  "bytes/data_unit": dataUnit,
+  "bytes/snapshot": snapshot,
+  "bytes/invite_uri": inviteUri,
+  "bytes/wire_message": wireMessage,
+  "validation/data_unit": signedNegative(parseDataUnit, (p) => expectedSignerOf(p.payload)),
+  "validation/control_record": signedNegative(parseControlRecord, (p) => p.payload.issuer),
+  "validation/key_package": signedNegative(parseKeyPackage, (p) => expectedSignerOf(p.payload)),
+  "validation/snapshot": signedNegative(parseSnapshot, (p) => expectedSignerOf(p.payload)),
+  "validation/principal": principalNegative,
+};
