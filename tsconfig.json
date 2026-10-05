@@ -22,6 +22,9 @@
     },
     {
       "path": "packages/storage-node"
+    },
+    {
+      "path": "packages/storage-idb"
     }
   ]
 }
