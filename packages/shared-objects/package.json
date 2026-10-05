@@ -26,5 +26,8 @@
     "@automerge/automerge": "3.5.0",
     "@openlfcp/core": "workspace:^",
     "@openlfcp/crypto": "workspace:^"
+  },
+  "devDependencies": {
+    "fast-check": "4.10.2"
   }
 }
