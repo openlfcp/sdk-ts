@@ -36,6 +36,7 @@ export type {
   KeyPackageReader,
   KeyPackageRow,
   LfcpStorage,
+  LocalMarkReader,
   OutboundBlock,
   OutboundItem,
   OutboundKind,

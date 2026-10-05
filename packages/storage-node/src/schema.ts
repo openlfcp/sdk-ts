@@ -3,7 +3,8 @@ import type Database from "better-sqlite3";
 
 /**
  * The SQLite schema and its migrations. Version 1 is the LFCP-034 storage
- * model; version 2 adds outbound retry state and sync state (LFCP-036).
+ * model; version 2 adds outbound retry state and sync state (LFCP-036);
+ * version 3 adds local marks (the crash-loop breaker's apply markers).
  * A database at a newer version than this code knows is refused:
  * it is never downgraded or "repaired".
  *
@@ -147,6 +148,16 @@ CREATE TABLE sync_state (
   resource_id       BLOB PRIMARY KEY,
   recently_acked    BLOB NOT NULL,
   acked_durability  TEXT
+) WITHOUT ROWID;
+`,
+  ],
+  [
+    // Local marks: small device-local processing records (crash-loop breaker).
+    3,
+    `
+CREATE TABLE local_marks (
+  key    TEXT PRIMARY KEY,
+  value  TEXT NOT NULL
 ) WITHOUT ROWID;
 `,
   ],

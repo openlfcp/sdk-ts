@@ -61,7 +61,7 @@ describe(PACKAGE, () => {
       db.close();
       t.storage = SqliteLfcpStorage.open(v1);
       expect(t.storage.schemaVersion).toBe(SCHEMA_VERSION);
-      expect(SCHEMA_VERSION).toBe(2);
+      expect(SCHEMA_VERSION).toBe(3);
       expect(await t.storage.outbound.list(R)).toEqual([
         {
           itemId: hash32(new Uint8Array(32).fill(7)),
@@ -75,6 +75,7 @@ describe(PACKAGE, () => {
         },
       ]);
       expect(await t.storage.syncState.get(R)).toBeUndefined();
+      expect(await t.storage.localMarks.list("")).toEqual([]); // version 3
     } finally {
       t.dispose();
     }

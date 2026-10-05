@@ -70,6 +70,7 @@ interface State {
   readonly outbound: Map<string, OutboundItem>;
   readonly checkpoints: Map<string, ProfileCheckpoint>;
   readonly syncStates: Map<string, SyncStateRow>;
+  readonly marks: Map<string, string>;
 }
 
 const emptyState = (): State => ({
@@ -85,6 +86,7 @@ const emptyState = (): State => ({
   outbound: new Map(),
   checkpoints: new Map(),
   syncStates: new Map(),
+  marks: new Map(),
 });
 
 /** Rows are immutable, so a staged copy of the maps is enough for all-or-nothing batches. */
@@ -101,6 +103,7 @@ const stage = (s: State): State => ({
   outbound: new Map(s.outbound),
   checkpoints: new Map(s.checkpoints),
   syncStates: new Map(s.syncStates),
+  marks: new Map(s.marks),
 });
 
 /** Stores an immutable object under its ID; the same ID with other bytes is refused. */
@@ -219,6 +222,10 @@ function apply(s: State, w: StorageWrite): void {
       return;
     case "put-sync-state":
       s.syncStates.set(hex(w.row.resourceId), own(w.row));
+      return;
+    case "put-local-mark":
+      if (w.value === null) s.marks.delete(w.key);
+      else s.marks.set(w.key, w.value);
       return;
   }
 }
@@ -503,6 +510,17 @@ export class InMemoryLfcpStorage implements LfcpStorage {
   readonly syncState = {
     get: (resource: ResourceId) =>
       Promise.resolve(copyOf(this.#state.syncStates.get(hex(resource)))),
+  };
+
+  readonly localMarks = {
+    get: (key: string) => Promise.resolve(this.#state.marks.get(key)),
+    list: (prefix: string) =>
+      Promise.resolve(
+        [...this.#state.marks]
+          .filter(([key]) => key.startsWith(prefix))
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([key, value]) => ({ key, value })),
+      ),
   };
 }
 

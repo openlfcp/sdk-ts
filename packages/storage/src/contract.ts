@@ -303,6 +303,33 @@ export function runStorageContract(
       );
     });
 
+    test("keeps local marks, lists them by prefix and removes them with null", async ({
+      storage: s,
+    }) => {
+      eq(await s.localMarks.get("applying:a"), undefined, "none yet");
+      await ok(
+        s,
+        [
+          { op: "put-local-mark", key: "applying:b", value: "2" },
+          { op: "put-local-mark", key: "applying:a", value: "1" },
+          { op: "put-local-mark", key: "other", value: "x" },
+        ],
+        "set",
+      );
+      eq(await s.localMarks.get("applying:a"), "1", "get");
+      eq(
+        await s.localMarks.list("applying:"),
+        [
+          { key: "applying:a", value: "1" },
+          { key: "applying:b", value: "2" },
+        ],
+        "by prefix, by key",
+      );
+      await ok(s, [{ op: "put-local-mark", key: "applying:a", value: null }], "removed");
+      eq(await s.localMarks.get("applying:a"), undefined, "gone");
+      eq((await s.localMarks.list("")).length, 2, "the others stay");
+    });
+
     test("refuses a local unit whose previous unit is no longer the actor's latest accepted one", async ({
       storage: s,
     }) => {

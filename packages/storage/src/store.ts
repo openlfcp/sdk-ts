@@ -311,7 +311,9 @@ export type StorageWrite =
     }
   | { readonly op: "dequeue"; readonly itemId: Hash32 }
   | { readonly op: "put-profile-checkpoint"; readonly checkpoint: ProfileCheckpoint }
-  | { readonly op: "put-sync-state"; readonly row: SyncStateRow };
+  | { readonly op: "put-sync-state"; readonly row: SyncStateRow }
+  /** Sets (or, with null, removes) a local mark (LocalMarkReader). */
+  | { readonly op: "put-local-mark"; readonly key: string; readonly value: string | null };
 
 export type CommitResult =
   | { readonly ok: true }
@@ -404,6 +406,17 @@ export interface SyncStateReader {
   get(resource: ResourceId): Promise<SyncStateRow | undefined>;
 }
 
+/**
+ * Small device-local records the client keeps about its own processing,
+ * such as the crash-loop breaker's apply marker. Never protocol state,
+ * never secrets: plain strings under string keys.
+ */
+export interface LocalMarkReader {
+  get(key: string): Promise<string | undefined>;
+  /** Every mark whose key starts with `prefix`, by key. */
+  list(prefix: string): Promise<{ readonly key: string; readonly value: string }[]>;
+}
+
 /** Everything a client persists, except secrets (SecretStore). */
 export interface LfcpStorage {
   readonly control: ControlReader;
@@ -414,6 +427,7 @@ export interface LfcpStorage {
   readonly outbound: OutboundReader;
   readonly profileState: ProfileStateReader;
   readonly syncState: SyncStateReader;
+  readonly localMarks: LocalMarkReader;
   readonly actorSequences: ActorSequenceReservation;
   readonly snapshotSequences: SnapshotSequenceReservation;
   /** Applies every write or none; durable before it resolves. */

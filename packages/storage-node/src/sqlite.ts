@@ -27,6 +27,7 @@ import {
   type KeyPackageReader,
   type KeyPackageRow,
   type LfcpStorage,
+  type LocalMarkReader,
   nextActorSequence,
   type OutboundBlock,
   type OutboundItem,
@@ -550,6 +551,13 @@ export class SqliteLfcpStorage implements LfcpStorage {
       case "dequeue":
         db.prepare("DELETE FROM outbound WHERE item_id = ?").run(blob(w.itemId));
         return;
+      case "put-local-mark":
+        if (w.value === null) db.prepare("DELETE FROM local_marks WHERE key = ?").run(w.key);
+        else
+          db.prepare(
+            "INSERT INTO local_marks (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+          ).run(w.key, w.value);
+        return;
       case "put-profile-checkpoint": {
         const c = w.checkpoint;
         db.prepare(
@@ -770,6 +778,22 @@ export class SqliteLfcpStorage implements LfcpStorage {
         const r = this.#get("SELECT * FROM sync_state WHERE resource_id = ?", blob(res));
         return r === undefined ? undefined : syncStateRow(r);
       }),
+  };
+
+  readonly localMarks: LocalMarkReader = {
+    get: (key) =>
+      this.#read(
+        () =>
+          this.#get("SELECT value FROM local_marks WHERE key = ?", key)?.value as
+            | string
+            | undefined,
+      ),
+    list: (prefix) =>
+      this.#read(() =>
+        this.#all("SELECT key, value FROM local_marks ORDER BY key")
+          .filter((r) => (r.key as string).startsWith(prefix))
+          .map((r) => ({ key: r.key as string, value: r.value as string })),
+      ),
   };
 
   /** Durable before it resolves: the new value is committed (WAL, synchronous=FULL) first. */

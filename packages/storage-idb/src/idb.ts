@@ -98,6 +98,8 @@ export interface IdbStorageOptions {
 const hex = toHex;
 /** uint64 as a fixed-width decimal string, so key order is numeric order. */
 const pad = (n: bigint): string => n.toString().padStart(20, "0");
+/** Local marks share the meta store under this key prefix. */
+const MARK = "mark:";
 const LOW = "";
 const HIGH = "￿";
 const actorKey = (r: ResourceId, p: PrincipalId): string => `actor:${hex(r)}:${hex(p)}`;
@@ -484,6 +486,13 @@ export class IdbLfcpStorage implements LfcpStorage {
       case "put-sync-state":
         await req(s("syncStates").put(w.row, hex(w.row.resourceId)));
         return;
+      case "put-local-mark": {
+        // Kept in the meta store under "mark:" (no schema change).
+        const key = `${MARK}${w.key}`;
+        if (w.value === null) await req(s("meta").delete(key));
+        else await req(s("meta").put(w.value, key));
+        return;
+      }
     }
   }
 
@@ -730,5 +739,22 @@ export class IdbLfcpStorage implements LfcpStorage {
 
   readonly syncState = {
     get: (resource: ResourceId) => this.#get<SyncStateRow>("syncStates", hex(resource)),
+  };
+
+  readonly localMarks = {
+    get: (key: string) => this.#get<string>("meta", `${MARK}${key}`),
+    list: (prefix: string) =>
+      this.#tx(["meta"], "readonly", async (tx) => {
+        const range = IDBKeyRange.bound(`${MARK}${prefix}`, `${MARK}${prefix}${HIGH}`);
+        const store = tx.objectStore("meta");
+        const [keys, values] = await Promise.all([
+          req(store.getAllKeys(range)),
+          req(store.getAll(range)),
+        ]);
+        return keys.map((k, i) => ({
+          key: (k as string).slice(MARK.length),
+          value: values[i] as string,
+        }));
+      }),
   };
 }
