@@ -352,6 +352,51 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     expect(await dekResolver(bob.storage, bob.secrets, chain.R)(dataEpoch(0n))).toBeDefined();
   });
 
+  it("issues a data round again when its DATA_GET reply is lost on a live connection (§70)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(205);
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    const v = chain.view();
+    const u = await createQueuedDataUnit(new InMemoryLfcpStorage(), {
+      view: v,
+      controlHead: v.state.head,
+      actor: OWNER.signer,
+      dek: DEK0,
+      profile: TEXT,
+      previousUnitId: null,
+      value: "late reply",
+    });
+    hostOf(server, chain, [u.bytes]);
+    const answer = server.onMessage;
+    let swallowed = 0;
+    server.onMessage = (m, s) => {
+      if (m.type === "DATA_GET" && swallowed === 0) {
+        swallowed++; // the reply is lost; the connection stays up
+        return [];
+      }
+      return answer(m, s);
+    };
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(200);
+    await owner.sync.idle();
+    expect(owner.sync.resourceState(chain.R)).toBe("DATA_SYNC");
+    clock.t = 14_999;
+    owner.sync.tick(clock.t);
+    await settle(50);
+    expect(server.of("DATA_GET")).toHaveLength(1);
+    clock.t = 15_000;
+    owner.sync.tick(clock.t);
+    await settle(200);
+    await owner.sync.idle();
+    expect(server.of("DATA_GET")).toHaveLength(2);
+    expect(server.sockets).toHaveLength(1); // no reconnect
+    expect(owner.merged).toEqual(["late reply"]);
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+  });
+
   it("fetches missing ranges when the server's Have is ahead while LIVE (§69)", async () => {
     const server = new FakeServer();
     const clock = { t: 0 };

@@ -121,6 +121,13 @@ export interface SyncClientOptions {
   readonly reconnect?: ReconnectPolicy;
   /** How often a LIVE Resource exchanges DATA_HAVE (§69); default 30 s. */
   readonly antiEntropyMs?: number;
+  /**
+   * How long a request waits for its answer on a live connection before
+   * the step it belongs to is issued again (a lost request or reply, §70
+   * at-least-once): RESOURCE_OPEN, the Control round, KEY_PACKAGE_GET, the
+   * data round. Default 15 s.
+   */
+  readonly requestTimeoutMs?: number;
   /** An opaque hosting credential for AUTH (§36): server policy only. */
   readonly credential?: Uint8Array;
   readonly dataProfiles?: readonly string[];
@@ -233,6 +240,8 @@ interface ResourceContext {
   unitsSinceSnapshot: number;
   /** The ranges the last data round requested (to detect a round without progress). */
   lastRound: string;
+  /** The server heads the current Control round works towards (to issue it again). */
+  lastHeads: readonly ControlHeadRef[];
 }
 
 const SUBSCRIBE_DATA_AND_CONTROL = 0b11n;
@@ -249,6 +258,9 @@ export class SyncClient {
   readonly #connection: LfcpConnection;
   readonly #resources = new Map<string, ResourceContext>();
   readonly #requests = new Map<string, Request>();
+  /** When each request was sent (caller's clock), for the request timeout. */
+  readonly #sentAt = new Map<string, number>();
+  readonly #requestTimeoutMs: number;
   readonly #listeners = new Set<(event: SyncEvent) => void>();
   readonly #antiEntropyMs: number;
   #stopped = true;
@@ -260,6 +272,7 @@ export class SyncClient {
   constructor(options: SyncClientOptions) {
     this.#o = options;
     this.#antiEntropyMs = options.antiEntropyMs ?? 30_000;
+    this.#requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
     this.#connection = new LfcpConnection(
       {
         url: options.url,
@@ -344,6 +357,7 @@ export class SyncClient {
         early: [],
         lastHave: 0,
         lastKeyRequest: 0,
+        lastHeads: [],
         missingEpochs: [],
         offered: null,
         snapshotPending: false,
@@ -410,6 +424,7 @@ export class SyncClient {
       return;
     }
     if (!this.#connection.tick(now)) return;
+    if (this.#connection.state === "READY") this.#expireRequests(now);
     this.#serial(async () => {
       for (const ctx of this.#resources.values()) {
         if (ctx.state === "LIVE" && now - ctx.lastHave >= this.#antiEntropyMs)
@@ -432,8 +447,49 @@ export class SyncClient {
   // plumbing
 
   #request(request: Request, message: LfcpMessage): void {
-    this.#requests.set(toHex(message.messageId), request);
+    const key = toHex(message.messageId);
+    this.#requests.set(key, request);
+    this.#sentAt.set(key, this.#o.now());
     this.#connection.send(message);
+  }
+
+  /**
+   * Requests unanswered for requestTimeoutMs on a live connection (§70: a
+   * lost request or reply): forgotten, and the step they belong to is
+   * issued again while its Resource is still in that phase. A late reply
+   * is harmless: units and records are idempotent.
+   */
+  #expireRequests(now: number): void {
+    for (const key of this.#sentAt.keys()) if (!this.#requests.has(key)) this.#sentAt.delete(key);
+    const resend = new Map<string, Request>();
+    for (const [key, request] of this.#requests) {
+      const sent = this.#sentAt.get(key);
+      if (sent === undefined || now - sent < this.#requestTimeoutMs) continue;
+      this.#requests.delete(key);
+      this.#sentAt.delete(key);
+      if (request.kind === "host") {
+        request.reject(new Error("RESOURCE_HOST got no answer within the request timeout"));
+        continue;
+      }
+      if ("resource" in request) resend.set(`${request.kind}:${request.resource}`, request);
+    }
+    for (const request of resend.values()) {
+      if (!("resource" in request)) continue;
+      const ctx = this.#resources.get(request.resource);
+      if (ctx === undefined) continue;
+      if (request.kind === "open" && ctx.state === "OPENING") {
+        this.#move(ctx, "CLOSE");
+        this.#serial(() => this.#sendOpen(ctx));
+      } else if (request.kind === "control" && ctx.state === "CONTROL_SYNC") {
+        this.#serial(() => this.#controlRound(ctx, ctx.lastHeads));
+      } else if (request.kind === "keys" && ctx.state === "KEY_SYNC") {
+        this.#requestKeys(ctx, now);
+      } else if (request.kind === "data-get" && ctx.state === "DATA_SYNC") {
+        ctx.lastRound = ""; // a lost reply is not a round without progress
+        ctx.expected = [];
+        this.#serial(() => this.#dataRound(ctx));
+      }
+    }
   }
 
   #move(ctx: ResourceContext, event: ResourcePhaseEvent): boolean {
@@ -472,6 +528,7 @@ export class SyncClient {
       if (r.kind === "host")
         r.reject(new Error(`the connection closed before RESOURCE_HOSTED: ${reason}`));
     this.#requests.clear();
+    this.#sentAt.clear();
     for (const ctx of this.#resources.values()) {
       this.#move(ctx, "CLOSE"); // §65, G-SM1: every Resource closes with the connection
       ctx.view = null;
@@ -643,6 +700,7 @@ export class SyncClient {
     const local = chain?.kind === "linear" ? localControlOf(chain) : null;
     const plan = planControlSync(local, heads);
     ctx.fetched = [];
+    ctx.lastHeads = heads;
     if (plan.kind === "fetch" || plan.kind === "fork") {
       const range = plan.kind === "fetch" ? plan : plan.fetch;
       ctx.controlTarget = range.end;
