@@ -1,0 +1,32 @@
+{
+  "name": "@openlfcp/storage-idb",
+  "version": "0.0.0",
+  "description": "Durable portable storage for LFCP clients on IndexedDB (browsers, Electron, mobile WebViews).",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openlfcp/sdk-ts.git",
+    "directory": "packages/storage-idb"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@openlfcp/core": "workspace:^",
+    "@openlfcp/storage": "workspace:^"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "6.2.5"
+  }
+}
