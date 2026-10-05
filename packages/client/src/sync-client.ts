@@ -14,6 +14,7 @@ import { dekSecretRef, type EpochRow, type LfcpStorage, type SecretStore } from 
 import {
   type ActorRange,
   type AnyMessage,
+  addRange,
   addSequence,
   batchDataRanges,
   type ChainResult,
@@ -1107,9 +1108,10 @@ export class SyncClient {
     }
     ctx.lastRound = key;
     if (ctx.state === "LIVE") this.#move(ctx, "MISSING_RANGES");
+    // Ranges stay intervals: the work is bounded by their number, never by
+    // their span (a Have may announce up to 2^64 - 1 sequences).
     let expected: HaveVector = [];
-    for (const r of missing)
-      for (let s = r.start; s <= r.end; s++) expected = addSequence(expected, r.actor, s);
+    for (const r of missing) expected = addRange(expected, r.actor, r.start, r.end);
     ctx.expected = expected;
     ctx.received = [];
     for (const batch of batchDataRanges(missing))

@@ -225,6 +225,61 @@ describe("difference (§68)", () => {
     ]);
   });
 
+  it("work is bounded by the number of intervals, never their span", () => {
+    const MAX = 2n ** 64n - 1n;
+    const t0 = performance.now();
+    const huge = normalizeLiveHaves([live(A, MAX), live(B, 0n, [[2n, MAX]])]);
+    expect(missingFrom(EMPTY, huge)).toEqual([
+      { actor: A, start: 1n, end: MAX },
+      { actor: B, start: 2n, end: MAX },
+    ]);
+    expect(missingFrom(normalizeLiveHaves([live(A, 5n, [[MAX, MAX]])]), huge)).toEqual([
+      { actor: A, start: 6n, end: MAX - 1n },
+      { actor: B, start: 2n, end: MAX },
+    ]);
+    const wide = addRange(addRange(EMPTY, A, 1n, MAX), B, 2n, MAX);
+    expect(shape(wide, A)).toEqual([MAX, []]);
+    // 20,000 holes on each side: one pass, not one per pair.
+    const odd: [bigint, bigint][] = [];
+    const even: [bigint, bigint][] = [];
+    for (let i = 1n; i <= 20_000n; i++) {
+      odd.push([4n * i, 4n * i]);
+      even.push([4n * i + 2n, 4n * i + 2n]);
+    }
+    const mine = normalizeLiveHaves([live(A, 1n, odd)]);
+    const theirs = normalizeLiveHaves([live(A, 1n, [...odd, ...even])]);
+    expect(missingFrom(mine, theirs)).toHaveLength(20_000);
+    expect(performance.now() - t0).toBeLessThan(3_000);
+  });
+
+  it("the interval difference matches a per-sequence reference", () => {
+    let seed = 7;
+    const rnd = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2 ** 31;
+      return seed % n;
+    };
+    const vec = () => {
+      const ranges: [bigint, bigint][] = [];
+      for (let i = rnd(5); i > 0; i--) {
+        const s = BigInt(1 + rnd(40));
+        ranges.push([s, s + BigInt(rnd(6))]);
+      }
+      return normalizeLiveHaves([live(A, BigInt(rnd(8)), ranges)]);
+    };
+    for (let round = 0; round < 300; round++) {
+      const [l, r] = [vec(), vec()];
+      const want: bigint[] = [];
+      for (let q = 1n; q <= 60n; q++)
+        if (hasSequence(r, A, q) && !hasSequence(l, A, q)) want.push(q);
+      const got = missingFrom(l, r).flatMap(({ start, end }) => {
+        const out: bigint[] = [];
+        for (let q = start; q <= end; q++) out.push(q);
+        return out;
+      });
+      expect(got).toEqual(want);
+    }
+  });
+
   it("held units are not counted: the peer's copy is requested again until it is accepted (G-DP1)", () => {
     // seq 1 and 3 accepted; seq 2's unit arrived but is held (its previous unit was missing).
     let accepted = addSequence(addSequence(EMPTY, A, 1n), A, 3n);

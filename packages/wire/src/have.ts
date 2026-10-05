@@ -288,15 +288,21 @@ export function unionHaves(a: HaveVector, b: HaveVector): HaveVector {
   return normalizeLiveHaves([...liveHavesOf(a), ...liveHavesOf(b)]);
 }
 
-/** Subtracts sorted, merged `have` from sorted, merged `want`. */
+/**
+ * Subtracts sorted, merged `have` from sorted, merged `want` in one pass:
+ * linear in the number of intervals, whatever their span.
+ */
 function subtract(want: readonly SequenceRange[], have: readonly SequenceRange[]): SequenceRange[] {
   const out: SequenceRange[] = [];
+  let j = 0;
   for (const [ws, we] of want) {
     let s = ws;
-    for (const [hs, he] of have) {
-      if (he < s || hs > we) continue;
+    while (j < have.length && have[j]![1] < s) j++;
+    for (let k = j; k < have.length && have[k]![0] <= we; k++) {
+      const [hs, he] = have[k]!;
       if (hs > s) out.push([s, hs - 1n]);
       s = he + 1n;
+      j = k;
       if (s > we) break;
     }
     if (s <= we) out.push([s, we]);
@@ -312,8 +318,9 @@ function subtract(want: readonly SequenceRange[], have: readonly SequenceRange[]
  */
 export function missingFrom(local: HaveVector, remote: HaveVector): ActorRange[] {
   const out: ActorRange[] = [];
+  const mine = new Map(local.map((h) => [toKey(h.principalId), h]));
   for (const r of sortVector([...remote])) {
-    const l = find(local, r.principalId);
+    const l = mine.get(toKey(r.principalId));
     const gaps = subtract(mergeIntervals(intervalsOf(r)), l ? mergeIntervals(intervalsOf(l)) : []);
     for (const [start, end] of gaps) out.push(Object.freeze({ actor: r.principalId, start, end }));
   }

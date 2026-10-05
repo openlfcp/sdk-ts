@@ -514,6 +514,34 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     expect(states(owner.events).slice(-2)).toEqual(["DATA_SYNC", "LIVE"]);
   });
 
+  it("a DATA_HAVE spanning 2^64 - 1 sequences costs intervals, not sequences (H2)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(206);
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    hostOf(server, chain);
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(200);
+    await owner.sync.idle();
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+    const MAX = 2n ** 64n - 1n;
+    const t0 = performance.now();
+    server.push({
+      type: "DATA_HAVE",
+      messageId: new Uint8Array(16).fill(4),
+      body: {
+        resourceId: chain.R,
+        haves: [{ principalId: OWNER.signer.descriptor.principalId, contiguous: MAX }],
+      },
+    });
+    await settle(200);
+    await owner.sync.idle();
+    expect(performance.now() - t0).toBeLessThan(2_000);
+    expect(server.of("DATA_GET")[0]?.body.ranges.map((r) => [r.start, r.end])).toEqual([[1n, MAX]]);
+  });
+
   it("on a new Key Epoch reconciles both the applier and the queue (G-EP7, §88 step 7)", async () => {
     const server = new FakeServer();
     const clock = { t: 0 };
