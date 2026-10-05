@@ -47,7 +47,8 @@ import {
  * version monotonicity belong to LFCP-020 to LFCP-023. Decoding never
  * applies a record; `mvpSupported` tells those layers whether MVP 0.1
  * implements the type (.github docs/MVP-0.1-PROTOCOL-SCOPE.md §4 defers
- * ownership transfer, coordinator recovery and Resource tombstones).
+ * coordinator recovery and Resource tombstones; ownership transfer is
+ * verified and applied, its UI/flow deferred).
  *
  * Writers apply rules the prose states for creators but not as receiver
  * checks: wss:// URLs (loopback ws:// allowed), no reserved endpoint flag
@@ -114,7 +115,13 @@ export type ControlBodyType = ControlBody["type"];
 
 const CODE: Readonly<Record<Exclude<ControlBodyType, "EXTENSION">, bigint>> = CONTROL_TYPE;
 
-/** §14 core types MVP 0.1 implements; the others decode but must not be applied. */
+/**
+ * §14 core types MVP 0.1 implements; the others decode but must not be
+ * applied. OWNER_TRANSFER_COMMIT is verified and applied (user decision on
+ * LFCP-021; the next spec patch amends MVP-0.1-PROTOCOL-SCOPE §4 to
+ * "ownership transfer verification is in MVP 0.1; the transfer UI/flow
+ * remains deferred"). Coordinator recovery and tombstones stay deferred.
+ */
 const MVP_SUPPORTED: ReadonlySet<ControlBodyType> = new Set([
   "GENESIS",
   "CAPABILITY_GRANT",
@@ -122,6 +129,7 @@ const MVP_SUPPORTED: ReadonlySet<ControlBodyType> = new Set([
   "CAPABILITY_CLAIM",
   "KEY_EPOCH",
   "ROUTE_UPDATE",
+  "OWNER_TRANSFER_COMMIT",
 ]);
 
 /** Whether MVP 0.1 implements a body type (false for deferred core types and extensions). */

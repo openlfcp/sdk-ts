@@ -41,10 +41,12 @@ const genesisBody = (owner: Signer = ALICE): ControlBody => ({
   endpoints: [{ url: "wss://sync.example.test", priority: 0n }],
   coordinatorUrl: "wss://sync.example.test",
 });
+// data/read, data/write and route/update: enough authority (LFCP-021) for
+// the grantee's route updates below.
 const grant = (who: Signer): ControlBody => ({
   type: "CAPABILITY_GRANT",
   subject: who.descriptor,
-  abilities: [1n, 2n],
+  abilities: [1n, 2n, 8n],
   delegable: [],
 });
 const route = (v: bigint): ControlBody => ({
@@ -312,14 +314,27 @@ describe("validateControlChain", () => {
     expect([r.problem, r.wireCode]).toEqual(["UNRESOLVED_ISSUER", "INVALID_CONTROL_CHAIN"]);
     const resolve = (id: PrincipalId) =>
       toHex(id) === toHex(CARLA.descriptor.principalId) ? CARLA.descriptor : undefined;
+    // With the descriptor resolved the signature verifies; CARLA holds no
+    // grant, so the default capability engine then refuses the record.
+    const resolved = expectInvalid(
+      validateControlChain(bytesOf([G, C1, byStranger]), { resolvePrincipal: resolve }),
+    );
+    expect(resolved.problem).toBe("UNAUTHORIZED");
     expect(
-      validateControlChain(bytesOf([G, C1, byStranger]), { resolvePrincipal: resolve }).kind,
+      validateControlChain(bytesOf([G, C1, byStranger]), {
+        resolvePrincipal: resolve,
+        authorize: () => true,
+      }).kind,
     ).toBe("linear");
     // A resolver that lies about the descriptor does not help.
     const liar = () => BRUNO.descriptor;
     expect(
-      expectInvalid(validateControlChain(bytesOf([G, C1, byStranger]), { resolvePrincipal: liar }))
-        .problem,
+      expectInvalid(
+        validateControlChain(bytesOf([G, C1, byStranger]), {
+          resolvePrincipal: liar,
+          authorize: () => true,
+        }),
+      ).problem,
     ).toBe("SIGNATURE");
   });
 

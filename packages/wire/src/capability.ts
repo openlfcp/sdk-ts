@@ -7,7 +7,16 @@ import {
   toHex,
 } from "@openlfcp/core";
 import type { ControlState } from "./chain.js";
-import type { ControlRecord } from "./control.js";
+import {
+  type ControlRecord,
+  type OwnerTransferAcceptPayload,
+  type OwnerTransferOfferPayload,
+  parseOwnerTransferAccept,
+  parseOwnerTransferOffer,
+} from "./control.js";
+import { objectId, verifySignedObject } from "./cose.js";
+import type { Parsed } from "./objects.js";
+import type { PrincipalDescriptor } from "./principal.js";
 
 /**
  * The LFCP capability engine (LFCP-WIRE-01 §17, §18, §20, §19, §25.2).
@@ -240,6 +249,8 @@ export function authorizeControlRecord(record: ControlRecord, state: ControlStat
       return hasAbility(state, issuer, ABILITY.KEY_ROTATE)
         ? ALLOW
         : deny("the issuer does not hold key/rotate (§19)");
+    case "OWNER_TRANSFER_COMMIT":
+      return verifyOwnerTransfer(record, state).authorization;
     case "ROUTE_UPDATE":
       // §20: "The issuer MUST possess route/update"; "The route version MUST
       // increase monotonically" (Genesis counts as route version 0, inferred).
@@ -349,4 +360,98 @@ export function canDistributeKey(
       return ALLOW;
   }
   return deny("the recipient holds neither data/read nor an active invite grant (§25.2)");
+}
+
+/** A verified ownership transfer: the new owner's descriptor, from the offer. */
+export interface VerifiedOwnerTransfer {
+  readonly authorization: Authorization;
+  readonly newOwner?: PrincipalDescriptor;
+}
+
+/**
+ * The §23.3 verifier for an OWNER_TRANSFER_COMMIT, at the state before it.
+ * Verification only: there is no transfer UI or flow (deferred from MVP 0.1).
+ *
+ * §23.3 "A verifier MUST confirm":
+ *  1. the offer is signed by the current owner;
+ *  2. the offer references the current Control Head;
+ *  3. the offer names the accepting Principal;
+ *  4. the acceptance is signed by that Principal;
+ *  5. the commit itself is signed by that Principal (here: issued by it;
+ *     the chain verifies the signature against the issuer);
+ *  6. the expected next Control Sequence matches the commit sequence.
+ * Also, from §23.1 and §23.2: the offer and accept are canonical signed
+ * objects of this Resource, and the accept names the exact offer ID (the
+ * §10.6 object ID of the offer bytes). Any failure is a refusal
+ * (AUTHORIZATION_FAILED); §23 names no code.
+ */
+export function verifyOwnerTransfer(
+  record: ControlRecord,
+  state: ControlState,
+): VerifiedOwnerTransfer {
+  const body = record.body;
+  if (body.type !== "OWNER_TRANSFER_COMMIT")
+    return { authorization: deny("not an ownership transfer commit") };
+  let offer: Parsed<OwnerTransferOfferPayload>;
+  let accept: Parsed<OwnerTransferAcceptPayload>;
+  try {
+    offer = parseOwnerTransferOffer(body.offer);
+    accept = parseOwnerTransferAccept(body.accept);
+  } catch {
+    return {
+      authorization: deny("the offer or accept is not a valid signed object (§23.1, §23.2)"),
+    };
+  }
+  const o = offer.payload;
+  const a = accept.payload;
+  if (!bytesEqual(o.resourceId, state.resourceId) || !bytesEqual(a.resourceId, state.resourceId))
+    return { authorization: deny("the offer or accept is for another Resource (§23.1, §23.2)") };
+  const offerSigned = verifySignedObject(offer.signed, state.owner);
+  if (!offerSigned.valid)
+    return {
+      authorization: deny(
+        `the offer is not signed by the current owner (${offerSigned.reason}, §23.3 rule 1)`,
+      ),
+    };
+  if (!bytesEqual(o.controlHead, state.head))
+    return {
+      authorization: deny("the offer does not reference the current Control Head (§23.3 rule 2)"),
+    };
+  if (!bytesEqual(a.newOwner, o.proposedOwner.principalId))
+    return {
+      authorization: deny("the accept is not by the Principal the offer names (§23.3 rule 3)"),
+    };
+  if (!bytesEqual(a.offerId, objectId(offer.signed.bytes)))
+    return { authorization: deny("the accept does not name this offer (§23.2)") };
+  const acceptSigned = verifySignedObject(accept.signed, o.proposedOwner);
+  if (!acceptSigned.valid)
+    return {
+      authorization: deny(
+        `the accept is not signed by the new owner (${acceptSigned.reason}, §23.3 rule 4)`,
+      ),
+    };
+  if (!bytesEqual(record.payload.issuer, o.proposedOwner.principalId))
+    return { authorization: deny("the commit is not issued by the new owner (§23.3 rule 5)") };
+  if (o.expectedControlSeq !== record.payload.controlSeq)
+    return {
+      authorization: deny(
+        "the offer's expected Control Sequence is not the commit's (§23.3 rule 6)",
+      ),
+    };
+  return { authorization: ALLOW, newOwner: o.proposedOwner };
+}
+
+/**
+ * The descriptor a transfer commit carries for its own issuer: the offer's
+ * proposed owner (self-certifying, §7), so a new owner never granted
+ * before can still be verified. Undefined for other records.
+ */
+export function transferIssuerDescriptor(record: ControlRecord): PrincipalDescriptor | undefined {
+  if (record.body.type !== "OWNER_TRANSFER_COMMIT") return undefined;
+  try {
+    const proposed = parseOwnerTransferOffer(record.body.offer).payload.proposedOwner;
+    return bytesEqual(proposed.principalId, record.payload.issuer) ? proposed : undefined;
+  } catch {
+    return undefined;
+  }
 }

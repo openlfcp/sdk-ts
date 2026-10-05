@@ -13,6 +13,8 @@ export {
   hasAbility,
   isGrantActive,
   isStandardAbility,
+  type VerifiedOwnerTransfer,
+  verifyOwnerTransfer,
 } from "./capability.js";
 export {
   type ChainOptions,

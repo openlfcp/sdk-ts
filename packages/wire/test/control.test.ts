@@ -240,7 +240,7 @@ describe("typed bodies", () => {
     [
       "OWNER_TRANSFER_COMMIT",
       { type: "OWNER_TRANSFER_COMMIT", offer: seq32(1), accept: seq32(2) },
-      false,
+      true,
     ],
     [
       "COORDINATOR_RECOVERY",
@@ -275,7 +275,7 @@ describe("typed bodies", () => {
   );
 
   it("decodes MVP-deferred core types without applying them (mvpSupported false)", () => {
-    for (const type of ["OWNER_TRANSFER_COMMIT", "COORDINATOR_RECOVERY", "RESOURCE_TOMBSTONE"]) {
+    for (const type of ["COORDINATOR_RECOVERY", "RESOURCE_TOMBSTONE"]) {
       const body = bodies.find(([n]) => n === type)?.[1] as ControlBody;
       expect(decodeControlRecord(signControlRecord(next(1n), body, ALICE).bytes).mvpSupported).toBe(
         false,

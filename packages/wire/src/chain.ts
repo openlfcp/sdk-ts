@@ -10,7 +10,13 @@ import {
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
-import { type Authorization, applyCapabilities, type Grant } from "./capability.js";
+import {
+  type Authorization,
+  applyCapabilities,
+  authorizeControlRecord,
+  type Grant,
+  transferIssuerDescriptor,
+} from "./capability.js";
 import {
   type ControlRecord,
   controlRecordSigner,
@@ -66,7 +72,7 @@ export interface ControlState {
   readonly head: ControlRecordId;
   readonly seq: bigint;
   readonly dataProfile: string;
-  /** The owner (§15; ownership transfer is deferred from MVP 0.1). */
+  /** The owner: the Genesis owner, or the new owner after a verified transfer (§15, §23.3). */
   readonly owner: PrincipalDescriptor;
   readonly route: ControlRoute;
   /** §20 route version of `route`; Genesis counts as 0 (inferred). */
@@ -143,8 +149,9 @@ export interface ChainOptions {
   readonly resolvePrincipal?: (id: PrincipalId) => PrincipalDescriptor | undefined;
   /**
    * Authorization, called for every non-Genesis record with the state
-   * before it (the previous head). authorizeControlRecord is the LFCP-021
-   * capability engine. A refusal makes the chain invalid (UNAUTHORIZED).
+   * before it (the previous head). Defaults to authorizeControlRecord, the
+   * LFCP-021 capability engine; a caller may substitute a policy (tests).
+   * A refusal makes the chain invalid (UNAUTHORIZED).
    */
   readonly authorize?: (record: ControlRecord, state: ControlState) => boolean | Authorization;
 }
@@ -280,6 +287,10 @@ function applyRecord(state: ControlState, record: ControlRecord): ControlState {
     principals.set(toHex(body.subject.principalId), body.subject);
   if (body.type === "CAPABILITY_CLAIM")
     principals.set(toHex(body.claimant.principalId), body.claimant);
+  // §23.3 "After commit, the accepting Principal becomes the Resource owner"
+  // (verified by authorizeControlRecord before this record was accepted).
+  const newOwner = transferIssuerDescriptor(record);
+  if (newOwner !== undefined) principals.set(toHex(newOwner.principalId), newOwner);
   const route =
     body.type === "ROUTE_UPDATE"
       ? {
@@ -291,6 +302,7 @@ function applyRecord(state: ControlState, record: ControlRecord): ControlState {
     ...state,
     ...next,
     ...route,
+    ...(newOwner !== undefined ? { owner: newOwner } : {}),
     principals,
     grants: applyCapabilities(state.grants, record),
   });
@@ -415,7 +427,7 @@ export function validateControlChain(
   const unapplied: ControlRecordId[] = [];
   const states = new Map<string, ControlState>([[toHex(state.head), state]]);
   const visited = new Set<string>();
-  const authorize = options.authorize ?? (() => true);
+  const authorize = options.authorize ?? authorizeControlRecord;
   for (;;) {
     const kids = children.get(toHex(state.head)) ?? [];
     if (kids.length === 0) break;
@@ -431,7 +443,10 @@ export function validateControlChain(
       }
       // Open gap "issuer-as-signer": the issuer is the expected signer (see controlRecordSigner).
       const issuer = controlRecordSigner(k.record);
-      const descriptor = state.principals.get(toHex(issuer)) ?? options.resolvePrincipal?.(issuer);
+      const descriptor =
+        state.principals.get(toHex(issuer)) ??
+        transferIssuerDescriptor(k.record) ??
+        options.resolvePrincipal?.(issuer);
       if (descriptor === undefined) {
         problems.push(problem("UNRESOLVED_ISSUER", at(k), "no descriptor is known for the issuer"));
         continue;
