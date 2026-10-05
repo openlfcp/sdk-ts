@@ -214,8 +214,10 @@ export function assembleInviteUri(invitation: Invitation): string {
 /**
  * Parses a §18.2 invitation URI. The scheme and host compare
  * case-insensitively (RFC 3986 §3.1, §3.2.2); the path is one Resource ID;
- * the query has one or more `endpoint` parameters and exactly one `grant`,
- * nothing else; a fragment, if present, is exactly `secret=<b64url>`.
+ * the query has one or more `endpoint` parameters and exactly one `grant`;
+ * other parameters are ignored, for forward compatibility, once their
+ * percent-encoding is checked; a fragment, if present, is exactly
+ * `secret=<b64url>`.
  * Endpoints are percent-decoded and must use ws or wss (§16). Throws
  * INVALID_INVITATION, never with the URI or the secret in the message.
  * Verify a bearer secret against the grant (verifyInvitationSecret) before
@@ -238,7 +240,8 @@ export function parseInviteUri(uri: string): Invitation {
     const eq = parameter.indexOf("=");
     const name = eq === -1 ? parameter : parameter.slice(0, eq);
     const value = eq === -1 ? "" : parameter.slice(eq + 1);
-    if (value === "") invalid(`the query parameter ${JSON.stringify(name)} has no value`);
+    if ((name === "endpoint" || name === "grant") && value === "")
+      invalid(`the ${name} parameter has no value`);
     if (name === "endpoint") {
       const url = percentDecode(value, "an endpoint");
       try {
@@ -250,7 +253,11 @@ export function parseInviteUri(uri: string): Invitation {
     } else if (name === "grant") {
       if (grant !== undefined) invalid("the grant parameter appears twice");
       grant = controlRecordId(id32(value, "the grant ID"));
-    } else invalid(`the query parameter ${JSON.stringify(name)} is not defined by §18.2`);
+    } else {
+      // Not defined by §18.2: ignored, but still a well-formed query parameter.
+      percentDecode(name, "a query parameter name");
+      percentDecode(value, "a query parameter value");
+    }
   }
   if (endpoints.length === 0) invalid("the URI has no endpoint parameter");
   if (grant === undefined) invalid("the URI has no grant parameter");

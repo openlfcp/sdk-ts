@@ -235,6 +235,15 @@ describe("invitation URI (§18.2)", () => {
     expectNoSecret(JSON.stringify(b));
   });
 
+  it("ignores query parameters §18.2 does not define (forward compatibility)", () => {
+    for (const extra of ["mode=x", "flag", "v=", "x%20y=%C3%BC"]) {
+      const t = parseInviteUri(`${base}&${extra}`);
+      expect([toHex(t.grantId), t.endpoints]).toEqual([toHex(GRANT), [ENDPOINT]]);
+    }
+    const b = parseInviteUri(bearer.replace("#", "&future=1#"));
+    expect(toHex(encodeInviteSecret(b.secret as InvitationSecret))).toBe(toHex(SECRET_BYTES));
+  });
+
   it("compares the scheme and host case-insensitively and accepts any valid percent-encoding", () => {
     const uri = assembleInviteUri(targeted)
       .replace("lfcp://join/", "LFCP://Join/")
@@ -258,7 +267,7 @@ describe("invitation URI (§18.2)", () => {
     ["an https endpoint", base.replace(/endpoint=[^&]*/, "endpoint=https%3A%2F%2Fx.example.test")],
     ["a broken percent-encoding", base.replace("%3A", "%3")],
     ["a raw space", base.replace("%2F", " ")],
-    ["an unknown parameter", `${base}&mode=x`],
+    ["a broken percent-encoding in an unknown parameter", `${base}&mode=%G1`],
     ["a fragment that is not secret=", `${base}#token=abc`],
     ["an empty fragment", `${base}#`],
     ["a padded secret", `${bearer}=`],
