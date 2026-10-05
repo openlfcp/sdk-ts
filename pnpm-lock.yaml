@@ -11,6 +11,9 @@ importers:
       '@biomejs/biome':
         specifier: ^2.5.15
         version: 2.5.15
+      '@openlfcp/client':
+        specifier: workspace:*
+        version: link:packages/client
       '@openlfcp/core':
         specifier: workspace:*
         version: link:packages/core

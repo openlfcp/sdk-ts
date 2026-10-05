@@ -4,6 +4,7 @@
 // today and names, as pending parts, what later tasks implement (the owner
 // of each part is in pending.json). Values come only from the loaded suite.
 
+import { createDataUnit } from "@openlfcp/client";
 import {
   bytesEqual,
   dataEpoch,
@@ -17,9 +18,11 @@ import {
 } from "@openlfcp/core";
 import {
   dataUnitNonce,
+  decryptDataUnit,
   dekCommitment,
   deriveActorDataKey,
   deriveSnapshotKey,
+  encryptDataUnit,
   exportSecretKeyBytes,
   importAgreementKey,
   importResourceDEK,
@@ -30,9 +33,9 @@ import {
 import {
   type ControlRecord,
   canonicalFrontierFromCbor,
-  classifyDataUnit,
   controlPutBodyFromCbor,
-  type DataUnitPayload,
+  type DataProfileCodec,
+  dataUnitAad,
   decodeControlRecord,
   decodeControlRecordPayload,
   decodeDataUnitPayload,
@@ -43,6 +46,7 @@ import {
   encodeControlRecordPayload,
   encodePrincipalDescriptor,
   expectedSignerOf,
+  InMemorySeenUnits,
   type KeyPackagePayload,
   type KeyPackageRecipient,
   keyPackageHpkeAad,
@@ -59,6 +63,8 @@ import {
   parseSnapshot,
   principalDescriptorFromKeys,
   proposeControlPut,
+  type ReceivedDataUnit,
+  receiveDataUnit,
   type Signer,
   signControlRecord,
   signObject,
@@ -697,10 +703,49 @@ const dekCommitments: Handler = (c, context) => {
   return { checks };
 };
 
-const dataUnit: Handler = (c, context) => {
+/** The validated published chain, as a view; throws when it does not validate. */
+function publishedView(context: HandlerContext) {
+  const chain = validateControlChain(publishedChain(context));
+  if (chain.kind !== "linear") throw new Error("the published Control Chain does not validate");
+  return chain;
+}
+
+/** The opaque profile the vectors use: the plaintext bytes themselves, under the chain's data_profile. */
+const opaqueProfile = (dataProfile: string): DataProfileCodec<Uint8Array> => ({
+  dataProfile,
+  encode: (value) => Uint8Array.from(value),
+  decode: (plaintext) => Uint8Array.from(plaintext),
+});
+
+/** A receiver for the published chain; DEKs come from the fixtures by epoch. */
+function dataReceiver(context: HandlerContext) {
+  const view = publishedView(context);
+  const seen = new InMemorySeenUnits();
+  return {
+    view,
+    receive: (bytes: Uint8Array) =>
+      receiveDataUnit(view, bytes, {
+        seen,
+        dek: (epoch) => dekForEpoch(context, epoch),
+        profile: opaqueProfile(view.state.dataProfile),
+      }),
+  };
+}
+
+/**
+ * LFCP-025. Every published field is checked: the actor key and nonce
+ * (§12), the AAD built from the payload (§26.1), the ciphertext encrypted
+ * from inputs.plaintext_hex and decrypted back, and the whole unit
+ * re-created through createDataUnit from the vector inputs (the sequence
+ * from a reservation fixed to the payload's, the previous unit, head,
+ * actor and DEK) to the exact cose_sign1 and unit_id. The published unit
+ * must then be cryptographically valid on the published chain.
+ */
+const dataUnit: Handler = async (c, context) => {
   const e = c.expected;
   const payload = hexOf(e, "payload_cbor");
   const cose = hexOf(e, "cose_sign1");
+  const plaintext = hexOf(c.inputs, "plaintext_hex");
   const signed = signedObject(
     "cose_sign1",
     context,
@@ -709,29 +754,79 @@ const dataUnit: Handler = (c, context) => {
     (p) => expectedSignerOf(p.payload),
     payload,
   );
-  return {
-    checks: [
-      sameBytes("actor_key/derive", hexOf(e, "actor_key"), () => {
-        const p = decodeDataUnitPayload(payload);
-        const dek = dekForEpoch(context, p.dataEpoch);
-        return exportSecretKeyBytes(deriveActorDataKey(dek, p.resourceId, p.dataEpoch, p.actor));
-      }),
-      sameBytes("nonce/derive", hexOf(e, "nonce"), () =>
-        dataUnitNonce(decodeDataUnitPayload(payload).actorSeq),
-      ),
-      deterministic("aad_cbor/deterministic", hexOf(e, "aad_cbor")),
-      sameBytes(
-        "ciphertext/payload-field",
-        hexOf(e, "ciphertext"),
-        () => decodeDataUnitPayload(payload).ciphertext,
-      ),
-      deterministic("payload_cbor/deterministic", payload),
-      check("payload_cbor/decode", () => decodeDataUnitPayload(payload).kind === "data-unit"),
-      ...signed.checks,
-      bytesCheck("unit_id", hexOf(e, "unit_id"), objectId(cose)),
-    ],
-    pending: ["aad_cbor/construct", "ciphertext/encrypt"],
-  };
+  const p = decodeDataUnitPayload(payload);
+  const dek = dekForEpoch(context, p.dataEpoch);
+  const actorKey = deriveActorDataKey(dek, p.resourceId, p.dataEpoch, p.actor);
+  const actor = principals(context).get(String(c.inputs?.signer));
+  const checks: Check[] = [
+    check("inputs.dek", () => {
+      const named = hexOf(resourceFixture(context), String(c.inputs?.dek));
+      return bytesEqual(named, exportSecretKeyBytes(dek)) || "inputs.dek is not the epoch's DEK";
+    }),
+    sameBytes("actor_key/derive", hexOf(e, "actor_key"), () => exportSecretKeyBytes(actorKey)),
+    sameBytes("nonce/derive", hexOf(e, "nonce"), () => dataUnitNonce(p.actorSeq)),
+    deterministic("aad_cbor/deterministic", hexOf(e, "aad_cbor")),
+    sameBytes("aad_cbor/construct", hexOf(e, "aad_cbor"), () => dataUnitAad(p)),
+    sameBytes("ciphertext/payload-field", hexOf(e, "ciphertext"), () => p.ciphertext),
+    sameBytes("ciphertext/encrypt", hexOf(e, "ciphertext"), () =>
+      encryptDataUnit(actorKey, p.actorSeq, hexOf(e, "aad_cbor"), plaintext),
+    ),
+    sameBytes("ciphertext/decrypt", plaintext, () =>
+      decryptDataUnit(actorKey, p.actorSeq, dataUnitAad(p), p.ciphertext),
+    ),
+    deterministic("payload_cbor/deterministic", payload),
+    check("payload_cbor/decode", () => p.kind === "data-unit"),
+    ...signed.checks,
+    bytesCheck("unit_id", hexOf(e, "unit_id"), objectId(cose)),
+  ];
+  let created: Awaited<ReturnType<typeof createDataUnit>> | string;
+  try {
+    if (actor === undefined)
+      throw new Error(`inputs.signer ${String(c.inputs?.signer)} is unknown`);
+    const view = publishedView(context);
+    created = await createDataUnit({
+      view,
+      controlHead: p.controlHead,
+      actor,
+      dek,
+      sequences: { reserveNext: () => Promise.resolve(p.actorSeq) },
+      previousUnitId: p.prevDataUnitId,
+      profile: opaqueProfile(view.state.dataProfile),
+      value: plaintext,
+    });
+  } catch (err) {
+    created = describeError(err);
+  }
+  if (typeof created === "string")
+    checks.push({ name: "cose_sign1/create", ok: false, message: created });
+  else
+    checks.push(
+      bytesCheck("cose_sign1/create", cose, created.bytes),
+      bytesCheck("unit_id/create", hexOf(e, "unit_id"), created.unitId),
+    );
+  // Receive the published units in order up to this one, so its actor
+  // chain links (§26.2): D2 needs D1.
+  const receiver = dataReceiver(context);
+  let received: ReceivedDataUnit<unknown> | undefined;
+  for (const u of context.suite.cases) {
+    if (u.type !== "bytes" || u.kind !== "data_unit") continue;
+    const r = await receiver.receive(hexOf(u.expected, "cose_sign1"));
+    if (u.id === c.id) {
+      received = r;
+      break;
+    }
+  }
+  if (received === undefined) throw new Error(`${c.id} is not a published Data Unit`);
+  checks.push(
+    check(
+      "cose_sign1/receive",
+      () =>
+        received.kind === "accepted" ||
+        received.kind === "quarantined" ||
+        `the published unit is ${received.kind}`,
+    ),
+  );
+  return { checks };
 };
 
 const snapshot: Handler = (c, context) => {
@@ -900,7 +995,7 @@ function negative(c: VectorCase, actual: string | null): { checks: Check[]; pend
 
 /**
  * A layer applied after structure and signature accept an object: the wire
- * code it fails with, or null. LFCP-023 adds the epoch cutoff for Data Units.
+ * code it fails with, or null (the Key Package opening, LFCP-024).
  */
 type AfterReceive<P> = (
   context: HandlerContext,
@@ -986,19 +1081,122 @@ const keyPackageOpen: AfterReceive<KeyPackagePayload> = async (context, parsed, 
   }
 };
 
+/** The vector outcome of a received Data Unit: null when accepted, else a code or a client-local marker. */
+function dataUnitOutcome(r: ReceivedDataUnit<unknown>): string | null {
+  switch (r.kind) {
+    case "accepted":
+    case "duplicate":
+      return null;
+    case "rejected":
+    case "equivocation":
+      return r.wireCode;
+    case "quarantined":
+      return r.code;
+    case "held":
+      return `REPORT:${r.reason}`;
+    case "local-failure":
+      return `CLIENT_LOCAL:${r.reason}`;
+  }
+}
+
+/** The vector disposition of a received Data Unit (lfcp-vector-format/1). */
+function dataUnitDisposition(r: ReceivedDataUnit<unknown>): string {
+  switch (r.kind) {
+    case "accepted":
+    case "duplicate":
+      return "accept";
+    case "held":
+      return "report";
+    case "quarantined":
+      return "quarantine";
+    case "equivocation":
+      return "equivocation";
+    case "rejected":
+    case "local-failure":
+      return "reject";
+  }
+}
+
 /**
- * LFCP-023: a received Data Unit against the epoch cutoff of the latest
- * published Control state (C6; G-EP1). A quarantined unit is
- * STALE_DATA_EPOCH (§19.1, §75); an unknown head or epoch is the reject's
- * code (G-EP2).
+ * LFCP-025: a received Data Unit through the full receive pipeline
+ * (receiveDataUnit) on the published chain, with the fixture DEKs. The
+ * outcome must carry the vector's code and, when it names one, its
+ * disposition (report = held, §26.2 / G-DP1; quarantine =
+ * STALE_DATA_EPOCH; reject, client-local AEAD failures included, N3).
+ *
+ * actor_equivocation first receives the published units up to the one in
+ * inputs.original_D2_id, and both IDs must be reported. noncanonical_aad_D1
+ * must open under its non-deterministic AAD, showing that only the AAD
+ * encoding fails.
  */
-const dataUnitEpoch: AfterReceive<DataUnitPayload> = (context, parsed) => {
-  // A suite without a valid Control Chain has no cutoff to apply; the
-  // published chain's own validity is asserted by every control_record case.
-  const chain = validateControlChain(publishedChain(context));
-  if (chain.kind !== "linear") return null;
-  const c = classifyDataUnit(chain, parsed.payload);
-  return c.kind === "accept" ? null : c.kind === "quarantine" ? c.code : c.wireCode;
+const structureAndSignature = signedNegative(parseDataUnit, (p) => expectedSignerOf(p.payload));
+
+const dataUnitNegative: Handler = async (c, context) => {
+  // A suite without a valid Control Chain (the runner self-tests) has no
+  // authority or epochs to evaluate: only structure and signature run.
+  if (validateControlChain(publishedChain(context)).kind !== "linear")
+    return structureAndSignature(c, context);
+  const inputs = c.inputs;
+  const checks: Check[] = [];
+  let cose: Uint8Array | undefined;
+  if (has(inputs, "cose_sign1")) cose = hexOf(inputs, "cose_sign1");
+  else if (has(inputs, "conflicting_D2_cose")) cose = hexOf(inputs, "conflicting_D2_cose");
+  else if (has(inputs, "unit_id")) {
+    cose = publishedUnit(context, hexOf(inputs, "unit_id"));
+    if (cose !== undefined)
+      checks.push(bytesCheck("inputs.unit_id", hexOf(inputs, "unit_id"), objectId(cose)));
+  }
+  if (cose === undefined) throw new Error("the vector names no Data Unit");
+  if (has(inputs, "conflicting_D2_id"))
+    checks.push(
+      bytesCheck("inputs.conflicting_D2_id", hexOf(inputs, "conflicting_D2_id"), objectId(cose)),
+    );
+  const receiver = dataReceiver(context);
+  if (has(inputs, "original_D2_id")) {
+    const original = toHex(hexOf(inputs, "original_D2_id"));
+    for (const u of context.suite.cases) {
+      if (u.type !== "bytes" || u.kind !== "data_unit") continue;
+      await receiver.receive(hexOf(u.expected, "cose_sign1"));
+      if (toHex(hexOf(u.expected, "unit_id")) === original) break;
+    }
+  }
+  if (has(inputs, "noncanonical_aad_cbor")) {
+    const aad = hexOf(inputs, "noncanonical_aad_cbor");
+    checks.push(
+      check("inputs.noncanonical_aad_cbor/not-deterministic", () => !isDeterministic(aad)),
+    );
+    checks.push(
+      check("inputs.noncanonical_aad_cbor/opens", () => {
+        const p = parseDataUnit(cose).payload;
+        const key = deriveActorDataKey(
+          dekForEpoch(context, p.dataEpoch),
+          p.resourceId,
+          p.dataEpoch,
+          p.actor,
+        );
+        decryptDataUnit(key, p.actorSeq, aad, p.ciphertext);
+        return true;
+      }),
+    );
+  }
+  const received = await receiver.receive(cose);
+  if (received.kind === "equivocation" && has(inputs, "original_D2_id"))
+    checks.push(
+      check("outcome/unit-ids", () => {
+        const ids = received.unitIds.map(toHex);
+        return (
+          (ids.length === 2 &&
+            ids.includes(toHex(hexOf(inputs, "original_D2_id"))) &&
+            ids.includes(toHex(objectId(cose)))) ||
+          `reported ${ids.join(", ")}`
+        );
+      }),
+    );
+  const disposition = (c.expected as { disposition?: unknown }).disposition;
+  if (typeof disposition === "string")
+    checks.push(equalCheck("outcome/disposition", disposition, dataUnitDisposition(received)));
+  const outcome = negative(c, dataUnitOutcome(received));
+  return { checks: [...checks, ...outcome.checks], pending: outcome.pending };
 };
 
 const principalNegative: Handler = (c) => {
@@ -1021,11 +1219,7 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   "bytes/snapshot": snapshot,
   "bytes/invite_uri": inviteUri,
   "bytes/wire_message": wireMessage,
-  "validation/data_unit": signedNegative(
-    parseDataUnit,
-    (p) => expectedSignerOf(p.payload),
-    dataUnitEpoch,
-  ),
+  "validation/data_unit": dataUnitNegative,
   "validation/control_record": controlRecordNegative,
   "validation/control_put": controlPutNegative,
   "validation/key_package": signedNegative(

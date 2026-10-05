@@ -46,6 +46,8 @@ describe("pure Control Plane logic", () => {
     "packages/wire/src/transition.ts",
     "packages/wire/src/chain.ts",
     "packages/wire/src/capability.ts",
+    "packages/wire/src/data-unit.ts",
+    "packages/client/src/data-unit.ts",
   ];
   const IMPURE =
     /\b(Date|performance|Math\.random|getRandomValues|randomBytes|generateObjectId|setTimeout|setInterval|fetch|WebSocket|indexedDB|localStorage|process)\b/;
@@ -55,5 +57,23 @@ describe("pure Control Plane logic", () => {
       .split("\n")
       .filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line));
     expect(code.filter((line) => IMPURE.test(line))).toEqual([]);
+  });
+});
+
+// LFCP-025 item 34: the Data Unit core knows no Data Profile. Plaintext
+// comes in and goes out through the generic DataProfileCodec only.
+describe("no profile semantics in the Data Unit core", () => {
+  const CORE = [
+    "packages/crypto/src/aead.ts",
+    "packages/wire/src/data-unit.ts",
+    "packages/client/src/data-unit.ts",
+  ];
+  it.each(CORE)("%s imports no Automerge, Task, Shared Objects or Obsidian code", (path) => {
+    const imports = readRepoText(path)
+      .split("\n")
+      .filter((line) => /\bfrom\s+["']/.test(line) || /\bimport\(/.test(line));
+    expect(imports.filter((line) => /automerge|task|shared-objects|obsidian/i.test(line))).toEqual(
+      [],
+    );
   });
 });

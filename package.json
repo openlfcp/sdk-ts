@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.15",
+    "@openlfcp/client": "workspace:*",
     "@openlfcp/core": "workspace:*",
     "@openlfcp/crypto": "workspace:*",
     "@openlfcp/shared-objects": "workspace:*",

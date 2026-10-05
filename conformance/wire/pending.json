@@ -2,34 +2,6 @@
   "suite": "LFCP-TEST-VECTORS-01",
   "note": "Cases or parts of cases that sdk-ts cannot check yet, with the task that implements them (LFCP-017). Remove an entry when its task lands: the runner fails on stale entries.",
   "cases": {
-    "D1_bob_epoch0_seq1": {
-      "reason": "Payload, COSE, signature against the actor, unit ID, actor key and nonce run here; the AAD and AEAD do not.",
-      "parts": {
-        "aad_cbor/construct": "LFCP-025",
-        "ciphertext/encrypt": "LFCP-025"
-      }
-    },
-    "D2_bob_epoch0_seq2": {
-      "reason": "Payload, COSE, signature against the actor, unit ID, actor key and nonce run here; the AAD and AEAD do not.",
-      "parts": {
-        "aad_cbor/construct": "LFCP-025",
-        "ciphertext/encrypt": "LFCP-025"
-      }
-    },
-    "D3_bob_epoch0_seq3_stale": {
-      "reason": "Payload, COSE, signature against the actor, unit ID, actor key and nonce run here; the AAD and AEAD do not.",
-      "parts": {
-        "aad_cbor/construct": "LFCP-025",
-        "ciphertext/encrypt": "LFCP-025"
-      }
-    },
-    "D4_carol_epoch1_seq1": {
-      "reason": "Payload, COSE, signature against the actor, unit ID, actor key and nonce run here; the AAD and AEAD do not.",
-      "parts": {
-        "aad_cbor/construct": "LFCP-025",
-        "ciphertext/encrypt": "LFCP-025"
-      }
-    },
     "SNAPSHOT-01": {
       "reason": "Payload, canonical frontier, COSE, signature against the publisher, Snapshot ID, Snapshot key and nonce run here; the AAD and encryption do not.",
       "parts": {
@@ -219,30 +191,6 @@
       "reason": "Deterministic CBOR runs here; the message codec does not.",
       "parts": {
         "message_cbor/typed": "LFCP-026"
-      }
-    },
-    "actor_equivocation": {
-      "reason": "The conflicting unit parses and verifies; detecting equivocation needs the actor chain.",
-      "parts": {
-        "outcome": "LFCP-025"
-      }
-    },
-    "noncanonical_aad_D1": {
-      "reason": "The unit parses and verifies and the input AAD is confirmed non-deterministic; the AEAD outcome is client-local (N3).",
-      "parts": {
-        "outcome": "LFCP-025"
-      }
-    },
-    "aead_failure_D1": {
-      "reason": "The unit parses and verifies; the AEAD outcome is client-local (N3).",
-      "parts": {
-        "outcome": "LFCP-025"
-      }
-    },
-    "actor_seq1_prev_not_null_D1": {
-      "reason": "Structurally valid; §26.2 asks for a report to the sync engine (G4: LFCP-025/LFCP-028).",
-      "parts": {
-        "outcome": "LFCP-025"
       }
     },
     "NACK_CONTROL_HEAD_MISMATCH": {
