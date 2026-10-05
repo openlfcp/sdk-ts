@@ -30,7 +30,8 @@
   "dependencies": {
     "@automerge/automerge": "3.5.0",
     "@openlfcp/core": "workspace:^",
-    "@openlfcp/crypto": "workspace:^"
+    "@openlfcp/crypto": "workspace:^",
+    "fflate": "0.8.3"
   },
   "devDependencies": {
     "fast-check": "4.10.2"

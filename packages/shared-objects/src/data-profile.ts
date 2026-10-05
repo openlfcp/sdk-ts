@@ -148,10 +148,12 @@ export class SharedObjectsDataProfile {
         "DATA_PROFILE_MISMATCH",
         `a ${checkpoint.dataProfile} checkpoint is not ${PROFILE_ID}`,
       );
-    const replica = SharedObjectsReplica.fromSave(checkpoint.state, {
-      ...options,
-      minSeq: checkpoint.actorSeq,
-    });
+    // This device's own persisted state: not held to the Snapshot limits (§13.1).
+    const replica = SharedObjectsReplica.fromSave(
+      checkpoint.state,
+      { ...options, minSeq: checkpoint.actorSeq },
+      "local-state",
+    );
     const profile = new SharedObjectsDataProfile(replica);
     for (const u of checkpoint.units) {
       if (!replica.hasChange(u.ref))

@@ -15,6 +15,14 @@ export {
   unframeSnapshot,
 } from "./automerge-bytes.js";
 export {
+  CHANGE_LIMITS,
+  type ChunkExpansion,
+  checkChangeExpansion,
+  checkSnapshotExpansion,
+  SNAPSHOT_LIMITS_FLOOR,
+  type SnapshotLimits,
+} from "./chunk-limits.js";
+export {
   type SharedObjectsApplyResult,
   type SharedObjectsBatchResult,
   type SharedObjectsCheckpoint,

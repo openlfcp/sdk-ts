@@ -1,5 +1,6 @@
 import * as A from "@automerge/automerge";
 import { toHex } from "@openlfcp/core";
+import { checkChangeExpansion } from "./chunk-limits.js";
 import { ProfileInvalidError } from "./profile-invalid.js";
 import { frameProfilePayload, unframeProfilePayload } from "./values.js";
 
@@ -42,6 +43,8 @@ export interface CheckedChange {
   readonly seq: number;
   /** Hex hashes of the changes this one depends on. */
   readonly deps: readonly string[];
+  /** Hex IDs of the other actors the change refers to (§11.1: each must be known to the document). */
+  readonly otherActors: readonly string[];
 }
 
 /**
@@ -54,8 +57,11 @@ export interface CheckedChange {
  */
 export function checkChange(bytes: Uint8Array): CheckedChange {
   const type = chunkType(bytes, "the change");
-  if (type !== CHUNK_CHANGE && type !== CHUNK_COMPRESSED_CHANGE)
-    reject(`chunk type ${type} is not an Automerge change (§11)`);
+  if (type === CHUNK_COMPRESSED_CHANGE)
+    reject("a compressed Automerge change (chunk type 2): a change is uncompressed (§11)");
+  if (type !== CHUNK_CHANGE) reject(`chunk type ${type} is not an Automerge change (§11)`);
+  // §11.1: what the change expands to and its structure, before Automerge decodes it.
+  const expansion = checkChangeExpansion(bytes);
   let decoded: A.DecodedChange;
   try {
     decoded = A.decodeChange(bytes);
@@ -70,6 +76,7 @@ export function checkChange(bytes: Uint8Array): CheckedChange {
     actor: decoded.actor,
     seq: decoded.seq,
     deps: Object.freeze([...decoded.deps]),
+    otherActors: expansion.otherActors,
   });
 }
 

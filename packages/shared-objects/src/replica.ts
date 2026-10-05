@@ -14,6 +14,11 @@ import {
   unframeChange,
   unframeSnapshot,
 } from "./automerge-bytes.js";
+import {
+  checkSnapshotExpansion,
+  SNAPSHOT_LIMITS_FLOOR,
+  type SnapshotLimits,
+} from "./chunk-limits.js";
 import { ProfileInvalidError } from "./profile-invalid.js";
 import { ProfileError, parseTask, type Task, type TaskIntent } from "./task.js";
 import {
@@ -584,9 +589,19 @@ export class SharedObjectsReplica {
     return new SharedObjectsReplica(A.init({ actor: actorHex(opts) }), opts);
   }
 
-  /** Loads an Automerge full save (persisted state, or a Snapshot image, §13). Throws PROFILE_INVALID / INVALID_AUTOMERGE_BYTES. */
-  static fromSave(save: Uint8Array, opts: ReplicaOptions): SharedObjectsReplica {
+  /**
+   * Loads an Automerge full save: a received Snapshot image (§13), checked
+   * against `limits` (§13.1, at least the floor) before Automerge loads it,
+   * or this device's own persisted state ("local-state", not limited).
+   * Throws PROFILE_INVALID / INVALID_AUTOMERGE_BYTES.
+   */
+  static fromSave(
+    save: Uint8Array,
+    opts: ReplicaOptions,
+    limits: SnapshotLimits | "local-state" = SNAPSHOT_LIMITS_FLOOR,
+  ): SharedObjectsReplica {
     checkSaveHeader(save);
+    if (limits !== "local-state") checkSnapshotExpansion(save, limits);
     let doc: Doc;
     try {
       doc = A.load(save, { actor: actorHex(opts) });
@@ -907,7 +922,22 @@ export class SharedObjectsReplica {
     }
     const bytes = A.getLastLocalChange(next);
     if (bytes === undefined) throw new Error("Automerge made no local change");
-    const checked = checkChange(bytes);
+    let checked: CheckedChange;
+    try {
+      checked = checkChange(bytes);
+    } catch (e) {
+      // §11.1: a writer never emits a change over the limits. The handle
+      // this replica held is outdated by A.change: rebuild it without the change.
+      const hash = A.decodeChange(bytes).hash;
+      this.#doc = A.applyChanges(
+        A.init({ actor: this.#actor }),
+        A.getAllChanges(next).filter((c) => A.decodeChange(c).hash !== hash),
+      )[0];
+      throw new LfcpError(
+        "CHANGE_TOO_LARGE",
+        `the transaction "${message}" is larger than one change may be (§11.1: ${(e as Error).message}); split it into several (§12)`,
+      );
+    }
     if (checked.seq !== this.actorSeq + 1)
       throw new LfcpError(
         "SEQUENCE_REUSE",
@@ -992,6 +1022,15 @@ export class SharedObjectsReplica {
           ),
         });
         continue;
+      } else if (c.otherActors.some((a) => latest(a) === 0)) {
+        refused.push({
+          change: c,
+          error: new ProfileInvalidError(
+            "INVALID_AUTOMERGE_BYTES",
+            `the change names an actor unknown to this document (§11.1)`,
+          ),
+        });
+        continue;
       } else if (c.seq !== latest(c.actor) + 1) {
         refused.push({
           change: c,
@@ -1067,6 +1106,14 @@ export class SharedObjectsReplica {
     // actor's latest change. Checked before Automerge sees it: Automerge
     // 3.5.0 records a skipping change in its graph without its operations
     // and the document no longer saves loadably (automerge-rs 0.12 aborts).
+    // §11.1: every other actor of the change is already an actor of the
+    // document (Automerge aborts on an unknown one).
+    const unknown = change.otherActors.find((a) => !this.#seqs.has(a));
+    if (unknown !== undefined)
+      throw new ProfileInvalidError(
+        "INVALID_AUTOMERGE_BYTES",
+        `the change names actor ${unknown}, unknown to this document (§11.1)`,
+      );
     if (change.seq !== (this.#seqs.get(change.actor) ?? 0) + 1)
       throw new ProfileInvalidError(
         "INVALID_AUTOMERGE_BYTES",

@@ -72,6 +72,12 @@ export type LfcpErrorCode =
    */
   | "SEQUENCE_REUSE"
   /**
+   * A local transaction that would produce a Shared Objects change over the
+   * change expansion limits (SHARED-OBJECTS-PROFILE-01 §11.1). Nothing was
+   * written; the application splits the transaction (§12). SDK-local.
+   */
+  | "CHANGE_TOO_LARGE"
+  /**
    * A Control Chain that is not one valid linear chain (LFCP-WIRE-01 §13,
    * §13.1): no Genesis, a sequence that is not previous + 1, a link that is
    * not the previous record ID, a different Resource, or a record that
