@@ -105,3 +105,11 @@ export {
   principalDescriptorFromKeys,
   principalDescriptorToCbor,
 } from "./principal.js";
+export {
+  type ControlPutBody,
+  controlPutBodyFromCbor,
+  decodeControlPutBody,
+  proposeControlPut,
+  proposeControlTransition,
+  type TransitionResult,
+} from "./transition.js";

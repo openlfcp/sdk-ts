@@ -143,10 +143,14 @@ export function abilitiesOf(state: ControlState, principal: PrincipalId): readon
   return [...ABILITY_NAMES.keys()].filter((a) => hasAbility(state, principal, a));
 }
 
-/** An authorization decision; a refusal names the rule. */
+/**
+ * An authorization decision; a refusal names the rule. `code` marks the
+ * refusals callers must tell apart (INVITE_CLAIM_EXHAUSTED: §18.1 rule 3,
+ * which LFCP-022 reports separately; still AUTHORIZATION_FAILED on the wire).
+ */
 export type Authorization =
   | { readonly allowed: true }
-  | { readonly allowed: false; readonly reason: string };
+  | { readonly allowed: false; readonly reason: string; readonly code?: "INVITE_CLAIM_EXHAUSTED" };
 
 const ALLOW: Authorization = Object.freeze({ allowed: true });
 const deny = (reason: string): Authorization => Object.freeze({ allowed: false, reason });
@@ -231,7 +235,11 @@ export function authorizeControlRecord(record: ControlRecord, state: ControlStat
       if (!invitation.abilities.includes(ABILITY.INVITE_CLAIM))
         return deny("the invitation grant does not grant invite/claim (§18.1 rule 2)");
       if (invitation.claimLimit === null || invitation.claimsUsed >= invitation.claimLimit)
-        return deny("the invitation grant has no claims left (§18.1 rule 3)");
+        return Object.freeze({
+          allowed: false,
+          reason: "the invitation grant has no claims left (§18.1 rule 3)",
+          code: "INVITE_CLAIM_EXHAUSTED",
+        });
       if (!bytesEqual(invitation.subject, issuer))
         return deny("the claim issuer is not the Invitation Principal (§18.1 rule 5)");
       // Rule 4: a subset of the invitation's abilities, excluding invite/claim

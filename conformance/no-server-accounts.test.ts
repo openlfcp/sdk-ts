@@ -38,3 +38,22 @@ describe("no server-account authorization shortcut", () => {
     }
   });
 });
+
+// LFCP-022 items 14, 15: Control validation and transitions are pure; no
+// clock, randomness, timers or I/O decide or record anything.
+describe("pure Control Plane logic", () => {
+  const PURE = [
+    "packages/wire/src/transition.ts",
+    "packages/wire/src/chain.ts",
+    "packages/wire/src/capability.ts",
+  ];
+  const IMPURE =
+    /\b(Date|performance|Math\.random|getRandomValues|randomBytes|generateObjectId|setTimeout|setInterval|fetch|WebSocket|indexedDB|localStorage|process)\b/;
+
+  it.each(PURE)("%s uses no clock, randomness, timer or I/O", (path) => {
+    const code = readRepoText(path)
+      .split("\n")
+      .filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line));
+    expect(code.filter((line) => IMPURE.test(line))).toEqual([]);
+  });
+});
