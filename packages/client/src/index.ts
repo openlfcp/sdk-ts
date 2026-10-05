@@ -28,6 +28,8 @@ export { type CreateDataUnitOptions, type CreatedDataUnit, createDataUnit } from
 export {
   type AcceptedInvitation,
   type AcceptInvitationOptions,
+  type AcceptInvitationProgress,
+  type AcceptInvitationStage,
   acceptInvitation,
   type CreatedInvitation,
   type CreateInvitationOptions,

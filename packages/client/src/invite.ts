@@ -233,6 +233,25 @@ export interface AcceptInvitationOptions {
   readonly webSocket?: WebSocketFactory;
   /** When it settles, the attempt gives up: the caller's timer (e.g. a 30 s sleep). */
   readonly timeout?: Promise<unknown>;
+  /**
+   * Called as each §73 step starts, for a join dialog. The payload names
+   * the step only: never a link, a secret, a key or a DEK. Synchronizing
+   * comes after: a SyncClient for the claimant does it.
+   */
+  readonly onProgress?: (progress: AcceptInvitationProgress) => void;
+}
+
+/** The §73 steps of acceptInvitation, in order. */
+export type AcceptInvitationStage =
+  | "connecting"
+  | "validating-invitation"
+  | "retrieving-key"
+  | "claiming-capability";
+
+export interface AcceptInvitationProgress {
+  readonly stage: AcceptInvitationStage;
+  /** "claiming-capability" only: 1, or 2 when the claim is rebuilt after CONTROL_HEAD_MISMATCH. */
+  readonly attempt?: number;
 }
 
 export type AcceptedInvitation =
@@ -440,9 +459,13 @@ export async function acceptInvitation(
     },
     options.timeout ?? NEVER,
   );
+  const progress = (stage: AcceptInvitationStage, attempt?: number): void =>
+    options.onProgress?.(Object.freeze(attempt === undefined ? { stage } : { stage, attempt }));
   try {
     // §73: the Invitation Principal authenticates and opens the Resource.
+    progress("connecting");
     await s.connect();
+    progress("validating-invitation");
     const heads = await openAsInvitee(s, R, invitation.grantId);
     if (heads.length !== 1)
       throw new Unavailable("the Resource has no single Control Head: no claim is made (§42)");
@@ -455,6 +478,7 @@ export async function acceptInvitation(
       fail("MISSING_DEPENDENCY", "the invitation grant is not on the chain");
 
     // §73, §25.2: the invitation's Key Package delivers the DEK.
+    progress("retrieving-key");
     const batch = await s.request(
       createMessage("KEY_PACKAGE_GET", {
         resourceId: R,
@@ -488,6 +512,7 @@ export async function acceptInvitation(
       options.abilities ?? grant.abilities.filter((a) => a !== ABILITY.INVITE_CLAIM || delegable);
     const attempts: string[] = [];
     for (;;) {
+      progress("claiming-capability", attempts.length + 1);
       const claim = signControlRecord(
         { resourceId: R, controlSeq: chain.state.seq + 1n, prevControlId: chain.state.head },
         {

@@ -18,6 +18,7 @@
 // Skipped (with the reason) when cargo or the server checkout is missing.
 
 import {
+  type AcceptInvitationProgress,
   acceptInvitation,
   createInvitation,
   createQueuedDataUnit,
@@ -242,6 +243,7 @@ const joiner = (
   link: InvitationLink,
   webSocket?: WebSocketFactory,
   abilities?: readonly bigint[],
+  onProgress?: (p: AcceptInvitationProgress) => void,
 ) => {
   const storage = new InMemoryLfcpStorage();
   const secrets = new InMemorySecretStore();
@@ -258,9 +260,23 @@ const joiner = (
         timeout: sleep(20_000),
         ...(webSocket === undefined ? {} : { webSocket }),
         ...(abilities === undefined ? {} : { abilities }),
+        ...(onProgress === undefined ? {} : { onProgress }),
       }),
   };
 };
+
+/** Progress payloads carry the step and the claim attempt only: no link, secret or key. */
+function expectNoSecrets(progress: readonly AcceptInvitationProgress[], link: InvitationLink) {
+  for (const p of progress) {
+    expect(Object.keys(p).every((k) => k === "stage" || k === "attempt")).toBe(true);
+    expect(typeof p.stage).toBe("string");
+    if (p.attempt !== undefined) expect(typeof p.attempt).toBe("number");
+  }
+  const uri = link.reveal();
+  const json = JSON.stringify(progress);
+  expect(json).not.toContain(uri.slice(uri.indexOf("#secret=") + 8));
+  expect(json).not.toContain(uri);
+}
 
 /**
  * A WebSocket whose CONTROL_PUT waits for `gate` (a held claim, to lose the
@@ -398,8 +414,17 @@ describe("invitations ↔ Rust reference server (live, LFCP-053)", () => {
       ]);
 
       // 2. BOB (no grant) accepts: verify, open the invitation package, claim.
-      const bobJoin = joiner(BOB, first.link);
+      const bobProgress: AcceptInvitationProgress[] = [];
+      const bobJoin = joiner(BOB, first.link, undefined, undefined, (p) => bobProgress.push(p));
       const bobResult = await bobJoin.accept();
+      // The §73 steps in order, for a join dialog; the payloads name the step only.
+      expect(bobProgress).toEqual([
+        { stage: "connecting" },
+        { stage: "validating-invitation" },
+        { stage: "retrieving-key" },
+        { stage: "claiming-capability", attempt: 1 },
+      ]);
+      expectNoSecrets(bobProgress, first.link);
       expect(bobResult).toMatchObject({
         kind: "claimed",
         abilities: [ABILITY.DATA_READ, ABILITY.DATA_WRITE],
@@ -462,10 +487,13 @@ describe("invitations ↔ Rust reference server (live, LFCP-053)", () => {
       const daveClaimHeld = new Promise((r) => {
         daveHeld = r;
       });
+      const daveProgress: AcceptInvitationProgress[] = [];
       const dave = joiner(
         DAVE,
         second.link,
         holdingControlPut(erinClaimed, () => daveHeld(true)),
+        undefined,
+        (p) => daveProgress.push(p),
       );
       const erin = joiner(ERIN, second.link);
       const daveResult = dave.accept();
@@ -479,6 +507,14 @@ describe("invitations ↔ Rust reference server (live, LFCP-053)", () => {
         code: "AUTHORIZATION_FAILED",
         attempts: ["CONTROL_HEAD_MISMATCH", "AUTHORIZATION_FAILED"],
       });
+      expect(daveProgress.map((p) => p.attempt ?? p.stage)).toEqual([
+        "connecting",
+        "validating-invitation",
+        "retrieving-key",
+        1,
+        2,
+      ]);
+      expectNoSecrets(daveProgress, second.link);
 
       // 4b. Two claims racing freely on a third invitation: exactly one wins.
       await waitFor("OWNER sees ERIN's claim", async () => (await owner.seq()) === 4n);
