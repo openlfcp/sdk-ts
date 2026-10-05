@@ -36,6 +36,7 @@ export type {
   KeyPackageReader,
   KeyPackageRow,
   LfcpStorage,
+  OutboundBlock,
   OutboundItem,
   OutboundKind,
   OutboundReader,
@@ -49,4 +50,6 @@ export type {
   SnapshotRow,
   StorageWrite,
   StoredDataUnit,
+  SyncStateReader,
+  SyncStateRow,
 } from "./store.js";

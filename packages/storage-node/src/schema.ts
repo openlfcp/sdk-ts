@@ -3,7 +3,8 @@ import type Database from "better-sqlite3";
 
 /**
  * The SQLite schema and its migrations. Version 1 is the LFCP-034 storage
- * model. A database at a newer version than this code knows is refused:
+ * model; version 2 adds outbound retry state and sync state (LFCP-036).
+ * A database at a newer version than this code knows is refused:
  * it is never downgraded or "repaired".
  *
  * Conventions: IDs and exact object bytes are BLOBs (memcmp order is byte
@@ -131,6 +132,21 @@ CREATE TABLE snapshot_sequences (
   publisher     BLOB NOT NULL,
   last          TEXT NOT NULL,
   PRIMARY KEY (resource_id, epoch, publisher)
+) WITHOUT ROWID;
+`,
+  ],
+  [
+    // LFCP-036: retry scheduling and blocking of outbound items; per-Resource sync state.
+    2,
+    `
+ALTER TABLE outbound ADD COLUMN next_attempt TEXT;
+ALTER TABLE outbound ADD COLUMN blocked_reason TEXT;
+ALTER TABLE outbound ADD COLUMN blocked_detail TEXT;
+
+CREATE TABLE sync_state (
+  resource_id       BLOB PRIMARY KEY,
+  recently_acked    BLOB NOT NULL,
+  acked_durability  TEXT
 ) WITHOUT ROWID;
 `,
   ],

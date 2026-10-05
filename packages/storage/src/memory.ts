@@ -30,6 +30,7 @@ import type {
   SnapshotRow,
   StorageWrite,
   StoredDataUnit,
+  SyncStateRow,
 } from "./store.js";
 
 /** A deep copy: every Uint8Array copied, everything frozen. Nothing stored aliases a caller's buffer. */
@@ -65,6 +66,7 @@ interface State {
   /** insertion order is enqueue order */
   readonly outbound: Map<string, OutboundItem>;
   readonly checkpoints: Map<string, ProfileCheckpoint>;
+  readonly syncStates: Map<string, SyncStateRow>;
 }
 
 const emptyState = (): State => ({
@@ -79,6 +81,7 @@ const emptyState = (): State => ({
   routes: new Map(),
   outbound: new Map(),
   checkpoints: new Map(),
+  syncStates: new Map(),
 });
 
 /** Rows are immutable, so a staged copy of the maps is enough for all-or-nothing batches. */
@@ -94,6 +97,7 @@ const stage = (s: State): State => ({
   routes: new Map(s.routes),
   outbound: new Map(s.outbound),
   checkpoints: new Map(s.checkpoints),
+  syncStates: new Map(s.syncStates),
 });
 
 /** Stores an immutable object under its ID; the same ID with other bytes is refused. */
@@ -175,13 +179,19 @@ function apply(s: State, w: StorageWrite): void {
     case "enqueue":
       putImmutable(s.outbound, w.item.itemId, w.item, "outbound item");
       return;
-    case "record-attempt": {
+    case "update-outbound": {
       const old = s.outbound.get(hex(w.itemId));
       if (old === undefined)
         throw new LfcpError("INVALID_STRUCTURE", `no outbound item ${hex(w.itemId)}`);
       s.outbound.set(
         hex(w.itemId),
-        own({ ...old, attempts: w.attempts, lastAttempt: w.lastAttempt }),
+        own({
+          ...old,
+          ...(w.attempts === undefined ? {} : { attempts: w.attempts }),
+          ...(w.lastAttempt === undefined ? {} : { lastAttempt: w.lastAttempt }),
+          ...(w.nextAttempt === undefined ? {} : { nextAttempt: w.nextAttempt }),
+          ...(w.blocked === undefined ? {} : { blocked: w.blocked }),
+        }),
       );
       return;
     }
@@ -190,6 +200,9 @@ function apply(s: State, w: StorageWrite): void {
       return;
     case "put-profile-checkpoint":
       s.checkpoints.set(hex(w.checkpoint.resourceId), own(w.checkpoint));
+      return;
+    case "put-sync-state":
+      s.syncStates.set(hex(w.row.resourceId), own(w.row));
       return;
   }
 }
@@ -406,6 +419,11 @@ export class InMemoryLfcpStorage implements LfcpStorage {
   readonly profileState = {
     checkpoint: (resource: ResourceId) =>
       Promise.resolve(copyOf(this.#state.checkpoints.get(hex(resource)))),
+  };
+
+  readonly syncState = {
+    get: (resource: ResourceId) =>
+      Promise.resolve(copyOf(this.#state.syncStates.get(hex(resource)))),
   };
 }
 

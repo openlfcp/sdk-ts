@@ -238,6 +238,8 @@ export async function createQueuedDataUnit<T>(
         bytes: created.bytes,
         attempts: 0,
         lastAttempt: null,
+        nextAttempt: null,
+        blocked: null,
       },
     },
     ...also,

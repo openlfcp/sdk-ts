@@ -28,6 +28,7 @@ import {
   type KeyPackageRow,
   type LfcpStorage,
   nextActorSequence,
+  type OutboundBlock,
   type OutboundItem,
   type OutboundKind,
   type OutboundReader,
@@ -43,6 +44,8 @@ import {
   type SnapshotSequenceReservation,
   type StorageWrite,
   type StoredDataUnit,
+  type SyncStateReader,
+  type SyncStateRow,
 } from "@openlfcp/storage";
 import Database from "better-sqlite3";
 import { migrate } from "./schema.js";
@@ -175,6 +178,20 @@ const outboundItem = (r: Row): OutboundItem => ({
   bytes: bytes(r.bytes),
   attempts: r.attempts as number,
   lastAttempt: (r.last_attempt as string | null) ?? null,
+  nextAttempt: (r.next_attempt as string | null) ?? null,
+  blocked:
+    r.blocked_reason === null
+      ? null
+      : {
+          reason: r.blocked_reason as OutboundBlock,
+          detail: (r.blocked_detail as string | null) ?? null,
+        },
+});
+
+const syncStateRow = (r: Row): SyncStateRow => ({
+  resourceId: as<ResourceId>(r.resource_id),
+  recentlyAcked: splitIds<Hash32>(r.recently_acked),
+  ackedDurability: r.acked_durability === null ? null : BigInt(r.acked_durability as string),
 });
 
 const checkpointRow = (r: Row): ProfileCheckpoint => ({
@@ -450,17 +467,59 @@ export class SqliteLfcpStorage implements LfcpStorage {
           return;
         }
         db.prepare(
-          "INSERT INTO outbound (item_id, resource_id, kind, bytes, attempts, last_attempt) VALUES (?, ?, ?, ?, ?, ?)",
-        ).run(blob(o.itemId), blob(o.resourceId), o.kind, blob(o.bytes), o.attempts, o.lastAttempt);
+          `INSERT INTO outbound (item_id, resource_id, kind, bytes, attempts, last_attempt, next_attempt, blocked_reason, blocked_detail)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          blob(o.itemId),
+          blob(o.resourceId),
+          o.kind,
+          blob(o.bytes),
+          o.attempts,
+          o.lastAttempt,
+          o.nextAttempt,
+          o.blocked?.reason ?? null,
+          o.blocked?.detail ?? null,
+        );
         return;
       }
-      case "record-attempt":
-        if (
-          db
-            .prepare("UPDATE outbound SET attempts = ?, last_attempt = ? WHERE item_id = ?")
-            .run(w.attempts, w.lastAttempt, blob(w.itemId)).changes === 0
-        )
+      case "update-outbound": {
+        const sets: string[] = [];
+        const params: unknown[] = [];
+        if (w.attempts !== undefined) {
+          sets.push("attempts = ?");
+          params.push(w.attempts);
+        }
+        if (w.lastAttempt !== undefined) {
+          sets.push("last_attempt = ?");
+          params.push(w.lastAttempt);
+        }
+        if (w.nextAttempt !== undefined) {
+          sets.push("next_attempt = ?");
+          params.push(w.nextAttempt);
+        }
+        if (w.blocked !== undefined) {
+          sets.push("blocked_reason = ?", "blocked_detail = ?");
+          params.push(w.blocked?.reason ?? null, w.blocked?.detail ?? null);
+        }
+        const exists = this.#get("SELECT 1 AS x FROM outbound WHERE item_id = ?", blob(w.itemId));
+        if (exists === undefined)
           throw new LfcpError("INVALID_STRUCTURE", `no outbound item ${toHex(w.itemId)}`);
+        if (sets.length > 0)
+          db.prepare(`UPDATE outbound SET ${sets.join(", ")} WHERE item_id = ?`).run(
+            ...params,
+            blob(w.itemId),
+          );
+        return;
+      }
+      case "put-sync-state":
+        db.prepare(
+          `INSERT INTO sync_state (resource_id, recently_acked, acked_durability) VALUES (?, ?, ?)
+           ON CONFLICT (resource_id) DO UPDATE SET recently_acked = excluded.recently_acked, acked_durability = excluded.acked_durability`,
+        ).run(
+          blob(w.row.resourceId),
+          joinIds(w.row.recentlyAcked),
+          w.row.ackedDurability === null ? null : w.row.ackedDurability.toString(),
+        );
         return;
       case "dequeue":
         db.prepare("DELETE FROM outbound WHERE item_id = ?").run(blob(w.itemId));
@@ -676,6 +735,14 @@ export class SqliteLfcpStorage implements LfcpStorage {
       this.#read(() => {
         const r = this.#get("SELECT * FROM profile_checkpoints WHERE resource_id = ?", blob(res));
         return r === undefined ? undefined : checkpointRow(r);
+      }),
+  };
+
+  readonly syncState: SyncStateReader = {
+    get: (res) =>
+      this.#read(() => {
+        const r = this.#get("SELECT * FROM sync_state WHERE resource_id = ?", blob(res));
+        return r === undefined ? undefined : syncStateRow(r);
       }),
   };
 

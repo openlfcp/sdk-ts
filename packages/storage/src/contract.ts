@@ -418,6 +418,8 @@ export function runStorageContract(
         bytes: Uint8Array.of(7, 0),
         attempts: 0,
         lastAttempt: null,
+        nextAttempt: null,
+        blocked: null,
       };
       const second = { ...item, itemId: hash32(id(161)), kind: "key-package" as const };
       const third = { ...item, itemId: hash32(id(159)), resourceId: R2 };
@@ -446,19 +448,66 @@ export function runStorageContract(
         s,
         [
           {
-            op: "record-attempt",
+            op: "update-outbound",
             itemId: item.itemId,
             attempts: 1,
             lastAttempt: "2026-10-05T12:00:00Z",
+            nextAttempt: "2026-10-05T12:00:30Z",
           },
           { op: "dequeue", itemId: second.itemId },
+          {
+            op: "update-outbound",
+            itemId: third.itemId,
+            blocked: { reason: "stale-epoch", detail: "BEYOND_CUTOFF" },
+          },
         ],
-        "attempt and dequeue",
+        "attempt, block and dequeue",
       );
       eq(
         await s.outbound.list(R),
-        [{ ...item, attempts: 1, lastAttempt: "2026-10-05T12:00:00Z" }],
+        [
+          {
+            ...item,
+            attempts: 1,
+            lastAttempt: "2026-10-05T12:00:00Z",
+            nextAttempt: "2026-10-05T12:00:30Z",
+          },
+        ],
         "after",
+      );
+      eq(
+        await s.outbound.get(third.itemId),
+        { ...third, blocked: { reason: "stale-epoch", detail: "BEYOND_CUTOFF" } },
+        "blocked, other fields kept",
+      );
+      await ok(
+        s,
+        [{ op: "update-outbound", itemId: third.itemId, blocked: null, nextAttempt: null }],
+        "unblock",
+      );
+      eq((await s.outbound.get(third.itemId))?.blocked, null, "unblocked");
+      await rejectsWith(
+        s.commit([{ op: "update-outbound", itemId: hash32(id(170)), attempts: 1 }]),
+        "INVALID_STRUCTURE",
+        "unknown item",
+      );
+      const sync = {
+        resourceId: R,
+        recentlyAcked: [hash32(id(161)), hash32(id(160))],
+        ackedDurability: 2n,
+      };
+      eq(await s.syncState.get(R), undefined, "no sync state yet");
+      await ok(s, [{ op: "put-sync-state", row: sync }], "sync state");
+      eq(await s.syncState.get(R), sync, "sync state");
+      await ok(
+        s,
+        [{ op: "put-sync-state", row: { ...sync, recentlyAcked: [], ackedDurability: null } }],
+        "replace",
+      );
+      eq(
+        await s.syncState.get(R),
+        { ...sync, recentlyAcked: [], ackedDurability: null },
+        "replaced",
       );
       eq(await s.profileState.checkpoint(R), checkpoint, "checkpoint");
       await ok(
@@ -570,7 +619,13 @@ export function runStorageContract(
               bytes: Uint8Array.of(7),
               attempts: 0,
               lastAttempt: null,
+              nextAttempt: "2026-10-05T12:01:00Z",
+              blocked: { reason: "repropose", detail: null },
             },
+          },
+          {
+            op: "put-sync-state",
+            row: { resourceId: R, recentlyAcked: [hash32(id(160))], ackedDurability: 3n },
           },
           { op: "put-profile-checkpoint", checkpoint },
         ],
@@ -604,6 +659,16 @@ export function runStorageContract(
       eq(await r.snapshots.get(snapshot.snapshotId), snapshot, "snapshot");
       eq((await r.outbound.list()).length, 1, "outbound");
       eq(await r.profileState.checkpoint(R), checkpoint, "checkpoint");
+      eq(
+        (await r.outbound.list()).map((o) => [o.nextAttempt, o.blocked]),
+        [["2026-10-05T12:01:00Z", { reason: "repropose", detail: null }]],
+        "outbound retry state",
+      );
+      eq(
+        await r.syncState.get(R),
+        { resourceId: R, recentlyAcked: [hash32(id(160))], ackedDurability: 3n },
+        "sync state",
+      );
       eq(await r.actorSequences.reserveNext(R, ALICE), 3n, "no sequence reuse after reopen");
       eq(
         await r.snapshotSequences.reserveNext(R, E1, ALICE),

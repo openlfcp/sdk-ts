@@ -1,12 +1,13 @@
 /// <reference types="node" />
 import { existsSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { dataEpoch, principalId, resourceId } from "@openlfcp/core";
+import { dataEpoch, hash32, principalId, resourceId } from "@openlfcp/core";
 import { dekSecretRef } from "@openlfcp/storage";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
   FileSecretStore,
+  MIGRATIONS,
   PACKAGE,
   SCHEMA_VERSION,
   SqliteLfcpStorage,
@@ -33,6 +34,47 @@ describe(PACKAGE, () => {
       const again = SqliteLfcpStorage.open(t.dbPath);
       expect(again.schemaVersion).toBe(SCHEMA_VERSION);
       again.close();
+    } finally {
+      t.dispose();
+    }
+  });
+
+  it("migrates a version-1 database to the current schema, keeping its rows", async () => {
+    const t = tempStore();
+    try {
+      t.storage.close();
+      const v1 = join(t.dir, "v1.sqlite");
+      const db = new Database(v1);
+      db.exec("CREATE TABLE schema_version (version INTEGER NOT NULL)");
+      db.exec(MIGRATIONS[0]?.[1] as string);
+      db.prepare("INSERT INTO schema_version (version) VALUES (1)").run();
+      db.prepare(
+        "INSERT INTO outbound (item_id, resource_id, kind, bytes, attempts, last_attempt) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(
+        Buffer.alloc(32, 7),
+        Buffer.from(R),
+        "data-unit",
+        Buffer.from([1, 2, 3]),
+        2,
+        "2026-10-05T12:00:00Z",
+      );
+      db.close();
+      t.storage = SqliteLfcpStorage.open(v1);
+      expect(t.storage.schemaVersion).toBe(SCHEMA_VERSION);
+      expect(SCHEMA_VERSION).toBe(2);
+      expect(await t.storage.outbound.list(R)).toEqual([
+        {
+          itemId: hash32(new Uint8Array(32).fill(7)),
+          resourceId: R,
+          kind: "data-unit",
+          bytes: Uint8Array.of(1, 2, 3),
+          attempts: 2,
+          lastAttempt: "2026-10-05T12:00:00Z",
+          nextAttempt: null,
+          blocked: null,
+        },
+      ]);
+      expect(await t.storage.syncState.get(R)).toBeUndefined();
     } finally {
       t.dispose();
     }

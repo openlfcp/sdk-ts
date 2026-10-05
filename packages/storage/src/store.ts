@@ -177,7 +177,22 @@ export interface ResourceRow {
 
 export type OutboundKind = "control-record" | "data-unit" | "key-package" | "snapshot";
 
-/** An immutable object waiting to be sent (consumed by LFCP-036). */
+/**
+ * Why an outbound item is no longer sent (LFCP-036). It stays queued and
+ * visible until the application discards it.
+ *
+ * - stale-epoch: beyond a closed epoch's cutoff (§88 step 7, G-EP5); the
+ *   intent must be applied again as a new unit;
+ * - equivocation: the server holds another unit for its (actor, seq): a
+ *   local-safety alarm;
+ * - rejected: refused for good (e.g. AUTHORIZATION_FAILED at its head);
+ * - repropose: a Control Record whose expected head moved
+ *   (CONTROL_HEAD_MISMATCH); the caller builds a new record;
+ * - too-large: larger than the server accepts in one message.
+ */
+export type OutboundBlock = "stale-epoch" | "equivocation" | "rejected" | "repropose" | "too-large";
+
+/** An immutable object waiting to be sent (LFCP-036). Removed only when ACKed (or discarded). */
 export interface OutboundItem {
   /** The object's ID (record, unit, package or snapshot ID). */
   readonly itemId: Hash32;
@@ -186,8 +201,21 @@ export interface OutboundItem {
   /** The exact bytes to send; a retry sends these again, never a re-created object. */
   readonly bytes: Uint8Array;
   readonly attempts: number;
-  /** Set by the sender; null until the first attempt. */
+  /** Set by the sender (caller's clock, RFC 3339); null until the first attempt. */
   readonly lastAttempt: string | null;
+  /** Not to be sent before this time (caller's clock, RFC 3339); null: now. */
+  readonly nextAttempt: string | null;
+  /** Set once the item must not be sent again. */
+  readonly blocked: { readonly reason: OutboundBlock; readonly detail: string | null } | null;
+}
+
+/** Per-Resource sync state that is not derivable from stored objects (LFCP-036). */
+export interface SyncStateRow {
+  readonly resourceId: ResourceId;
+  /** The most recently ACKed object IDs, newest last (bounded by the writer). */
+  readonly recentlyAcked: readonly Hash32[];
+  /** The durability the last ACK established (§37 level), or null before any ACK. */
+  readonly ackedDurability: bigint | null;
 }
 
 /**
@@ -244,13 +272,17 @@ export type StorageWrite =
   | { readonly op: "put-route"; readonly resourceId: ResourceId; readonly route: RouteRow }
   | { readonly op: "enqueue"; readonly item: OutboundItem }
   | {
-      readonly op: "record-attempt";
+      /** Changes the given retry fields of a queued item (its bytes never change). */
+      readonly op: "update-outbound";
       readonly itemId: Hash32;
-      readonly attempts: number;
-      readonly lastAttempt: string;
+      readonly attempts?: number;
+      readonly lastAttempt?: string | null;
+      readonly nextAttempt?: string | null;
+      readonly blocked?: OutboundItem["blocked"];
     }
   | { readonly op: "dequeue"; readonly itemId: Hash32 }
-  | { readonly op: "put-profile-checkpoint"; readonly checkpoint: ProfileCheckpoint };
+  | { readonly op: "put-profile-checkpoint"; readonly checkpoint: ProfileCheckpoint }
+  | { readonly op: "put-sync-state"; readonly row: SyncStateRow };
 
 export type CommitResult =
   | { readonly ok: true }
@@ -331,6 +363,10 @@ export interface ProfileStateReader {
   checkpoint(resource: ResourceId): Promise<ProfileCheckpoint | undefined>;
 }
 
+export interface SyncStateReader {
+  get(resource: ResourceId): Promise<SyncStateRow | undefined>;
+}
+
 /** Everything a client persists, except secrets (SecretStore). */
 export interface LfcpStorage {
   readonly control: ControlReader;
@@ -340,6 +376,7 @@ export interface LfcpStorage {
   readonly resources: ResourceReader;
   readonly outbound: OutboundReader;
   readonly profileState: ProfileStateReader;
+  readonly syncState: SyncStateReader;
   readonly actorSequences: ActorSequenceReservation;
   readonly snapshotSequences: SnapshotSequenceReservation;
   /** Applies every write or none; durable before it resolves. */
