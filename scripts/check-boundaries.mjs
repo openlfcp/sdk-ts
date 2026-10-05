@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// Enforces the sdk-ts package boundaries (LFCP-011).
+// Enforces the sdk-ts package boundaries (LFCP-011, LFCP-014).
 //
 //   graph            an @openlfcp/* dependency or import outside ALLOWED below
 //   unknown-package  a workspace package missing from ALLOWED (decide its edges first)
 //   obsidian         any dependency on, or import of, obsidian (anywhere)
 //   node-import      a node:* or Node built-in import in a portable package
 //   node-global      a Node-only global (process, Buffer, ...) in a portable package
+//   noble            an @noble/* dependency or import outside @openlfcp/crypto
 //
 // The portable packages must run in browsers and editors; Node-only code
 // belongs in future *-node packages, which still have to be listed in ALLOWED.
@@ -26,11 +27,13 @@ import ts from "typescript";
 export const ALLOWED = {
   core: [],
   crypto: ["core"],
-  wire: ["core"],
+  wire: ["core", "crypto"],
   storage: ["core"],
-  "shared-objects": ["core"],
-  client: ["core", "wire", "storage"],
+  "shared-objects": ["core", "crypto"],
+  client: ["core", "wire", "storage", "crypto"],
 };
+// The only package allowed to use the @noble cryptography libraries.
+const NOBLE_OWNER = "crypto";
 const PORTABLE = new Set(["core", "crypto", "wire", "storage", "shared-objects", "client"]);
 const NODE_GLOBALS = new Set([
   "process",
@@ -47,6 +50,7 @@ const DEP_FIELDS = ["dependencies", "devDependencies", "peerDependencies", "opti
 const SOURCE = /\.(ts|tsx|mts|cts|js|mjs|cjs)$/;
 
 const isObsidian = (spec) => /(^|[@/])obsidian($|[-/])/i.test(spec);
+const isNoble = (spec) => spec.startsWith("@noble/");
 const scopeName = (spec) => /^@openlfcp\/([^/]+)/.exec(spec)?.[1];
 const isNodeBuiltin = (spec) => spec.startsWith("node:") || NODE_BUILTINS.has(spec.split("/")[0]);
 
@@ -148,6 +152,11 @@ export function check(root) {
 
     for (const dep of depNames(pkg)) {
       if (isObsidian(dep)) problems.push(`${rel(pkgPath)}:1 obsidian: dependency ${dep}`);
+      if (isNoble(dep) && name !== NOBLE_OWNER) {
+        problems.push(
+          `${rel(pkgPath)}:1 noble: only @openlfcp/${NOBLE_OWNER} may depend on ${dep}`,
+        );
+      }
       const target = scopeName(dep);
       if (known && target && !allowed.has(target))
         problems.push(`${rel(pkgPath)}:1 graph: @openlfcp/${name} may not depend on ${dep}`);
@@ -158,6 +167,9 @@ export function check(root) {
       for (const [spec, ln] of specs) {
         const where = `${rel(file)}:${ln}`;
         if (isObsidian(spec)) problems.push(`${where} obsidian: import of ${spec}`);
+        if (isNoble(spec) && name !== NOBLE_OWNER) {
+          problems.push(`${where} noble: only @openlfcp/${NOBLE_OWNER} may import ${spec}`);
+        }
         const target = scopeName(spec);
         if (known && target && !allowed.has(target))
           problems.push(`${where} graph: @openlfcp/${name} may not import ${spec}`);

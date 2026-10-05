@@ -1,0 +1,1 @@
+packages/wire/src/index.ts:1 noble: only @openlfcp/crypto may import @noble/curves/ed25519.js

@@ -1,0 +1,1 @@
+packages/client/package.json:1 noble: only @openlfcp/crypto may depend on @noble/hashes

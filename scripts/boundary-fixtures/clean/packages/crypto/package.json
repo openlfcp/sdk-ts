@@ -1,8 +1,8 @@
 {
-  "name": "@openlfcp/wire",
+  "name": "@openlfcp/crypto",
   "version": "0.0.0",
   "dependencies": {
     "@openlfcp/core": "workspace:^",
-    "@openlfcp/crypto": "workspace:^"
+    "@noble/hashes": "^2.4.0"
   }
 }

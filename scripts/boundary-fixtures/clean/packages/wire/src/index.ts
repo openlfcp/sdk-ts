@@ -1,2 +1,3 @@
 import { PACKAGE } from "@openlfcp/core";
-export const WIRE = PACKAGE;
+import { h } from "@openlfcp/crypto";
+export const WIRE = [PACKAGE, h];
