@@ -256,6 +256,22 @@ export {
   serverSessionTransition,
 } from "./session-state.js";
 export {
+  beyondCutoff,
+  checkSnapshot,
+  encodeSnapshotPayload,
+  type ReceivedSnapshot,
+  type ReceiveSnapshotOptions,
+  receiveSnapshot,
+  type SealedSnapshot,
+  type SnapshotAadFields,
+  type SnapshotCheck,
+  type SnapshotCheckOptions,
+  type SnapshotRejected,
+  type SnapshotRejectReason,
+  sealSnapshot,
+  snapshotAad,
+} from "./snapshot.js";
+export {
   type ControlPutBody,
   controlPutBodyFromCbor,
   decodeControlPutBody,
