@@ -1,6 +1,17 @@
 /** Name of this package. */
 export const PACKAGE = "@openlfcp/storage";
 
+export { InMemoryLfcpStorage } from "./memory.js";
+export {
+  dekSecretRef,
+  InMemorySecretStore,
+  isSecretRef,
+  principalKeySecretRef,
+  type SecretKind,
+  type SecretRef,
+  type SecretStore,
+  secretRef,
+} from "./secrets.js";
 export {
   type ActorSequenceReservation,
   InMemoryActorSequenceReservation,
@@ -12,3 +23,30 @@ export {
   SnapshotSequenceGuard,
   type SnapshotSequenceReservation,
 } from "./snapshot-sequence.js";
+export type {
+  CommitResult,
+  ControlConflictRow,
+  ControlHeadRow,
+  ControlReader,
+  ControlRecordRow,
+  DataUnitReader,
+  DataUnitRow,
+  DataUnitStatus,
+  EpochRow,
+  KeyPackageReader,
+  KeyPackageRow,
+  LfcpStorage,
+  OutboundItem,
+  OutboundKind,
+  OutboundReader,
+  ProfileCheckpoint,
+  ProfileStateReader,
+  ResourceReader,
+  ResourceRow,
+  RouteRow,
+  SeenRecord,
+  SnapshotReader,
+  SnapshotRow,
+  StorageWrite,
+  StoredDataUnit,
+} from "./store.js";
