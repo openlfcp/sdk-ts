@@ -16,6 +16,7 @@ import {
   parseDataUnit,
   signObject,
   sigStructureBytes,
+  snapshotPayloadFromCbor,
   verifySignedObject,
 } from "../src/index.js";
 import { ALICE, BRUNO, DATA_UNIT, DATA_UNIT_PAYLOAD, dataUnitFields } from "./synthetic.js";
@@ -292,6 +293,34 @@ describe("payload structure", () => {
     expect(codeOf(() => keyPackagePayloadFromCbor(cborMap([[0, id(1)]])))).toBe(
       "INVALID_STRUCTURE",
     );
+    // §25: enc is bstr .size 32 and the ciphertext bstr .size 48.
+    const sized = (enc: number, ct: number) =>
+      cborMap([...kp.entries.slice(0, 5), [5, new Uint8Array(enc)], [6, new Uint8Array(ct)]]);
+    for (const [enc, ct] of [
+      [31, 48],
+      [33, 48],
+      [32, 47],
+      [32, 49],
+    ] as const)
+      expect(
+        codeOf(() => keyPackagePayloadFromCbor(sized(enc, ct))),
+        `${enc}/${ct}`,
+      ).toBe("INVALID_STRUCTURE");
+  });
+
+  it("snapshot: Snapshot Sequences begin at 1 (§29)", () => {
+    const snapshot = (seq: number) =>
+      cborMap([
+        [0, id(1)],
+        [1, 0],
+        [2, id(2)],
+        [3, seq],
+        [4, id(3)],
+        [5, []],
+        [6, new Uint8Array(17)],
+      ]);
+    expect(snapshotPayloadFromCbor(snapshot(1)).snapshotSeq).toBe(1n);
+    expect(codeOf(() => snapshotPayloadFromCbor(snapshot(0)))).toBe("INVALID_STRUCTURE");
   });
 
   it("control-record: the generic payload keeps the body opaque", () => {

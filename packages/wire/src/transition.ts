@@ -80,7 +80,7 @@ export function proposeControlTransition(
   candidate: Uint8Array,
 ): TransitionResult {
   if (expectedHead === null) {
-    // §47 allows null only for Genesis, and Genesis never comes this way (G-MSG5).
+    // §47: "A CONTROL_PUT always names an expected head; a null expected head is invalid."
     return Object.freeze({
       kind: "invalid",
       problem: "NULL_EXPECTED_HEAD",
@@ -170,19 +170,23 @@ export function proposeControlTransition(
 /** The CONTROL_PUT body (§47). */
 export interface ControlPutBody {
   readonly resourceId: ResourceId;
-  /** The expected current Control Head; null is the Genesis form, which CONTROL_PUT does not take. */
-  readonly expectedHead: ControlRecordId | null;
+  /** The expected current Control Head (§47: always present). */
+  readonly expectedHead: ControlRecordId;
   /** The exact signed Control Record bytes. */
   readonly record: Uint8Array;
 }
 
-/** Decodes a control-put-body: {0 resource-id, 1 hash32 / null, 2 bstr} (§47). Structure only; the envelope is LFCP-026. */
+/**
+ * Decodes a control-put-body: {0 resource-id, 1 hash32, 2 bstr} (§47).
+ * "A CONTROL_PUT always names an expected head; a null expected head is
+ * invalid" (§47): null is INVALID_STRUCTURE (MALFORMED_MESSAGE).
+ * Structure only; the envelope is LFCP-026.
+ */
 export function controlPutBodyFromCbor(value: CborValue): ControlPutBody {
   const f = new Fields(value, "control-put-body", [0, 1, 2]);
-  const head = f.bytesOrNull(1, 32);
   return Object.freeze({
     resourceId: resourceId(f.bytes(0, 32)),
-    expectedHead: head === null ? null : controlRecordId(head),
+    expectedHead: controlRecordId(f.bytes(1, 32)),
     record: f.bytes(2),
   });
 }

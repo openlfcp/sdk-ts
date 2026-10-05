@@ -186,7 +186,11 @@ export function dataUnitPayloadFromCbor(value: CborValue): DataUnitPayload {
   });
 }
 
-/** Structural rules: the §25 field set. HPKE and authority checks are LFCP-024. */
+/**
+ * Structural rules: the §25 field set, with `5 => bstr .size 32` (HPKE
+ * enc) and `6 => bstr .size 48` (the 32-byte DEK and the 16-byte tag).
+ * HPKE and authority checks are key-package.ts.
+ */
 export function keyPackagePayloadFromCbor(value: CborValue): KeyPackagePayload {
   const f = new Fields(value, "key-package-payload", ALL_FIELDS);
   return Object.freeze({
@@ -196,20 +200,27 @@ export function keyPackagePayloadFromCbor(value: CborValue): KeyPackagePayload {
     recipient: principalId(f.bytes(2, 32)),
     controlHead: controlRecordId(f.bytes(3, 32)),
     sender: principalId(f.bytes(4, 32)),
-    hpkeEnc: f.bytes(5),
-    hpkeCiphertext: f.bytes(6),
+    hpkeEnc: f.bytes(5, 32),
+    hpkeCiphertext: f.bytes(6, 48),
   });
 }
 
-/** Structural rules: the §29 field set and a canonical frontier (§28.1, §28.2, N6). */
+/**
+ * Structural rules: the §29 field set, a Snapshot Sequence of at least 1
+ * (§29: "Snapshot Sequences begin at 1"; §29 names no code, so this is
+ * INVALID_STRUCTURE like actor sequence 0) and a canonical frontier
+ * (§28.1, §28.2, N6).
+ */
 export function snapshotPayloadFromCbor(value: CborValue): SnapshotPayload {
   const f = new Fields(value, "snapshot-payload", ALL_FIELDS);
+  const snapshotSeq = f.uint(3);
+  if (snapshotSeq === 0n) f.fail(3, "(Snapshot Sequence) must be at least 1 (§29)");
   return Object.freeze({
     kind: "snapshot",
     resourceId: resourceId(f.bytes(0, 32)),
     dataEpoch: dataEpoch(f.uint(1)),
     publisher: principalId(f.bytes(2, 32)),
-    snapshotSeq: f.uint(3),
+    snapshotSeq,
     controlHead: controlRecordId(f.bytes(4, 32)),
     frontier: canonicalFrontierFromCbor(f.any(5)),
     ciphertext: f.bytes(6),

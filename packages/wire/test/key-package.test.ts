@@ -115,7 +115,7 @@ function keyPackage(
       [3, over.head ?? HEAD],
       [4, sender.descriptor.principalId],
       [5, seq32(1)],
-      [6, seq32(2)],
+      [6, new Uint8Array(48).fill(2)], // §25: bstr .size 48
     ]),
   );
   return parseKeyPackage(signObject(payload, over.by ?? sender).bytes);

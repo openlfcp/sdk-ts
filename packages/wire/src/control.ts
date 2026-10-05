@@ -21,7 +21,13 @@ import {
   type VerifyResult,
   verifySignedObject,
 } from "./cose.js";
-import { checkWriterUrl, type Endpoint, endpointFromCbor, endpointToCbor } from "./endpoint.js";
+import {
+  checkReceivedUrl,
+  checkWriterUrl,
+  type Endpoint,
+  endpointFromCbor,
+  endpointToCbor,
+} from "./endpoint.js";
 import { Fields } from "./fields.js";
 import { type ActorHave, canonicalFrontierFromCbor, canonicalFrontierToCbor } from "./have.js";
 import {
@@ -52,8 +58,10 @@ import {
  *
  * Writers apply rules the prose states for creators but not as receiver
  * checks: wss:// URLs (loopback ws:// allowed), no reserved endpoint flag
- * bits, at most 256 UTF-8 bytes of reason or note text, a non-empty
- * ability list, and the Genesis invariants. Receivers check structure.
+ * bits, at most 256 UTF-8 bytes of reason or note text (writer-side, §22,
+ * §24), a non-empty ability list, and the Genesis invariants. Receivers
+ * check structure, and that every endpoint and coordinator URL is ws or
+ * wss (§16).
  */
 
 export type ControlBody =
@@ -152,23 +160,32 @@ const id32 = (f: Fields, key: number): ControlRecordId => controlRecordId(f.byte
 function endpoints(f: Fields, key: number): readonly Endpoint[] {
   const list = f.array(key);
   if (list.length === 0) f.fail(key, "must list at least one endpoint");
-  return Object.freeze(list.map(endpointFromCbor));
+  const decoded = list.map(endpointFromCbor);
+  for (const e of decoded) checkReceivedUrl(e.url);
+  return Object.freeze(decoded);
+}
+
+/** A Control Coordinator URL: text with a ws or wss scheme (§16). */
+function coordinatorUrl(f: Fields, key: number): string {
+  const url = f.text(key);
+  checkReceivedUrl(url);
+  return url;
 }
 
 /**
- * The Key Epoch final frontier. PROVISIONAL (G-CP1, approved for
- * baseline.3): a canonical frontier, §28.1 rules 1-9 and the §28.2 order by
- * raw Principal ID; anything else is MALFORMED_MESSAGE.
+ * The Key Epoch final frontier. §19: "Field 2 is a canonical frontier
+ * (Sections 28.1 and 28.2) [...] A Key Epoch Record whose final frontier is
+ * not canonical MUST be rejected with MALFORMED_MESSAGE."
  */
 function frontierList(f: Fields, key: number): readonly ActorHave[] {
   return canonicalFrontierFromCbor(f.array(key) as CborValue);
 }
 
 /**
- * An ability list (§17.1 codes). PROVISIONAL (gap A1 / G-CP6): a code
- * listed twice makes the record malformed (INVALID_STRUCTURE, wire
- * MALFORMED_MESSAGE). Unknown codes are structurally valid and kept; they
- * confer nothing (capability.ts).
+ * An ability list (§17.1 codes). §17.1: "An ability list [...] MUST NOT
+ * repeat a code; a record whose list repeats a code is rejected with
+ * MALFORMED_MESSAGE" (INVALID_STRUCTURE here). "A code that is not in the
+ * table above is kept as received and confers nothing" (capability.ts).
  */
 function abilityList(f: Fields, key: number, nonEmpty: boolean): readonly bigint[] {
   const list = f.uintArray(key, nonEmpty);
@@ -192,7 +209,7 @@ export function controlBodyFromCbor(type: bigint, value: CborValue): ControlBody
         owner: principalDescriptorFromCbor(f.any(1)),
         dekCommitment: hash32(f.bytes(2, 32)),
         endpoints: endpoints(f, 3),
-        coordinatorUrl: f.text(4),
+        coordinatorUrl: coordinatorUrl(f, 4),
       });
     }
     case CONTROL_TYPE.CAPABILITY_GRANT: {
@@ -235,7 +252,7 @@ export function controlBodyFromCbor(type: bigint, value: CborValue): ControlBody
         type: "ROUTE_UPDATE",
         routeVersion: f.uint(0),
         endpoints: endpoints(f, 1),
-        coordinatorUrl: f.text(2),
+        coordinatorUrl: coordinatorUrl(f, 2),
       });
     }
     case CONTROL_TYPE.OWNER_TRANSFER_COMMIT: {
@@ -252,7 +269,7 @@ export function controlBodyFromCbor(type: bigint, value: CborValue): ControlBody
         type: "COORDINATOR_RECOVERY",
         routeVersion: f.uint(0),
         endpoints: endpoints(f, 1),
-        coordinatorUrl: f.text(2),
+        coordinatorUrl: coordinatorUrl(f, 2),
         reason: f.text(3),
       });
     }

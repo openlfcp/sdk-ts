@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { type CborMap, type CborValue, cborMap, decodeStrict, encode } from "../src/cbor/index.js";
 import {
   type ControlBody,
+  checkReceivedUrl,
   checkWriterUrl,
   controlBodyFromCbor,
   controlRecordSigner,
@@ -445,7 +446,61 @@ describe("endpoint URL rules (§16)", () => {
     expect(codeOf(() => checkWriterUrl(url))).toBe("INVALID_STRUCTURE");
   });
 
-  it("a writer refuses reserved flag bits; a reader keeps them and any URL text", () => {
+  it.each(["wss://sync.example.test", "WS://remote.example.test", "ws://remote.example.test"])(
+    "a receiver accepts the ws or wss URL %s in a Control Record (§16)",
+    (url) => {
+      expect(() => checkReceivedUrl(url)).not.toThrow();
+      const route = controlBodyFromCbor(
+        5n,
+        cborMap([
+          [0, 1],
+          [
+            1,
+            [
+              cborMap([
+                [0, url],
+                [1, 0],
+              ]),
+            ],
+          ],
+          [2, url],
+        ]),
+      );
+      expect(route).toMatchObject({ coordinatorUrl: url });
+    },
+  );
+
+  it.each([
+    ["http in an endpoint", "https://sync.example.test", "wss://sync.example.test"],
+    ["http as the coordinator", "wss://sync.example.test", "http://sync.example.test"],
+    ["no scheme", "sync.example.test", "wss://sync.example.test"],
+  ])(
+    "a receiver rejects %s with INVALID_STRUCTURE (MALFORMED_MESSAGE, §16)",
+    (_n, endpoint, coordinator) => {
+      expect(
+        codeOf(() =>
+          controlBodyFromCbor(
+            5n,
+            cborMap([
+              [0, 1],
+              [
+                1,
+                [
+                  cborMap([
+                    [0, endpoint],
+                    [1, 0],
+                  ]),
+                ],
+              ],
+              [2, coordinator],
+            ]),
+          ),
+        ),
+      ).toBe("INVALID_STRUCTURE");
+    },
+  );
+
+  it("a writer refuses reserved flag bits; a reader keeps them", () => {
     expect(
       codeOf(() => endpointToCbor({ url: "wss://a.test", priority: 0n, flags: 1n << 6n })),
     ).toBe("INVALID_STRUCTURE");

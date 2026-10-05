@@ -15,9 +15,9 @@ export interface Endpoint {
  * Decodes an `endpoint` map: exactly keys 0 (tstr) and 1 (uint), optional
  * 2 (uint). A violation is INVALID_STRUCTURE (MALFORMED_MESSAGE on the wire).
  *
- * Structure only. The URL scheme rule (`wss://` except on loopback) and the
- * reserved flag bits are connection policy, checked where endpoints are used
- * (Genesis and Route Update bodies, LFCP-019; connections, LFCP-027).
+ * Structure only. Reserved flag bits are kept: "A writer sets reserved bits
+ * to 0; a receiver ignores them" (§16). The receiver's URL scheme rule is
+ * checkReceivedUrl, applied by the Control Record decoders.
  */
 export function endpointFromCbor(value: CborValue): Endpoint {
   const f = new Fields(value, "endpoint", [0, 1], [2]);
@@ -43,11 +43,24 @@ function refuse(why: string): never {
 }
 
 /**
- * Checks a URL an LFCP writer puts in an endpoint or a coordinator field.
- * §16 states it as a usage rule ("For non-loopback network communication,
- * endpoints MUST use wss://"; "ws:// MAY be used for local development or
- * loopback-only deployments"), not as a receiver check, so only writers
- * apply it: the decoders keep any text string.
+ * §16, receiver side: "A receiver MUST reject a record carrying such a URL
+ * [an endpoint or Control Coordinator URL in a Control Record] with any
+ * scheme other than ws or wss with MALFORMED_MESSAGE." Only the scheme is
+ * checked (case-insensitively, RFC 3986 §3.1); the loopback rule is the
+ * sender's. Throws INVALID_STRUCTURE.
+ */
+export function checkReceivedUrl(url: string): void {
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(url)?.[1]?.toLowerCase();
+  if (scheme !== "ws" && scheme !== "wss")
+    throw new LfcpError(
+      "INVALID_STRUCTURE",
+      `an endpoint or coordinator URL must use ws or wss, not ${scheme ?? "no scheme"} (§16)`,
+    );
+}
+
+/**
+ * Checks a URL an LFCP writer puts in an endpoint or a coordinator field
+ * (§16: "A sender uses wss://, except ws:// for a loopback address").
  *
  * Accepted: an absolute URI (RFC 3986 §4.3: no fragment) with scheme wss,
  * or ws on a loopback host (localhost, 127.0.0.0/8, [::1]).

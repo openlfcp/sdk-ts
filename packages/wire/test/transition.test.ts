@@ -314,19 +314,18 @@ describe("CONTROL_PUT bodies (§47)", () => {
       ),
     );
     expect(proposeControlPut(state, stale).kind).toBe("head-mismatch");
-    const nullHead = decodeControlPutBody(
-      encode(
-        cborMap([
-          [0, R],
-          [1, null],
-          [2, candidate],
-        ]),
+    // §47: "a null expected head is invalid": the body does not decode.
+    expect(() =>
+      decodeControlPutBody(
+        encode(
+          cborMap([
+            [0, R],
+            [1, null],
+            [2, candidate],
+          ]),
+        ),
       ),
-    );
-    expect(proposeControlPut(state, nullHead)).toMatchObject({
-      kind: "invalid",
-      problem: "NULL_EXPECTED_HEAD",
-    });
+    ).toThrow(expect.objectContaining({ code: "INVALID_STRUCTURE" }));
     const otherResource = decodeControlPutBody(
       encode(
         cborMap([

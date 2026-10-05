@@ -61,6 +61,7 @@ export {
   verifySignedObject,
 } from "./cose.js";
 export {
+  checkReceivedUrl,
   checkWriterUrl,
   ENDPOINT_FLAGS,
   type Endpoint,
