@@ -88,6 +88,12 @@ export {
   type SequenceRange,
 } from "./have.js";
 export {
+  type KeyPackageCheck,
+  keyPackageHpkeAad,
+  keyPackageHpkeInfo,
+  verifyKeyPackage,
+} from "./key-package.js";
+export {
   CONTROL_TYPE,
   type ControlRecordPayload,
   controlRecordPayloadFromCbor,
