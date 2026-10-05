@@ -495,6 +495,26 @@ export class SharedObjectsReplica {
     });
   }
 
+  /**
+   * This replica merged with an Automerge full save (a loaded Snapshot,
+   * §13): the save's document plus every change of this replica, so local
+   * work the Snapshot does not hold is kept. The §9 sequence carries over.
+   * Throws PROFILE_FRAMING when the save does not load.
+   */
+  mergeSave(save: Uint8Array): BuiltReplica {
+    const merged = SharedObjectsReplica.fromSave(save, {
+      resource: this.resource,
+      principal: this.#principal,
+      minSeq: Math.max(this.#minSeq, this.actorSeq),
+    });
+    const unapplied: CheckedChange[] = [];
+    for (const change of this.changes()) {
+      const r = merged.receiveChange(change);
+      if (r.status === "missing_dependencies") unapplied.push(r.change);
+    }
+    return { replica: merged, unapplied };
+  }
+
   /** The highest change sequence of this replica's own actor in its state. */
   get actorSeq(): number {
     return this.#seqs.get(this.#actor) ?? 0;

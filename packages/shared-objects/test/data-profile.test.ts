@@ -169,4 +169,31 @@ describe("SharedObjectsDataProfile", () => {
       expect.objectContaining({ code: "DATA_PROFILE_MISMATCH" }),
     );
   });
+
+  it("loads a Snapshot's full save, keeping local work and merging what was buffered (§13)", () => {
+    const { replica: origin, init, a, b } = source();
+    // BOB holds only the init change plus a change of its own.
+    const bobReplica = SharedObjectsReplica.empty(opts(BOB));
+    bobReplica.receiveChange(init.change);
+    const bob = new SharedObjectsDataProfile(bobReplica);
+    // A unit that builds on b waits for it.
+    const later = origin.apply(setStatus(taskOf(origin, ID_B), "done").intent) as LocalChange;
+    expect(bob.apply(unit(7), checkChange(later.change)).merged).toEqual([]);
+    const codec = bob.snapshotCodec();
+    const save = codec.decode(codec.encode(saveOf([init, a, b])));
+    const r = bob.loadSnapshot(save);
+    expect(r.merged).toEqual([unit(7).unitId]);
+    expect(r.objects).toEqual([ID_A, ID_B]);
+    expect(bob.replica.task(ID_B)?.task?.status).toBe("done");
+    expect(() => codec.decode(frameProfilePayload(init.change))).toThrow(/document/);
+    expect(bob.snapshotState()).toEqual(bob.replica.save());
+  });
 });
+
+/** The state made of `changes`, as a full save. */
+function saveOf(changes: readonly LocalChange[]): Uint8Array {
+  return SharedObjectsReplica.fromChanges(
+    changes.map((c) => c.change),
+    opts(),
+  ).replica.save();
+}

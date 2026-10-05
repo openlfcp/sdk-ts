@@ -5,7 +5,13 @@ import {
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
-import { type CheckedChange, frameChange, unframeChange } from "./automerge-bytes.js";
+import {
+  type CheckedChange,
+  frameChange,
+  frameSnapshot,
+  unframeChange,
+  unframeSnapshot,
+} from "./automerge-bytes.js";
 import { type ObjectChange, type ReplicaOptions, SharedObjectsReplica } from "./replica.js";
 import { type Json, ProfileInvalidError } from "./validate.js";
 import { deriveActorId, PROFILE_ID } from "./values.js";
@@ -58,6 +64,13 @@ export interface SharedObjectsCheckpoint {
   readonly state: Uint8Array;
   readonly actorSeq: number;
   readonly units: readonly { readonly unitId: DataUnitId; readonly ref: string }[];
+}
+
+/** The §13 Snapshot codec (structurally the wire DataProfileCodec): plaintext ↔ full save. */
+export interface SharedObjectsSnapshotCodec {
+  readonly dataProfile: string;
+  encode(save: Uint8Array): Uint8Array;
+  decode(plaintext: Uint8Array): Uint8Array;
 }
 
 /** The §11 codec of one unit (structurally the wire DataProfileCodec). */
@@ -164,6 +177,56 @@ export class SharedObjectsDataProfile {
         "the change is not in this replica; record only local changes",
       );
     this.#merged.set(toHex(unitId), { unitId, hash: change.hash });
+  }
+
+  /**
+   * The §13 Snapshot codec (structurally the wire DataProfileCodec): an
+   * Automerge full save framed as [1, save]; decoding requires a document
+   * chunk. For receiveSnapshot and createSnapshot.
+   */
+  snapshotCodec(): SharedObjectsSnapshotCodec {
+    return {
+      dataProfile: PROFILE_ID,
+      encode: (save) => frameSnapshot(save),
+      decode: (plaintext) => unframeSnapshot(plaintext),
+    };
+  }
+
+  /** The state to publish as a Snapshot: the replica's full save. */
+  snapshotState(): Uint8Array {
+    return this.#replica.save();
+  }
+
+  /**
+   * Loads a received Snapshot's full save (§13, §66 step 3): the replica
+   * becomes the save merged with everything it held, and buffered units
+   * whose dependencies the Snapshot brings are merged. Returns the objects
+   * that changed and the units merged from the buffer.
+   */
+  loadSnapshot(save: Uint8Array): {
+    readonly objects: readonly string[];
+    readonly merged: readonly DataUnitId[];
+  } {
+    const before = this.#replica;
+    const { replica } = before.mergeSave(save);
+    this.#replica = replica;
+    const merged: DataUnitId[] = [];
+    for (let progress = true; progress; ) {
+      progress = false;
+      for (const [key, b] of this.#pending) {
+        const r = this.#replica.receiveChange(b.change.bytes);
+        if (r.status === "missing_dependencies") continue;
+        this.#pending.delete(key);
+        this.#merged.set(key, { unitId: b.unitId, hash: b.change.hash });
+        merged.push(b.unitId);
+        progress = true;
+      }
+    }
+    const changes = rebuildChanges(before, replica).map((c) =>
+      Object.freeze({ ...c, origin: "remote" as const }),
+    );
+    this.#emit(changes);
+    return Object.freeze({ objects: changes.map((c) => c.objectId), merged });
   }
 
   /** The units waiting for Automerge dependencies. */
