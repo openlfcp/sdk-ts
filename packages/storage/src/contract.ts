@@ -530,6 +530,31 @@ export function runStorageContract(
       eq(await s.snapshotSequences.reserveNext(R, E0, ALICE), 1n, "per epoch");
     });
 
+    test("fails closed when a reservation counter is behind the Principal's own stored objects", async ({
+      storage: s,
+    }) => {
+      // Units of ALICE up to sequence 3 exist, but no reservation was recorded:
+      // lost or damaged sequence state. Reserving must refuse, not hand out 1.
+      await ok(
+        s,
+        [{ op: "put-data-unit", unit: unit(3, 3n), status: "merged", accepted: true }],
+        "unit at 3",
+      );
+      await rejectsWith(
+        s.actorSequences.reserveNext(R, ALICE),
+        "SEQUENCE_REUSE",
+        "actor sequence behind",
+      );
+      eq(await s.actorSequences.reserveNext(R, BOB), 1n, "another Principal is unaffected");
+      await ok(s, [{ op: "put-snapshot", row: snapshot }], "Snapshot at sequence 3");
+      await rejectsWith(
+        s.snapshotSequences.reserveNext(R, E1, ALICE),
+        "SEQUENCE_REUSE",
+        "Snapshot sequence behind",
+      );
+      eq(await s.snapshotSequences.reserveNext(R, E0, ALICE), 1n, "another epoch is unaffected");
+    });
+
     test("no caller buffer aliases a stored one, in or out", async ({ storage: s }) => {
       const u = unit(1, 1n);
       const bytes = u.bytes;
@@ -594,6 +619,13 @@ export function runStorageContract(
       if (h.reopen === undefined) return; // the in-memory adapter forgets by design
       const s = h.storage;
       const u = unit(1, 1n);
+      // Reserve first, as writers do (a stored unit ahead of its reservation fails closed).
+      const seqs = [
+        await s.actorSequences.reserveNext(R, ALICE),
+        await s.actorSequences.reserveNext(R, ALICE),
+      ];
+      eq(seqs, [1n, 2n], "reserved");
+      eq(await s.snapshotSequences.reserveNext(R, E1, BOB), 1n, "snapshot reserved");
       await ok(
         s,
         [
@@ -631,12 +663,6 @@ export function runStorageContract(
         ],
         "everything",
       );
-      const seqs = [
-        await s.actorSequences.reserveNext(R, ALICE),
-        await s.actorSequences.reserveNext(R, ALICE),
-      ];
-      eq(seqs, [1n, 2n], "reserved");
-      eq(await s.snapshotSequences.reserveNext(R, E1, ALICE), 1n, "snapshot reserved");
       await h.secrets.put(dekSecretRef(R, E1), Uint8Array.of(42));
 
       const again = await h.reopen();
@@ -671,7 +697,7 @@ export function runStorageContract(
       );
       eq(await r.actorSequences.reserveNext(R, ALICE), 3n, "no sequence reuse after reopen");
       eq(
-        await r.snapshotSequences.reserveNext(R, E1, ALICE),
+        await r.snapshotSequences.reserveNext(R, E1, BOB),
         2n,
         "no snapshot sequence reuse after reopen",
       );

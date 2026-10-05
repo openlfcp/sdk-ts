@@ -758,6 +758,17 @@ export class SqliteLfcpStorage implements LfcpStorage {
         const next = nextActorSequence(
           row === undefined ? undefined : actorSequence(fromU64(row.last)),
         );
+        // Fail closed (§9): a counter behind this Principal's own stored units
+        // means lost or damaged sequence state; continuing could reuse a nonce.
+        const stored = this.#get(
+          "SELECT MAX(actor_seq) AS m FROM data_units WHERE resource_id = ? AND actor = ?",
+          ...key,
+        );
+        if (stored?.m != null && next <= fromU64(stored.m))
+          throw new LfcpError(
+            "SEQUENCE_REUSE",
+            `the actor sequence state (${next - 1n}) is behind the stored units of this Principal (${fromU64(stored.m)}); refusing to reserve (§9)`,
+          );
         this.#db
           .prepare(
             "INSERT INTO actor_sequences (resource_id, principal, last) VALUES (?, ?, ?) ON CONFLICT (resource_id, principal) DO UPDATE SET last = excluded.last",
@@ -776,6 +787,15 @@ export class SqliteLfcpStorage implements LfcpStorage {
           ...key,
         );
         const last = row === undefined ? 0n : fromU64(row.last);
+        const stored = this.#get(
+          "SELECT MAX(snapshot_seq) AS m FROM snapshots WHERE resource_id = ? AND data_epoch = ? AND publisher = ?",
+          ...key,
+        );
+        if (stored?.m != null && last + 1n <= fromU64(stored.m))
+          throw new LfcpError(
+            "SEQUENCE_REUSE",
+            `the Snapshot Sequence state (${last}) is behind the stored Snapshots of this publisher (${fromU64(stored.m)}); refusing to reserve (§29)`,
+          );
         if (last >= UINT64_MAX)
           throw new LfcpError("OUT_OF_RANGE", "the Snapshot Sequence space is exhausted (§29)");
         this.#db

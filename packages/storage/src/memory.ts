@@ -10,8 +10,11 @@ import {
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
-import { InMemoryActorSequenceReservation } from "./sequence.js";
-import { InMemorySnapshotSequenceReservation } from "./snapshot-sequence.js";
+import { type ActorSequenceReservation, InMemoryActorSequenceReservation } from "./sequence.js";
+import {
+  InMemorySnapshotSequenceReservation,
+  type SnapshotSequenceReservation,
+} from "./snapshot-sequence.js";
 import type {
   CommitResult,
   ControlConflictRow,
@@ -238,8 +241,44 @@ const ACCEPTED_ORDER = (a: StoredDataUnit, b: StoredDataUnit): number =>
  */
 export class InMemoryLfcpStorage implements LfcpStorage {
   #state: State = emptyState();
-  readonly actorSequences = new InMemoryActorSequenceReservation();
-  readonly snapshotSequences = new InMemorySnapshotSequenceReservation();
+  readonly #actorCounter = new InMemoryActorSequenceReservation();
+  readonly #snapshotCounter = new InMemorySnapshotSequenceReservation();
+
+  /** Reservations fail closed when the counter is behind this Principal's own stored objects (§9, §29). */
+  readonly actorSequences: ActorSequenceReservation = {
+    reserveNext: async (resource, principal) => {
+      const next = await this.#actorCounter.reserveNext(resource, principal);
+      const max = [...this.#state.units.values()]
+        .filter((u) => bytesEqual(u.resourceId, resource) && bytesEqual(u.actor, principal))
+        .reduce((m, u) => (u.actorSeq > m ? BigInt(u.actorSeq) : m), 0n);
+      if (next <= max)
+        throw new LfcpError(
+          "SEQUENCE_REUSE",
+          `the actor sequence state is behind the stored units of this Principal (${max}); refusing to reserve (§9)`,
+        );
+      return next;
+    },
+  };
+
+  readonly snapshotSequences: SnapshotSequenceReservation = {
+    reserveNext: async (resource, epoch, publisher) => {
+      const next = await this.#snapshotCounter.reserveNext(resource, epoch, publisher);
+      const max = [...this.#state.snapshots.values()]
+        .filter(
+          (x) =>
+            bytesEqual(x.resourceId, resource) &&
+            x.dataEpoch === epoch &&
+            bytesEqual(x.publisher, publisher),
+        )
+        .reduce((m, x) => (x.snapshotSeq > m ? x.snapshotSeq : m), 0n);
+      if (next <= max)
+        throw new LfcpError(
+          "SEQUENCE_REUSE",
+          `the Snapshot Sequence state is behind the stored Snapshots of this publisher (${max}); refusing to reserve (§29)`,
+        );
+      return next;
+    },
+  };
 
   commit(writes: readonly StorageWrite[]): Promise<CommitResult> {
     const next = stage(this.#state);
