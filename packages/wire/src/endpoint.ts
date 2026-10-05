@@ -79,10 +79,17 @@ export function checkWriterUrl(url: string): void {
     return c < 0x20 || c === 0x7f;
   });
   if (control || /\s/.test(url)) refuse("the URL contains whitespace or control characters");
-  const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]+)([^#]*)$/.exec(url);
-  if (m === null) refuse("not an absolute URL with an authority and no fragment");
+  // Split by hand: the former /^scheme:\/\/([^/?#]+)([^#]*)$/ backtracked
+  // quadratically on a long URL ending in "#" (security review, H3 pass).
+  // Same result: the authority runs to the first "/", "?" or "#" and must
+  // not be empty, and no "#" (fragment) may follow.
+  const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(url);
+  const rest = m === null ? "" : url.slice(m[0].length);
+  const cut = rest.search(/[/?#]/);
+  const authority = cut < 0 ? rest : rest.slice(0, cut);
+  if (m === null || authority === "" || rest.includes("#"))
+    refuse("not an absolute URL with an authority and no fragment");
   const scheme = (m[1] as string).toLowerCase();
-  const authority = m[2] as string;
   if (authority.includes("@")) refuse("user information is not allowed in the URL");
   const host = (/^(\[[^\]]*\]|[^:]*)(:\d*)?$/.exec(authority)?.[1] ?? "").toLowerCase();
   if (host === "") refuse("the URL has no host");
