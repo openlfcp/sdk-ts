@@ -515,6 +515,15 @@ export class SharedObjectsReplica {
     return { replica: merged, unapplied };
   }
 
+  /** An empty replica of the same Resource and actor that keeps the §9 sequence (nothing reused). */
+  emptied(): SharedObjectsReplica {
+    return SharedObjectsReplica.empty({
+      resource: this.resource,
+      principal: this.#principal,
+      minSeq: Math.max(this.#minSeq, this.actorSeq),
+    });
+  }
+
   /** The highest change sequence of this replica's own actor in its state. */
   get actorSeq(): number {
     return this.#seqs.get(this.#actor) ?? 0;

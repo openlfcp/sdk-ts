@@ -229,6 +229,25 @@ export class SharedObjectsDataProfile {
     return Object.freeze({ objects: changes.map((c) => c.objectId), merged });
   }
 
+  /**
+   * Forgets the whole state (an empty replica that keeps the §9 sequence,
+   * no merged or buffered units), so it can be rebuilt from accepted units
+   * only (SNAP-EP: Snapshot-derived state dropped). Notifies the changes.
+   */
+  reset(): void {
+    const before = this.#replica;
+    this.#replica = before.emptied();
+    this.#merged.clear();
+    this.#pending.clear();
+    this.#emit(rebuildChanges(before, this.#replica));
+  }
+
+  /** Whether this handler holds the unit's change (merged, recorded or buffered). */
+  has(unitId: DataUnitId): boolean {
+    const key = toHex(unitId);
+    return this.#merged.has(key) || this.#pending.has(key);
+  }
+
   /** The units waiting for Automerge dependencies. */
   pendingUnits(): DataUnitId[] {
     return [...this.#pending.values()].map((b) => b.unitId);
