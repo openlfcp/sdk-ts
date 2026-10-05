@@ -1,7 +1,11 @@
 import {
+  type ActorSequence,
+  actorSequence,
   type ControlRecordId,
   controlRecordId,
+  type DataEpoch,
   type DataUnitId,
+  dataEpoch,
   dataUnitId,
   LfcpError,
   type PrincipalId,
@@ -86,9 +90,9 @@ export interface ControlRecordPayload {
 export interface DataUnitPayload {
   readonly kind: "data-unit";
   readonly resourceId: ResourceId;
-  readonly dataEpoch: bigint;
+  readonly dataEpoch: DataEpoch;
   readonly actor: PrincipalId;
-  readonly actorSeq: bigint;
+  readonly actorSeq: ActorSequence;
   readonly prevDataUnitId: DataUnitId | null;
   readonly controlHead: ControlRecordId;
   readonly ciphertext: Uint8Array;
@@ -98,7 +102,7 @@ export interface DataUnitPayload {
 export interface KeyPackagePayload {
   readonly kind: "key-package";
   readonly resourceId: ResourceId;
-  readonly dataEpoch: bigint;
+  readonly dataEpoch: DataEpoch;
   readonly recipient: PrincipalId;
   readonly controlHead: ControlRecordId;
   readonly sender: PrincipalId;
@@ -110,7 +114,7 @@ export interface KeyPackagePayload {
 export interface SnapshotPayload {
   readonly kind: "snapshot";
   readonly resourceId: ResourceId;
-  readonly dataEpoch: bigint;
+  readonly dataEpoch: DataEpoch;
   readonly publisher: PrincipalId;
   readonly snapshotSeq: bigint;
   readonly controlHead: ControlRecordId;
@@ -167,9 +171,9 @@ export function dataUnitPayloadFromCbor(value: CborValue): DataUnitPayload {
   return Object.freeze({
     kind: "data-unit",
     resourceId: resourceId(f.bytes(0, 32)),
-    dataEpoch: f.uint(1),
+    dataEpoch: dataEpoch(f.uint(1)),
     actor: principalId(f.bytes(2, 32)),
-    actorSeq,
+    actorSeq: actorSequence(actorSeq),
     prevDataUnitId: prev === null ? null : dataUnitId(prev),
     controlHead: controlRecordId(f.bytes(5, 32)),
     ciphertext: f.bytes(6),
@@ -182,7 +186,7 @@ export function keyPackagePayloadFromCbor(value: CborValue): KeyPackagePayload {
   return Object.freeze({
     kind: "key-package",
     resourceId: resourceId(f.bytes(0, 32)),
-    dataEpoch: f.uint(1),
+    dataEpoch: dataEpoch(f.uint(1)),
     recipient: principalId(f.bytes(2, 32)),
     controlHead: controlRecordId(f.bytes(3, 32)),
     sender: principalId(f.bytes(4, 32)),
@@ -197,7 +201,7 @@ export function snapshotPayloadFromCbor(value: CborValue): SnapshotPayload {
   return Object.freeze({
     kind: "snapshot",
     resourceId: resourceId(f.bytes(0, 32)),
-    dataEpoch: f.uint(1),
+    dataEpoch: dataEpoch(f.uint(1)),
     publisher: principalId(f.bytes(2, 32)),
     snapshotSeq: f.uint(3),
     controlHead: controlRecordId(f.bytes(4, 32)),
