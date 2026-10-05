@@ -14,6 +14,7 @@ export {
   type ProfileExcludeResult,
   type ProfileUnit,
 } from "./apply.js";
+export { type CheckpointSource, ProfileCheckpointer } from "./checkpoint.js";
 export { type CreateDataUnitOptions, type CreatedDataUnit, createDataUnit } from "./data-unit.js";
 export { type CreatedSnapshot, type CreateSnapshotOptions, createSnapshot } from "./snapshot.js";
 export {
