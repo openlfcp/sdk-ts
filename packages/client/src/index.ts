@@ -26,6 +26,16 @@ export {
 } from "./connection.js";
 export { type CreateDataUnitOptions, type CreatedDataUnit, createDataUnit } from "./data-unit.js";
 export {
+  type AcceptedInvitation,
+  type AcceptInvitationOptions,
+  acceptInvitation,
+  type CreatedInvitation,
+  type CreateInvitationOptions,
+  createInvitation,
+  DEFAULT_INVITATION_ABILITIES,
+  InvitationLink,
+} from "./invite.js";
+export {
   type AckOutcome,
   type BlockedItem,
   exponentialBackoff,
