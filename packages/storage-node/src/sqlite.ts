@@ -344,7 +344,7 @@ export class SqliteLfcpStorage implements LfcpStorage {
         const e = w.epoch;
         db.prepare(
           `INSERT INTO epochs (resource_id, epoch, dek_commitment, opened_by, closed_by, dek_ref) VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT (resource_id, epoch) DO UPDATE SET dek_commitment = excluded.dek_commitment, opened_by = excluded.opened_by, closed_by = excluded.closed_by, dek_ref = excluded.dek_ref`,
+           ON CONFLICT (resource_id, epoch) DO UPDATE SET dek_commitment = excluded.dek_commitment, opened_by = excluded.opened_by, closed_by = excluded.closed_by, dek_ref = COALESCE(excluded.dek_ref, epochs.dek_ref)`,
         ).run(
           blob(w.resourceId),
           u64(BigInt(e.epoch)),

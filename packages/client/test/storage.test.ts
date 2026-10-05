@@ -155,6 +155,46 @@ describe("client over storage", () => {
     expect((await storage.control.epochs(R))[0]?.dekRef).toBe(dekSecretRef(R, dataEpoch(0n)));
   });
 
+  it("keeps a DEK reference stored while a chain save is in flight (no lost update)", async () => {
+    const storage = new InMemoryLfcpStorage();
+    await saveControlChain(storage, linear(records), null);
+    // A rotation arrives: the chain save reads the epoch rows, then commits.
+    const rotation = rotateEpoch(linear(records).state, OWNER, {
+      reason: 0n,
+      finalFrontier: [],
+      dek: DEK1,
+    });
+    const longer = linear([...records, rotation.bytes]);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const epochs = storage.control.epochs.bind(storage.control);
+    storage.control.epochs = async (resource) => {
+      const rows = await epochs(resource);
+      await gate; // the save has read the rows and not yet committed
+      return rows;
+    };
+    const saving = saveControlChain(storage, longer, linear(records).state.head);
+    // Meanwhile a Key Package delivers epoch 0's DEK (as the sync client stores it).
+    storage.control.epochs = epochs;
+    const epoch0 = (await storage.control.epochs(R))[0] as EpochRow;
+    await storage.commit([
+      {
+        op: "put-epoch",
+        resourceId: R,
+        epoch: { ...epoch0, dekRef: dekSecretRef(R, dataEpoch(0n)) },
+      },
+    ]);
+    release();
+    expect(await saving).toEqual({ ok: true });
+    const after = await storage.control.epochs(R);
+    expect(after.map((e) => [e.epoch, e.closedBy !== null, e.dekRef])).toEqual([
+      [0n, true, dekSecretRef(R, dataEpoch(0n))],
+      [1n, false, null],
+    ]);
+  });
+
   it("creates a local unit with a stored sequence and commits it with its outbound entry", async () => {
     const storage = new InMemoryLfcpStorage();
     const view = linear(records);

@@ -134,7 +134,11 @@ function apply(s: State, w: StorageWrite): void {
     case "put-epoch": {
       const key = hex(w.resourceId);
       const epochs = s.epochs.get(key) ?? new Map<bigint, EpochRow>();
-      epochs.set(BigInt(w.epoch.epoch), own(w.epoch));
+      const stored = epochs.get(BigInt(w.epoch.epoch));
+      epochs.set(
+        BigInt(w.epoch.epoch),
+        own({ ...w.epoch, dekRef: w.epoch.dekRef ?? stored?.dekRef ?? null }),
+      );
       s.epochs.set(key, epochs);
       return;
     }

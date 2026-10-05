@@ -249,7 +249,17 @@ export type StorageWrite =
       readonly resourceId: ResourceId;
       readonly conflict: ControlConflictRow | null;
     }
-  | { readonly op: "put-epoch"; readonly resourceId: ResourceId; readonly epoch: EpochRow }
+  | {
+      /**
+       * Stores the epoch row. A null `dekRef` never clears a stored one: a
+       * chain save that read the rows before a Key Package stored the DEK
+       * reference must not erase it (merged inside the commit, so no lost
+       * update).
+       */
+      readonly op: "put-epoch";
+      readonly resourceId: ResourceId;
+      readonly epoch: EpochRow;
+    }
   | {
       /** Stores the unit if new (exact bytes) and sets its status. */
       readonly op: "put-data-unit";

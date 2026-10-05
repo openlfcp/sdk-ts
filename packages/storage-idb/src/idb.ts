@@ -339,14 +339,14 @@ export class IdbLfcpStorage implements LfcpStorage {
         if (w.conflict === null) await req(s("conflicts").delete(hex(w.resourceId)));
         else await req(s("conflicts").put(w.conflict, hex(w.resourceId)));
         return;
-      case "put-epoch":
-        await req(
-          s("epochs").put(
-            { r: hex(w.resourceId), row: w.epoch } satisfies Keyed<EpochRow>,
-            `${hex(w.resourceId)}:${pad(BigInt(w.epoch.epoch))}`,
-          ),
-        );
+      case "put-epoch": {
+        const key = `${hex(w.resourceId)}:${pad(BigInt(w.epoch.epoch))}`;
+        // A null dekRef never clears a stored one (read and write in this transaction).
+        const stored = (await req(s("epochs").get(key))) as Keyed<EpochRow> | undefined;
+        const row = { ...w.epoch, dekRef: w.epoch.dekRef ?? stored?.row.dekRef ?? null };
+        await req(s("epochs").put({ r: hex(w.resourceId), row } satisfies Keyed<EpochRow>, key));
         return;
+      }
       case "put-data-unit": {
         const old = (await req(s("units").get(hex(w.unit.unitId)))) as UnitValue | undefined;
         if (old !== undefined && !bytesEqual(old.row.bytes, w.unit.bytes))

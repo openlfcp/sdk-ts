@@ -14,6 +14,7 @@ import { dekSecretRef, isSecretRef, principalKeySecretRef, type SecretStore } fr
 import type {
   ControlRecordRow,
   DataUnitRow,
+  EpochRow,
   KeyPackageRow,
   LfcpStorage,
   SnapshotRow,
@@ -282,6 +283,24 @@ export function runStorageContract(
       eq(await s.control.epochs(R), epochRows, "epochs ascending");
       await ok(s, [{ op: "set-control-conflict", resourceId: R, conflict: null }], "clear");
       eq(await s.control.conflict(R), undefined, "cleared");
+    });
+
+    test("never clears a stored DEK reference with a null one (a chain save after a Key Package)", async ({
+      storage: s,
+    }) => {
+      await ok(s, [{ op: "put-epoch", resourceId: R, epoch: epochRows[1] as never }], "with ref");
+      // The same epoch rewritten by a chain save that read the row before the reference existed.
+      const closed = {
+        ...(epochRows[1] as EpochRow),
+        closedBy: controlRecordId(id(104)),
+        dekRef: null,
+      };
+      await ok(s, [{ op: "put-epoch", resourceId: R, epoch: closed }], "null ref");
+      eq(
+        await s.control.epochs(R),
+        [{ ...closed, dekRef: dekSecretRef(R, E1) }],
+        "ref kept, row updated",
+      );
     });
 
     test("keeps Data Unit bytes, treats a repeat as a duplicate and exposes an equivocating pair", async ({
