@@ -11,14 +11,36 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk-ts
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: sdk-ts
+      # The conformance runner reads official vectors from a spec checkout
+      # next to this repository (../spec) at the tag pinned in spec.lock.
+      - id: spec-lock
+        run: echo "tag=$(jq -er .tag spec.lock)" >> "$GITHUB_OUTPUT"
+      # Full history with tags, so the runner can check that the tag still
+      # resolves to the commit in spec.lock.
+      - uses: actions/checkout@v4
+        with:
+          repository: openlfcp/spec
+          ref: refs/tags/${{ steps.spec-lock.outputs.tag }}
+          path: spec
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: sdk-ts/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: pnpm
+          cache-dependency-path: sdk-ts/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm lint
+      - run: pnpm typecheck
+      # Includes the conformance run (pnpm test:conformance runs it alone).
       - run: pnpm test

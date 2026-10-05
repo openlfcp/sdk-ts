@@ -13,10 +13,14 @@
     "build": "tsc -b",
     "typecheck": "tsc -b && tsc -p tsconfig.test.json",
     "test": "vitest run",
+    "test:conformance": "vitest run conformance/",
     "lint": "biome check . && node scripts/check-boundaries.mjs && node scripts/check-boundaries.mjs --self-test",
     "format": "biome check --write ."
   },
   "devDependencies": {
+    "@openlfcp/core": "workspace:*",
+    "@openlfcp/crypto": "workspace:*",
+    "@openlfcp/wire": "workspace:*",
     "@biomejs/biome": "^2.5.15",
     "typescript": "^5.9.3",
     "vitest": "^5.0.3"

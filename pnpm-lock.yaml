@@ -11,6 +11,15 @@ importers:
       '@biomejs/biome':
         specifier: ^2.5.15
         version: 2.5.15
+      '@openlfcp/core':
+        specifier: workspace:*
+        version: link:packages/core
+      '@openlfcp/crypto':
+        specifier: workspace:*
+        version: link:packages/crypto
+      '@openlfcp/wire':
+        specifier: workspace:*
+        version: link:packages/wire
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

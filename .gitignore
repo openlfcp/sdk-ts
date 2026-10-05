@@ -7,6 +7,8 @@ dist/
 
 # Test output
 coverage/
+# Conformance run summaries (conformance/spec.mjs writeSummary)
+conformance/.results/
 
 # Logs
 *.log
