@@ -9,6 +9,8 @@ dist/
 coverage/
 # Conformance run summaries (conformance/spec.mjs writeSummary)
 conformance/.results/
+# JSON reports of the rtk vitest wrapper (local tooling)
+.vitest/
 
 # Logs
 *.log
