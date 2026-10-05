@@ -20,7 +20,7 @@ const SIGNER: Signer = {
   descriptor: principalDescriptorFromKeys(key, importAgreementKey(bytes32(101))),
 };
 
-function connect(server: FakeServer, clock = { t: 0 }) {
+function connect(server: FakeServer, clock = { t: 0 }, maxMessageBytes?: number) {
   const log = {
     states: [] as ClientConnectionState[],
     ready: null as ReadySession | null,
@@ -33,6 +33,7 @@ function connect(server: FakeServer, clock = { t: 0 }) {
       signer: SIGNER,
       webSocket: server.factory,
       now: () => clock.t,
+      ...(maxMessageBytes === undefined ? {} : { maxMessageBytes }),
     },
     {
       state: (s) => log.states.push(s),
@@ -108,6 +109,33 @@ describe("LfcpConnection (§30, §31, §34-§38, §63)", () => {
     expect(c.state).toBe("DISCONNECTED");
     const last = decodeMessage(server.current.sent.at(-1) as Uint8Array);
     expect(last.type === "ERROR" && last.body.code).toBe(19n);
+  });
+
+  it("never lets READY raise the receive limit above the client's own maximum (§31)", async () => {
+    const MiB = 1024 * 1024;
+    const big = createMessage("DATA_BATCH", {
+      resourceId: bytes32(5) as never,
+      objects: [new Uint8Array(9 * MiB)],
+    });
+    // The server advertises 64 MiB; the client keeps its 8 MiB default.
+    const server = new FakeServer();
+    server.maxMessageBytes = BigInt(64 * MiB);
+    const { c } = connect(server);
+    await settle();
+    server.push(big);
+    await settle();
+    expect(c.state).toBe("DISCONNECTED");
+    const last = decodeMessage(server.current.sent.at(-1) as Uint8Array);
+    expect(last.type === "ERROR" && last.body.code).toBe(19n);
+    // A client configured for 16 MiB accepts it.
+    const roomy = new FakeServer();
+    roomy.maxMessageBytes = BigInt(64 * MiB);
+    const { c: c2, log } = connect(roomy, { t: 0 }, 16 * MiB);
+    await settle();
+    roomy.push(big);
+    await settle();
+    expect(c2.state).not.toBe("DISCONNECTED");
+    expect(log.messages.some((m) => m.type === "DATA_BATCH")).toBe(true);
   });
 
   it("sends PING every heartbeat and declares the connection dead after three silent ones (§38)", async () => {

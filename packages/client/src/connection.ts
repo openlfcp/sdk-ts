@@ -83,6 +83,12 @@ export interface ConnectionOptions extends ClientHandshakeConfig {
   readonly webSocket?: WebSocketFactory;
   /** The current time in milliseconds (the caller's clock). */
   readonly now: () => number;
+  /**
+   * LFCP-WIRE-01 §31: this client's own maximum message size (at least the
+   * 8 MiB default, which is also the default here). A larger value in
+   * READY never raises the receive limit above it.
+   */
+  readonly maxMessageBytes?: number;
 }
 
 const BYTES = (data: unknown): Uint8Array | string | undefined => {
@@ -182,8 +188,15 @@ export class LfcpConnection {
     if (step.deliver !== undefined) this.#events.message(step.deliver);
   }
 
+  /** §31: the receive limit is the server's advertised maximum, never above this client's own. */
   #limit(): number {
-    return this.#ready === null ? DEFAULT_MAX_MESSAGE_BYTES : Number(this.#ready.maxMessageBytes);
+    const local = Math.max(
+      this.#options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES,
+      DEFAULT_MAX_MESSAGE_BYTES,
+    );
+    return this.#ready === null
+      ? DEFAULT_MAX_MESSAGE_BYTES
+      : Math.min(Number(this.#ready.maxMessageBytes), local);
   }
 
   #receive(data: unknown): void {
