@@ -16,6 +16,7 @@ export {
 } from "./automerge-bytes.js";
 export {
   type SharedObjectsApplyResult,
+  type SharedObjectsBatchResult,
   type SharedObjectsCheckpoint,
   type SharedObjectsCodec,
   SharedObjectsDataProfile,
@@ -25,6 +26,7 @@ export {
   type SharedObjectsUnit,
 } from "./data-profile.js";
 export {
+  type BatchReceiveResult,
   type BuiltReplica,
   type LocalChange,
   type ObjectChange,

@@ -172,6 +172,20 @@ export type ReceiveResult =
       readonly missing: readonly string[];
     };
 
+/**
+ * The outcome of receiving many changes at once (receiveChanges): the
+ * changes merged, those already held, those still missing a dependency
+ * (not handed to Automerge, §14.1), and those refused with their error.
+ */
+export interface BatchReceiveResult {
+  readonly applied: readonly CheckedChange[];
+  readonly duplicates: readonly CheckedChange[];
+  readonly waiting: readonly CheckedChange[];
+  readonly refused: readonly { readonly change: CheckedChange; readonly error: LfcpError }[];
+  /** §100 notifications for everything the batch changed. */
+  readonly objects: readonly ObjectChange[];
+}
+
 /** Root validation plus §21 collisions and the G-SC3 scalar-string rule. */
 export interface ReplicaValidation extends RootValidation {
   /** Object IDs with concurrent objects (OBJECT_ID_COLLISION, §21). */
@@ -459,6 +473,44 @@ export function applyChecked(
   }
 }
 
+/**
+ * applyChecked for a batch of admitted changes, in one engine call. On any
+ * engine error the handle is dropped and the document as it was before is
+ * rebuilt from the changes it held minus the batch, checked against the
+ * heads it had. Exported for tests.
+ */
+export function applyBatchChecked(
+  doc: Doc,
+  batch: readonly CheckedChange[],
+): { readonly next: Doc } | { readonly restored: Doc; readonly error: Error } {
+  const heads = A.getHeads(doc);
+  try {
+    return {
+      next: A.applyChanges(
+        doc,
+        batch.map((c) => c.bytes),
+      )[0],
+    };
+  } catch (e) {
+    const error = e instanceof Error ? e : new Error(String(e));
+    return { restored: restoreWithout(doc, batch, heads), error };
+  }
+}
+
+function restoreWithout(doc: Doc, batch: readonly CheckedChange[], heads: A.Heads): Doc {
+  const out = new Set(batch.map((c) => c.hash));
+  const kept = A.getAllChanges(doc).filter((c) => !out.has(A.decodeChange(c).hash));
+  let restored: Doc;
+  try {
+    [restored] = A.applyChanges(A.init({ actor: A.getActorId(doc) }), kept);
+  } catch (r) {
+    throw new Error(`the replica could not be restored after an Automerge error: ${String(r)}`);
+  }
+  if ([...A.getHeads(restored)].sort().join() !== [...heads].sort().join())
+    throw new Error("the replica could not be restored after an Automerge error: heads differ");
+  return restored;
+}
+
 function loadFailure(e: unknown, what: string): never {
   if (e instanceof LfcpError) throw e;
   throw new ProfileInvalidError("INVALID_AUTOMERGE_BYTES", `${what}: ${(e as Error).message}`);
@@ -541,18 +593,10 @@ export class SharedObjectsReplica {
   // out by rebuilding (rebuildWithout). LFCP-033 drives it.
   static fromChanges(changes: Iterable<Uint8Array>, opts: ReplicaOptions): BuiltReplica {
     const replica = SharedObjectsReplica.empty(opts);
-    let waiting = [...changes].map(checkChange);
-    for (let progress = true; progress && waiting.length > 0; ) {
-      progress = false;
-      const still: CheckedChange[] = [];
-      for (const c of waiting) {
-        const result = replica.receiveChange(c.bytes);
-        if (result.status === "missing_dependencies") still.push(c);
-        else progress = true;
-      }
-      waiting = still;
-    }
-    return { replica, unapplied: waiting };
+    const r = replica.receiveChanges([...changes].map(checkChange));
+    const refused = r.refused[0];
+    if (refused !== undefined) throw refused.error;
+    return { replica, unapplied: r.waiting };
   }
 
   /**
@@ -585,12 +629,10 @@ export class SharedObjectsReplica {
       principal: this.#principal,
       minSeq: Math.max(this.#minSeq, this.actorSeq),
     });
-    const unapplied: CheckedChange[] = [];
-    for (const change of this.changes()) {
-      const r = merged.receiveChange(change);
-      if (r.status === "missing_dependencies") unapplied.push(r.change);
-    }
-    return { replica: merged, unapplied };
+    const r = merged.receiveChanges(this.changes().map(checkChange));
+    const refused = r.refused[0];
+    if (refused !== undefined) throw refused.error;
+    return { replica: merged, unapplied: r.waiting };
   }
 
   /** An empty replica of the same Resource and actor that keeps the §9 sequence (nothing reused). */
@@ -873,6 +915,118 @@ export class SharedObjectsReplica {
   /** Receives one bare Automerge change (persisted or reference bytes). */
   receiveChange(bytes: Uint8Array): ReceiveResult {
     return this.#receive(checkChange(bytes));
+  }
+
+  /**
+   * Receives many changes at once: store replay, catch-up, a Snapshot's
+   * remainder. Same rules as receiveChange (§14.1: no change with a
+   * missing dependency reaches Automerge; a taken sequence is
+   * ACTOR_EQUIVOCATION; a skipped one INVALID_AUTOMERGE_BYTES), but the
+   * admitted changes go to Automerge in ONE call: one change per call is
+   * quadratic (10 000 changes: ~12 s against ~70 ms as one batch).
+   *
+   * The changes may come in any order, duplicated: each is admitted once
+   * its dependencies inside the batch are (Kahn's order). A refused change
+   * does not stop the others; changes that depend on it wait. If Automerge
+   * fails anyway, the document is restored and the admitted changes are
+   * received one at a time, which isolates the failing one.
+   */
+  receiveChanges(changes: Iterable<Uint8Array | CheckedChange>): BatchReceiveResult {
+    const refused: { change: CheckedChange; error: LfcpError }[] = [];
+    const all: CheckedChange[] = [];
+    const seen = new Set<string>();
+    for (const c of changes) {
+      const checked = c instanceof Uint8Array ? checkChange(c) : c;
+      if (seen.has(checked.hash)) continue;
+      seen.add(checked.hash);
+      all.push(checked);
+    }
+    const index = new Map(all.map((c, i) => [c.hash, i]));
+    const blocking = all.map(() => 0);
+    const unreachable = all.map(() => false);
+    const children = new Map<string, number[]>();
+    all.forEach((c, i) => {
+      for (const d of c.deps) {
+        if (A.hasHeads(this.#doc, [d])) continue;
+        if (index.has(d)) {
+          blocking[i] = (blocking[i] as number) + 1;
+          children.set(d, [...(children.get(d) ?? []), i]);
+        } else unreachable[i] = true;
+      }
+    });
+    const seqs = new Map<string, number>();
+    const latest = (actor: string) => seqs.get(actor) ?? this.#seqs.get(actor) ?? 0;
+    const admitted: CheckedChange[] = [];
+    const duplicates: CheckedChange[] = [];
+    const done = all.map(() => false);
+    const ready = all.flatMap((_, i) => (blocking[i] === 0 && !unreachable[i] ? [i] : []));
+    for (let k = 0; k < ready.length; k++) {
+      const i = ready[k] as number;
+      const c = all[i] as CheckedChange;
+      done[i] = true;
+      if (A.hasHeads(this.#doc, [c.hash])) duplicates.push(c);
+      else if (c.seq <= latest(c.actor)) {
+        refused.push({
+          change: c,
+          error: new LfcpError(
+            "ACTOR_EQUIVOCATION",
+            `actor ${c.actor} sequence ${c.seq} already has a different change (§26.2)`,
+          ),
+        });
+        continue;
+      } else if (c.seq !== latest(c.actor) + 1) {
+        refused.push({
+          change: c,
+          error: new ProfileInvalidError(
+            "INVALID_AUTOMERGE_BYTES",
+            `actor ${c.actor} sequence ${c.seq} skips sequence ${latest(c.actor) + 1} (§14.1)`,
+          ),
+        });
+        continue;
+      } else {
+        seqs.set(c.actor, c.seq);
+        admitted.push(c);
+      }
+      for (const child of children.get(c.hash) ?? []) {
+        blocking[child] = (blocking[child] as number) - 1;
+        if (blocking[child] === 0 && !unreachable[child]) ready.push(child);
+      }
+    }
+    const waiting = all.filter((_, i) => !done[i]);
+    const before = A.getHeads(this.#doc);
+    let applied: CheckedChange[] = admitted;
+    if (admitted.length > 0) {
+      const batch = applyBatchChecked(this.#doc, admitted);
+      if ("next" in batch) {
+        this.#doc = batch.next;
+        for (const c of admitted) this.#noteSeq(c.actor, c.seq);
+      } else {
+        this.#doc = batch.restored;
+        applied = [];
+        for (const c of admitted) {
+          try {
+            const r = this.#receive(c);
+            if (r.status === "applied") applied.push(c);
+            else if (r.status === "missing_dependencies") waiting.push(c);
+          } catch (e) {
+            refused.push({
+              change: c,
+              error:
+                e instanceof LfcpError
+                  ? e
+                  : new ProfileInvalidError("INVALID_AUTOMERGE_BYTES", String(e)),
+            });
+          }
+        }
+      }
+    }
+    return Object.freeze({
+      applied: Object.freeze(applied),
+      duplicates: Object.freeze(duplicates),
+      waiting: Object.freeze(waiting),
+      refused: Object.freeze(refused),
+      objects: Object.freeze(applied.length > 0 ? this.#objectChanges(before, "remote") : []),
+    });
   }
 
   #receive(change: CheckedChange): ReceiveResult {

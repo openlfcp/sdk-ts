@@ -52,6 +52,22 @@ export interface SharedObjectsApplyResult {
   readonly pending?: string;
 }
 
+/** The outcome of applyBatch: per unit merged, pending or rejected, and the objects once. */
+export interface SharedObjectsBatchResult {
+  /** Units merged now: the batch's and buffered ones it released. */
+  readonly merged: readonly DataUnitId[];
+  /** Units buffered for Automerge dependencies (the batch's and earlier ones still waiting). */
+  readonly pending: readonly DataUnitId[];
+  /** Units whose change was refused (ACTOR_EQUIVOCATION, INVALID_AUTOMERGE_BYTES, …). */
+  readonly rejected: readonly {
+    readonly unitId: DataUnitId;
+    readonly code: string;
+    readonly message: string;
+  }[];
+  readonly objects: readonly string[];
+  readonly diagnostics: readonly SharedObjectsDiagnostic[];
+}
+
 export interface SharedObjectsExcludeResult {
   readonly objects: readonly string[];
   readonly pending: readonly DataUnitId[];
@@ -210,18 +226,7 @@ export class SharedObjectsDataProfile {
     const before = this.#replica;
     const { replica } = before.mergeSave(save);
     this.#replica = replica;
-    const merged: DataUnitId[] = [];
-    for (let progress = true; progress; ) {
-      progress = false;
-      for (const [key, b] of this.#pending) {
-        const r = this.#replica.receiveChange(b.change.bytes);
-        if (r.status === "missing_dependencies") continue;
-        this.#pending.delete(key);
-        this.#merged.set(key, { unitId: b.unitId, hash: b.change.hash });
-        merged.push(b.unitId);
-        progress = true;
-      }
-    }
+    const merged = [...this.#applyBatch([]).result.merged];
     const changes = rebuildChanges(before, replica).map((c) =>
       Object.freeze({ ...c, origin: "remote" as const }),
     );
@@ -277,36 +282,83 @@ export class SharedObjectsDataProfile {
   }
 
   apply(unit: SharedObjectsUnit, change: CheckedChange): SharedObjectsApplyResult {
-    const r = this.#replica.receiveChange(change.bytes);
-    if (r.status === "missing_dependencies") {
-      this.#pending.set(toHex(unit.unitId), { unitId: unit.unitId, change });
+    const key = toHex(unit.unitId);
+    const r = this.#applyBatch([{ unit, value: change }]);
+    const own = r.refused.get(key);
+    if (own !== undefined) throw own;
+    const self = r.result.merged.some((id) => toHex(id) === key);
+    if (!self)
       return Object.freeze({
-        merged: [],
-        objects: [],
-        diagnostics: [],
+        merged: r.result.merged,
+        objects: r.result.objects,
+        diagnostics: r.result.diagnostics,
         pending: `waiting for Automerge changes ${r.missing.join(", ")}`,
       });
+    // The unit first, then the buffered ones it released.
+    return Object.freeze({
+      merged: [unit.unitId, ...r.result.merged.filter((id) => toHex(id) !== key)],
+      objects: r.result.objects,
+      diagnostics: r.result.diagnostics,
+    });
+  }
+
+  /**
+   * Applies many accepted units at once (catch-up, store replay, a
+   * Snapshot's remainder): their changes and every buffered one go to the
+   * replica in one receiveChanges call, which hands Automerge one batch
+   * (§14.1 admission per change; one change per call is quadratic). A
+   * refused change rejects only its unit; units missing a dependency are
+   * buffered. Diagnostics are computed once, for the objects that changed.
+   */
+  applyBatch(
+    units: readonly { readonly unit: SharedObjectsUnit; readonly value: CheckedChange }[],
+  ): SharedObjectsBatchResult {
+    return this.#applyBatch(units).result;
+  }
+
+  #applyBatch(
+    units: readonly { readonly unit: SharedObjectsUnit; readonly value: CheckedChange }[],
+  ): { result: SharedObjectsBatchResult; refused: Map<string, LfcpError>; missing: string[] } {
+    const byHash = new Map<string, DataUnitId[]>();
+    const offer = (unitId: DataUnitId, change: CheckedChange) =>
+      byHash.set(change.hash, [...(byHash.get(change.hash) ?? []), unitId]);
+    for (const b of this.#pending.values()) offer(b.unitId, b.change);
+    for (const { unit, value } of units) {
+      this.#pending.set(toHex(unit.unitId), { unitId: unit.unitId, change: value });
+      offer(unit.unitId, value);
     }
-    // "duplicate": the replica holds the change already (e.g. this client's
-    // own change coming back): merged, nothing changes.
-    this.#merged.set(toHex(unit.unitId), { unitId: unit.unitId, hash: change.hash });
-    const merged: DataUnitId[] = [unit.unitId];
-    const changes: ObjectChange[] = r.status === "applied" ? [...r.objects] : [];
-    for (let progress = true; progress; ) {
-      progress = false;
-      for (const [key, b] of this.#pending) {
-        const again = this.#replica.receiveChange(b.change.bytes);
-        if (again.status === "missing_dependencies") continue;
-        this.#pending.delete(key);
-        this.#merged.set(key, { unitId: b.unitId, hash: b.change.hash });
-        merged.push(b.unitId);
-        if (again.status === "applied") changes.push(...again.objects);
-        progress = true;
+    const r = this.#replica.receiveChanges([...this.#pending.values()].map((b) => b.change));
+    const merged: DataUnitId[] = [];
+    for (const c of [...r.applied, ...r.duplicates])
+      for (const unitId of byHash.get(c.hash) ?? []) {
+        this.#pending.delete(toHex(unitId));
+        this.#merged.set(toHex(unitId), { unitId, hash: c.hash });
+        merged.push(unitId);
       }
-    }
-    this.#emit(changes);
-    const objects = [...new Set(changes.map((c) => c.objectId))].sort();
-    return Object.freeze({ merged, objects, diagnostics: this.#diagnostics(objects) });
+    const rejected: { unitId: DataUnitId; code: string; message: string }[] = [];
+    const refused = new Map<string, LfcpError>();
+    for (const { change, error } of r.refused)
+      for (const unitId of byHash.get(change.hash) ?? []) {
+        this.#pending.delete(toHex(unitId));
+        rejected.push({ unitId, code: error.code, message: error.message });
+        refused.set(toHex(unitId), error);
+      }
+    this.#emit(r.objects);
+    const objects = [...new Set(r.objects.map((c) => c.objectId))].sort();
+    const missing = [
+      ...new Set(r.waiting.flatMap((c) => c.deps.filter((d) => !this.#replica.hasChange(d)))),
+    ];
+    return {
+      result: Object.freeze({
+        merged: Object.freeze(merged),
+        pending: Object.freeze([...this.#pending.values()].map((b) => b.unitId)),
+        rejected: Object.freeze(rejected),
+        objects: Object.freeze(objects),
+        diagnostics: Object.freeze(this.#diagnostics(objects)),
+      }),
+      refused,
+      missing,
+    };
   }
 
   /** §74.1 problems and §21 collisions of the given objects (§77: the rest are unaffected). */
