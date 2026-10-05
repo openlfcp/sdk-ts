@@ -1,11 +1,12 @@
-// SHARED-OBJECTS-TEST-VECTORS-01 handlers for sdk-ts through LFCP-030.
+// SHARED-OBJECTS-TEST-VECTORS-01 handlers for sdk-ts (LFCP-030, LFCP-031).
 //
 // Deterministic vectors (Dxx) are checked byte for byte; validation
 // vectors (Ixx, D06-D08) must fail with PROFILE_INVALID and the exact
-// §74.1 diagnostic; behavioral scenarios (Sxx) are checked only for the
+// §74.1 diagnostic; behavioral scenarios (Sxx) are checked for the
 // validity of every state and value they state or write (what the spec's
-// own LFCP-006 contract checks). Their merge outcomes need the Automerge
-// binding and are pending (LFCP-032, LFCP-037).
+// own LFCP-006 contract checks), and their outcome is checked as
+// "<key>/merge" on the merged replica of the Automerge binding (see
+// scenarios.ts): logical state and conflict sets, never change bytes.
 
 import { fromHex, isObjectId, principalId, resourceId, toHex } from "@openlfcp/core";
 import { sha256 } from "@openlfcp/crypto";
@@ -21,12 +22,14 @@ import {
   parsePrincipalRef,
   pointerToken,
   principalRef,
+  SCALAR_FIELDS,
   unframeProfilePayload,
   validateRoot,
   validateTransition,
 } from "@openlfcp/shared-objects";
 import { bytesCheck, check, equalCheck, outcomeCheck } from "../checks.js";
 import type { Check, Handler, HandlerContext, VectorCase } from "../runner.js";
+import { runScenario, type ScenarioRun } from "./scenarios.js";
 
 type Fields = Readonly<Record<string, unknown>> | undefined;
 
@@ -232,14 +235,112 @@ const scenario: Handler = (c, context) => {
       inputProblems.push(...fieldProblems(task, "assignees", { [b.principal]: true }));
   }
   const checks: Check[] = [valid("inputs/valid", inputProblems)];
-  const pending: string[] = [];
+  let run: ScenarioRun | undefined;
+  let failure: string | undefined;
+  try {
+    run = runScenario(c, context);
+  } catch (e) {
+    failure = e instanceof Error ? e.message : String(e);
+  }
+  const objectId = String(
+    (context.suite.fixtures as { objects: Record<string, string> }).objects.task_1,
+  );
   for (const [key, value] of Object.entries(c.expected)) {
     const problems = expectedValueProblems(key, value as Json, task);
     if (problems !== null) checks.push(valid(`${key}/valid`, problems));
-    pending.push(`${key}/merge`);
+    checks.push(
+      run === undefined
+        ? { name: `${key}/merge`, ok: false, message: `the scenario did not run: ${failure}` }
+        : mergeCheck(c, key, value as Json, run, objectId),
+    );
   }
-  return { checks, pending };
+  return { checks };
 };
+
+/** The value at a vector's dotted path; a map key may itself contain dots (extension namespaces). */
+function atPath(value: Json | undefined, path: string): Json | undefined {
+  if (path === "") return value;
+  if (!isMap(value)) return undefined;
+  for (const key of Object.keys(value).sort((a, b) => b.length - a.length)) {
+    if (path === key) return value[key];
+    if (path.startsWith(`${key}.`)) return atPath(value[key], path.slice(key.length + 1));
+  }
+  return undefined;
+}
+
+/** The merged outcome for one expected key. */
+function mergeCheck(c: VectorCase, key: string, value: Json, run: ScenarioRun, id: string): Check {
+  const name = `${key}/merge`;
+  const { replica } = run;
+  const view = replica.task(id);
+  const conflictFields = Object.keys(c.expected)
+    .map((k) => /^(.*)_conflict_set$/.exec(k)?.[1])
+    .filter((f): f is string => f !== undefined);
+  const scalar = (field: string) => view?.fields[field as "status"];
+  if (key === "objects")
+    return equalCheck(name, value, (replica.root() as { objects: Json }).objects);
+  if (key === "conflicts") return equalCheck(name, value, replica.conflicts());
+  if (key === "tags" || key === "assignees") return equalCheck(name, value, view?.[key]);
+  if (key === "object_present") return equalCheck(name, value, replica.objectIds().includes(id));
+  if (key === "task_status")
+    return equalCheck(
+      name,
+      { value, conflicted: false },
+      {
+        value: scalar("status")?.value,
+        conflicted: scalar("status")?.conflicted,
+      },
+    );
+  if (key === "must_report_conflict")
+    // The headless API reports the conflict (§46): every *_conflict_set field.
+    return equalCheck(
+      name,
+      conflictFields.map(() => value),
+      conflictFields.map((f) => scalar(f)?.conflicted),
+    );
+  if (key === "profile_error")
+    return equalCheck(name, value === "OBJECT_ID_COLLISION" ? [id] : value, replica.collisions());
+  if (key === "must_not_silently_treat_as_same_object")
+    return equalCheck(name, value, view?.status === "object_id_collision");
+  if (key === "preserve") {
+    const object = replica.getObject(id);
+    const actual = Object.fromEntries(
+      Object.keys(value as Record<string, Json>).map((path) => [path, atPath(object, path)]),
+    );
+    return equalCheck(name, value, actual);
+  }
+  if (key === "snapshot_roundtrip_preserves_objects")
+    return equalCheck(
+      name,
+      value,
+      run.snapshot !== undefined &&
+        JSON.stringify((run.snapshot.loaded as { objects: Json }).objects) ===
+          JSON.stringify((run.snapshot.before as { objects: Json }).objects),
+    );
+  const set = /^(.*)_(conflict_set|values_may_include)$/.exec(key);
+  if (set !== null) {
+    const values = scalar(set[1] as string)?.values ?? [];
+    return set[2] === "conflict_set"
+      ? equalCheck(name, value, values)
+      : check(
+          name,
+          () =>
+            (value as Json[]).every((v) => values.includes(v)) ||
+            `${JSON.stringify(value)} not all among ${JSON.stringify(values)}`,
+        );
+  }
+  if ((SCALAR_FIELDS as readonly string[]).includes(key))
+    // A stated scalar outcome is that single resolved value.
+    return equalCheck(
+      name,
+      { value, conflicted: false },
+      {
+        value: scalar(key)?.value,
+        conflicted: scalar(key)?.conflicted,
+      },
+    );
+  return { name, ok: false, message: `no merge check for expected key ${key}` };
+}
 
 export const SHARED_OBJECTS_HANDLERS: Readonly<Record<string, Handler>> = {
   "bytes/actor_id": actorId,
