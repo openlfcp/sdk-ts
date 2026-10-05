@@ -320,6 +320,37 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     expect((await owner.storage.control.head(chain.R))?.controlSeq).toBe(0n);
   });
 
+  it("asks for at most 256 epochs per KEY_PACKAGE_GET, the newest first (§52)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(209);
+    chain.add({
+      type: "CAPABILITY_GRANT",
+      subject: BOB.signer.descriptor,
+      abilities: [1n, 2n],
+      delegable: [],
+    });
+    for (let e = 1n; e < 300n; e++)
+      chain.add({
+        type: "KEY_EPOCH",
+        epoch: dataEpoch(e),
+        dekCommitment: dekCommitment(chain.R, dataEpoch(e), DEK1),
+        finalFrontier: [],
+        reason: 0n,
+      });
+    const bob = client(BOB, server, clock);
+    hostOf(server, chain, [], []);
+    bob.sync.open(bob.binding(chain.R));
+    bob.sync.start();
+    for (let i = 0; i < 40 && server.of("KEY_PACKAGE_GET").length === 0; i++) {
+      await settle(100);
+      await bob.sync.idle();
+    }
+    const epochs = server.of("KEY_PACKAGE_GET")[0]?.body.epochs ?? [];
+    expect(epochs).toHaveLength(256);
+    expect([epochs[0], epochs.at(-1)]).toEqual([44n, 299n]);
+  });
+
   it("blocks on a missing Key Package and continues when it arrives (KEY_BLOCKED)", async () => {
     const server = new FakeServer();
     const clock = { t: 0 };

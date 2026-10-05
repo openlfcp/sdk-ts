@@ -483,7 +483,9 @@ export async function acceptInvitation(
       createMessage("KEY_PACKAGE_GET", {
         resourceId: R,
         recipient: invitee.descriptor.principalId,
-        epochs: [...chain.state.epochs.values()].map((e) => e.epoch),
+        // §52: at most 256 epochs. The claim needs the current epoch's DEK,
+        // and the invitation's package is of a recent epoch: the newest 256.
+        epochs: [...chain.state.epochs.values()].map((e) => e.epoch).slice(-256),
       }),
       "KEY_PACKAGE_BATCH",
     )();

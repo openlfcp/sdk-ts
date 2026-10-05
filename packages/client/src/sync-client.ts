@@ -900,7 +900,10 @@ export class SyncClient {
         createMessage("KEY_PACKAGE_GET", {
           resourceId: R,
           recipient: this.#o.signer.descriptor.principalId,
-          epochs: missing,
+          // §52: at most 256 epochs per request, the newest first: the
+          // current epoch's DEK unblocks the Resource; older ones only let
+          // their units apply, and a later round asks for them.
+          epochs: missing.slice(-256),
         }),
       );
     });
