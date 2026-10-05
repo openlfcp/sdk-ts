@@ -1,0 +1,1 @@
+packages/core/package.json:1 graph: @openlfcp/core may not depend on @openlfcp/wire

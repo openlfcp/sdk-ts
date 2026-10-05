@@ -1,0 +1,7 @@
+{
+  "name": "@openlfcp/core",
+  "version": "0.0.0",
+  "dependencies": {
+    "@openlfcp/wire": "workspace:^"
+  }
+}

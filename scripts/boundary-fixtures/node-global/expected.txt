@@ -1,0 +1,2 @@
+packages/core/src/index.ts:1 node-global: Buffer in portable @openlfcp/core
+packages/core/src/index.ts:2 node-global: process in portable @openlfcp/core

@@ -1,0 +1,7 @@
+{
+  "name": "fixture-root",
+  "private": true,
+  "dependencies": {
+    "obsidian": "^1.0.0"
+  }
+}

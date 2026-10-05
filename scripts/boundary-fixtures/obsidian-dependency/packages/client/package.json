@@ -1,0 +1,7 @@
+{
+  "name": "@openlfcp/client",
+  "version": "0.0.0",
+  "devDependencies": {
+    "obsidian": "^1.0.0"
+  }
+}

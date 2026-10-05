@@ -1,0 +1,1 @@
+packages/client/src/index.ts:2 node-import: node:fs in portable @openlfcp/client

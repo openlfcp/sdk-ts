@@ -1,0 +1,1 @@
+packages/core/src/index.ts:1 graph: @openlfcp/core may not import @openlfcp/wire

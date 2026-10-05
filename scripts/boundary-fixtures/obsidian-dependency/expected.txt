@@ -1,0 +1,1 @@
+packages/client/package.json:1 obsidian: dependency obsidian
