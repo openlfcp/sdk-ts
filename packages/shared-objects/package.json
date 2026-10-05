@@ -23,6 +23,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@openlfcp/core": "workspace:^"
+    "@openlfcp/core": "workspace:^",
+    "@openlfcp/crypto": "workspace:^"
   }
 }
