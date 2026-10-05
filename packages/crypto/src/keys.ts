@@ -165,6 +165,12 @@ export function exportSecretKeyBytes(
   throw new LfcpError("CRYPTO_FAILURE", "not a secret key of this package");
 }
 
+/**
+ * The X25519 secret of a key pair, for this package's HPKE module only. It
+ * is not re-exported from the package index.
+ */
+export const agreementSecretBytes = (key: AgreementKeyPair): Uint8Array => readAgreementSecret(key);
+
 /** Verifies an Ed25519 signature. Returns false (never throws) for malformed input. */
 export function verifyEd25519(
   publicKey: Uint8Array,
