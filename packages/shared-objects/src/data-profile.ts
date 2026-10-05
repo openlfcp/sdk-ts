@@ -150,6 +150,22 @@ export class SharedObjectsDataProfile {
     for (const c of changes) for (const l of this.#listeners) l(c);
   }
 
+  /**
+   * Records which change one of this client's OWN units carries (the unit
+   * was created from a local change, so it is merged already). A later
+   * G-EP7 exclusion of that unit then rebuilds the replica without it, and
+   * the checkpoint keeps the reference. Use it as createQueuedDataUnit's
+   * onCreated.
+   */
+  recordLocal(unitId: DataUnitId, change: CheckedChange): void {
+    if (!this.#replica.hasChange(change.hash))
+      throw new LfcpError(
+        "PROFILE_INVALID",
+        "the change is not in this replica; record only local changes",
+      );
+    this.#merged.set(toHex(unitId), { unitId, hash: change.hash });
+  }
+
   /** The units waiting for Automerge dependencies. */
   pendingUnits(): DataUnitId[] {
     return [...this.#pending.values()].map((b) => b.unitId);

@@ -222,10 +222,20 @@ export function dekResolver(
  */
 export async function createQueuedDataUnit<T>(
   storage: Pick<LfcpStorage, "actorSequences" | "commit">,
-  options: Omit<CreateDataUnitOptions<T>, "sequences">,
-  also: readonly StorageWrite[] = [],
+  options: Omit<CreateDataUnitOptions<T>, "sequences"> & {
+    /**
+     * Called once the unit is sealed, before the commit: e.g. the Data
+     * Profile records which change the unit carries (recordLocal), so that
+     * a function `also` can put the updated checkpoint in the same batch.
+     */
+    readonly onCreated?: (created: CreatedDataUnit, value: T) => void;
+  },
+  also: readonly StorageWrite[] | ((created: CreatedDataUnit) => readonly StorageWrite[]) = [],
 ): Promise<CreatedDataUnit> {
-  const created = await createDataUnit({ ...options, sequences: storage.actorSequences });
+  const { onCreated, ...create } = options;
+  const created = await createDataUnit({ ...create, sequences: storage.actorSequences });
+  onCreated?.(created, options.value);
+  const extra = typeof also === "function" ? also(created) : also;
   const row = dataUnitRow(created.bytes);
   const result = await storage.commit([
     { op: "put-data-unit", unit: row, status: "merged", detail: "local", accepted: true },
@@ -242,7 +252,7 @@ export async function createQueuedDataUnit<T>(
         blocked: null,
       },
     },
-    ...also,
+    ...extra,
   ]);
   if (!result.ok) throw new Error(`the local unit was not stored: ${result.reason}`);
   return created;
