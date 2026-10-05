@@ -159,6 +159,18 @@ function frontierList(f: Fields, key: number): readonly ActorHave[] {
 }
 
 /**
+ * An ability list (§17.1 codes). PROVISIONAL (gap A1 / G-CP6): a code
+ * listed twice makes the record malformed (INVALID_STRUCTURE, wire
+ * MALFORMED_MESSAGE). Unknown codes are structurally valid and kept; they
+ * confer nothing (capability.ts).
+ */
+function abilityList(f: Fields, key: number, nonEmpty: boolean): readonly bigint[] {
+  const list = f.uintArray(key, nonEmpty);
+  if (new Set(list).size !== list.length) f.fail(key, "lists an ability twice");
+  return list;
+}
+
+/**
  * Decodes the body of a Control Record of §14 type `type`. Core types 0-8
  * get their closed-map structure; 9-31 are UNSUPPORTED_VALUE; 32 and up
  * are kept as opaque EXTENSION bodies.
@@ -181,8 +193,8 @@ export function controlBodyFromCbor(type: bigint, value: CborValue): ControlBody
       return Object.freeze({
         type: "CAPABILITY_GRANT",
         subject: principalDescriptorFromCbor(f.any(0)),
-        abilities: f.uintArray(1, true),
-        delegable: f.uintArray(2, false),
+        abilities: abilityList(f, 1, true),
+        delegable: abilityList(f, 2, false),
         ...(f.has(3) ? { parentGrantId: id32(f, 3) } : {}),
         ...(f.has(4) ? { claimLimit: f.uint(4) } : {}),
       });
@@ -197,7 +209,7 @@ export function controlBodyFromCbor(type: bigint, value: CborValue): ControlBody
         type: "CAPABILITY_CLAIM",
         invitationGrantId: id32(f, 0),
         claimant: principalDescriptorFromCbor(f.any(1)),
-        abilities: f.uintArray(2, true),
+        abilities: abilityList(f, 2, true),
       });
     }
     case CONTROL_TYPE.KEY_EPOCH: {
@@ -326,6 +338,8 @@ function writerUrl(url: string): string {
 
 function abilities(list: readonly bigint[], nonEmpty: boolean): bigint[] {
   if (nonEmpty && list.length === 0) refuse("the ability list must not be empty");
+  // PROVISIONAL (gap A1 / G-CP6): no ability twice in one list.
+  if (new Set(list).size !== list.length) refuse("an ability is listed twice");
   return [...list];
 }
 

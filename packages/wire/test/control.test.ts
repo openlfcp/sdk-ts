@@ -360,6 +360,16 @@ describe("typed bodies", () => {
         [3, 0],
       ]),
     ],
+    // PROVISIONAL (gap A1 / G-CP6)
+    [
+      "a duplicate ability",
+      1n,
+      cborMap([
+        [0, decodeStrict(encodePrincipalDescriptor(BRUNO.descriptor))],
+        [1, [1, 2, 1]],
+        [2, []],
+      ]),
+    ],
     ["a negative reason", 8n, cborMap([[0, -1]])],
   ] as const)("rejects %s with INVALID_STRUCTURE", (_n, type, value) => {
     expect(codeOf(() => controlBodyFromCbor(type, value))).toBe("INVALID_STRUCTURE");
@@ -369,6 +379,7 @@ describe("typed bodies", () => {
     const long = "x".repeat(257);
     for (const body of [
       { ...grant, abilities: [] },
+      { ...grant, abilities: [1n, 1n] },
       { type: "RESOURCE_TOMBSTONE", reason: 0n, note: long },
       {
         type: "COORDINATOR_RECOVERY",
