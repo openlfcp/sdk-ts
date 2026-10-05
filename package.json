@@ -23,6 +23,7 @@
     "@openlfcp/core": "workspace:*",
     "@openlfcp/crypto": "workspace:*",
     "@openlfcp/shared-objects": "workspace:*",
+    "@openlfcp/storage": "workspace:*",
     "@openlfcp/wire": "workspace:*",
     "@panva/hpke-noble": "^1.1.7",
     "hpke": "^1.1.7",

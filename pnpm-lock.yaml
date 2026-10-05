@@ -23,6 +23,9 @@ importers:
       '@openlfcp/shared-objects':
         specifier: workspace:*
         version: link:packages/shared-objects
+      '@openlfcp/storage':
+        specifier: workspace:*
+        version: link:packages/storage
       '@openlfcp/wire':
         specifier: workspace:*
         version: link:packages/wire
