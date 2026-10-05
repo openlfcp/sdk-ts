@@ -1,2 +1,13 @@
-/** Name of this package. Placeholder until its first implementation task. */
+/** Name of this package. */
 export const PACKAGE = "@openlfcp/wire";
+
+export {
+  decodePrincipalDescriptor,
+  derivePrincipalId,
+  encodePrincipalDescriptor,
+  type PrincipalDescriptor,
+  principalDescriptor,
+  principalDescriptorFromCbor,
+  principalDescriptorFromKeys,
+  principalDescriptorToCbor,
+} from "./principal.js";
