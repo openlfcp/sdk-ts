@@ -23,6 +23,7 @@ export {
   type ControlEpoch,
   type ControlRoute,
   type ControlState,
+  type EpochHistory,
   validateControlChain,
 } from "./chain.js";
 export {
@@ -66,6 +67,18 @@ export {
   endpointFromCbor,
   endpointToCbor,
 } from "./endpoint.js";
+export {
+  type ControlView,
+  classifyDataUnit,
+  type DataPutDecision,
+  type DataUnitHeader,
+  type EpochClassification,
+  type EpochRotation,
+  isSequenceWithinFrontier,
+  KEY_EPOCH_REASON,
+  rotateEpoch,
+  serverAcceptsDataPut,
+} from "./epoch.js";
 export {
   type ActorHave,
   actorHaveFromCbor,

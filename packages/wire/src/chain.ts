@@ -25,6 +25,7 @@ import {
 } from "./control.js";
 import { objectId, verifySignedObject } from "./cose.js";
 import type { Endpoint } from "./endpoint.js";
+import type { ActorHave } from "./have.js";
 import type { PrincipalDescriptor } from "./principal.js";
 
 /**
@@ -57,13 +58,27 @@ export interface ControlEpoch {
 }
 
 /**
+ * One Data Epoch in the chain's history (§11, §15, §19): opened by Genesis
+ * (epoch 0) or a Key Epoch record, and closed by the next Key Epoch record,
+ * which records its final frontier (§19.1). Kept for every epoch, so units
+ * of any older epoch stay evaluable.
+ */
+export interface EpochHistory extends ControlEpoch {
+  readonly openedBy: ControlRecordId;
+  /** The Key Epoch record that closed this epoch, or null while it is current. */
+  readonly closedBy: ControlRecordId | null;
+  /** The accepted final frontier of this epoch (canonical, G-CP1), or null while it is current. */
+  readonly finalFrontier: readonly ActorHave[] | null;
+}
+
+/**
  * The validated state of one Resource's Control Chain. This is the single
  * Control state type: LFCP-021 (capabilities) and LFCP-023 (epochs and
  * cutoff) extend it here and in `applyRecord`, never with a parallel type.
  *
  * LFCP-020 fills the chain position and what Genesis establishes;
- * LFCP-021 adds the grants and applies route updates; Key Epoch rotation
- * (LFCP-023) still leaves `epoch` at its Genesis value.
+ * LFCP-021 adds the grants and applies route updates; LFCP-023 applies
+ * Key Epoch rotation (`epoch`, `epochs`).
  */
 export interface ControlState {
   readonly resourceId: ResourceId;
@@ -77,7 +92,10 @@ export interface ControlState {
   readonly route: ControlRoute;
   /** §20 route version of `route`; Genesis counts as 0 (inferred). */
   readonly routeVersion: bigint;
+  /** The current Data Epoch. */
   readonly epoch: ControlEpoch;
+  /** Every Data Epoch so far, by epoch number (decimal string) (§19, LFCP-023). */
+  readonly epochs: ReadonlyMap<string, EpochHistory>;
   /** Grants created through this head (§17.2, §18.1), by grant ID hex; see capability.ts. */
   readonly grants: ReadonlyMap<string, Grant>;
   /**
@@ -100,6 +118,7 @@ export type ChainProblem =
   | "PREVIOUS"
   | "SIGNATURE"
   | "UNRESOLVED_ISSUER"
+  | "EPOCH"
   | "UNAUTHORIZED";
 
 export type ChainResult =
@@ -168,6 +187,8 @@ const WIRE: Readonly<Record<ChainProblem, string>> = {
   SIGNATURE: "INVALID_SIGNATURE",
   // Provisional: MISSING_DEPENDENCY is the alternative (open question).
   UNRESOLVED_ISSUER: "INVALID_CONTROL_CHAIN",
+  // PROVISIONAL (G-EP3): a Key Epoch that is not current + 1 breaks the chain.
+  EPOCH: "INVALID_CONTROL_CHAIN",
   UNAUTHORIZED: "AUTHORIZATION_FAILED",
 };
 
@@ -181,6 +202,7 @@ const SDK_CODE: Readonly<Record<ChainProblem, LfcpErrorCode>> = {
   PREVIOUS: "INVALID_CONTROL_CHAIN",
   SIGNATURE: "INVALID_SIGNATURE",
   UNRESOLVED_ISSUER: "INVALID_CONTROL_CHAIN",
+  EPOCH: "INVALID_CONTROL_CHAIN",
   UNAUTHORIZED: "AUTHORIZATION_FAILED",
 };
 
@@ -267,6 +289,18 @@ function genesisState(record: ControlRecord): ControlState {
     route: Object.freeze({ endpoints: body.endpoints, coordinatorUrl: body.coordinatorUrl }),
     routeVersion: 0n,
     epoch: Object.freeze({ epoch: dataEpoch(0n), dekCommitment: body.dekCommitment }),
+    epochs: new Map([
+      [
+        "0",
+        Object.freeze({
+          epoch: dataEpoch(0n),
+          dekCommitment: body.dekCommitment,
+          openedBy: id,
+          closedBy: null,
+          finalFrontier: null,
+        }),
+      ],
+    ]),
     grants: new Map(),
     principals: new Map([[toHex(body.owner.principalId), body.owner]]),
   });
@@ -302,10 +336,42 @@ function applyRecord(state: ControlState, record: ControlRecord): ControlState {
     ...state,
     ...next,
     ...route,
+    ...(body.type === "KEY_EPOCH" ? rotate(state, record, body) : {}),
     ...(newOwner !== undefined ? { owner: newOwner } : {}),
     principals,
     grants: applyCapabilities(state.grants, record),
   });
+}
+
+/**
+ * §19: a committed Key Epoch record closes the current epoch with its final
+ * frontier and opens the next one with its DEK commitment. Its succession
+ * (new = current + 1) is checked before it is applied (G-EP3).
+ */
+function rotate(
+  state: ControlState,
+  record: ControlRecord,
+  body: Extract<ControlRecord["body"], { type: "KEY_EPOCH" }>,
+): Pick<ControlState, "epoch" | "epochs"> {
+  const id = controlRecordId(record.signed.id);
+  const epochs = new Map(state.epochs);
+  const current = epochs.get(String(state.epoch.epoch));
+  if (current !== undefined)
+    epochs.set(
+      String(current.epoch),
+      Object.freeze({ ...current, closedBy: id, finalFrontier: body.finalFrontier }),
+    );
+  epochs.set(
+    String(body.epoch),
+    Object.freeze({
+      epoch: body.epoch,
+      dekCommitment: body.dekCommitment,
+      openedBy: id,
+      closedBy: null,
+      finalFrontier: null,
+    }),
+  );
+  return { epoch: Object.freeze({ epoch: body.epoch, dekCommitment: body.dekCommitment }), epochs };
 }
 
 /**
@@ -455,6 +521,17 @@ export function validateControlChain(
       if (!v.valid) {
         problems.push(
           problem("SIGNATURE", at(k), `the record is not signed by its issuer (${v.reason})`),
+        );
+        continue;
+      }
+      // §19: "The new epoch number MUST be exactly the previous Data Epoch plus one."
+      if (k.record.body.type === "KEY_EPOCH" && k.record.body.epoch !== state.epoch.epoch + 1n) {
+        problems.push(
+          problem(
+            "EPOCH",
+            at(k),
+            `Key Epoch ${k.record.body.epoch} after epoch ${state.epoch.epoch}: must be the previous epoch plus one (§19)`,
+          ),
         );
         continue;
       }
