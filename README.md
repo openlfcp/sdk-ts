@@ -25,7 +25,8 @@ codec (LFCP-026) and the session handshake with the §63/§64 state
 machines (LFCP-027),
 `@openlfcp/storage` the actor sequence reservation contract (LFCP-018),
 and `@openlfcp/shared-objects` the Shared Task model and profile
-validation over logical state (LFCP-030), and `@openlfcp/client` Data
+validation over logical state (LFCP-030) with its Automerge binding
+(LFCP-031), and `@openlfcp/client` Data
 Unit creation (LFCP-025). Protocol code arrives with the backlog tasks that
 own each package. The official vectors run through the conformance runner
 (LFCP-017; see [Conformance](#conformance)).
@@ -38,7 +39,7 @@ own each package. The official vectors run through the conformance runner
 | `@openlfcp/crypto` | Thin wrapper over the audited `@noble` libraries | core | `sha256`; `SigningKeyPair` (Ed25519) and `AgreementKeyPair` (X25519) with redacted diagnostics; `generate*KeyPair`, `import*Key`, `exportSecretKeyBytes`, `verifyEd25519` (strict, §10.5.1), `isValidEd25519PublicKey`; HKDF-SHA256 (`hkdfExtract`, `hkdfExpand`); Data Epoch keys (`ResourceDEK`, `generateResourceDEK`, `importResourceDEK`, `dekCommitment`, `ActorDataKey`/`deriveActorDataKey`, `SnapshotKey`/`deriveSnapshotKey`, `dataUnitNonce`, `snapshotNonce`); ChaCha20-Poly1305 for Data Units (`encryptDataUnit`, `decryptDataUnit`, keyed by `ActorDataKey`, sequence nonce); RFC 9180 HPKE (`sealDek`, `openDek`: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, Base mode) |
 | `@openlfcp/wire` | Deterministic CBOR, COSE, LFCP Wire structures and codecs | core, crypto | Principal Descriptor (`principalDescriptor*`, `encode/decodePrincipalDescriptor`, `derivePrincipalId`); canonical COSE_Sign1 (`signObject`, `parseSignedObject`, `verifySignedObject`, `sigStructureBytes`, `objectId`); typed payloads (`parseControlRecord`, `parseDataUnit`, `parseKeyPackage`, `parseSnapshot`, `decode*Payload`, `*PayloadFromCbor`, `expectedSignerOf`, `actorHaveFromCbor`/`actorHaveToCbor`, `canonicalFrontierFromCbor`/`canonicalFrontierToCbor`, `endpointFromCbor`/`endpointToCbor`, `checkWriterUrl`, `checkReceivedUrl`, `ENDPOINT_FLAGS`, `CONTROL_TYPE`); typed Control Records (`decodeControlRecord`, `signControlRecord`, `encodeControlRecordPayload`, `controlBodyFromCbor`/`controlBodyToCbor`, `isMvpSupported`, `controlRecordSigner`, `verifyGenesis`, ownership-transfer offer/accept parsers); Control Chain validation (`validateControlChain` → linear `ControlState` with `stateAt(head)` / `CONTROL_CONFLICT` / invalid, authority enforced); capabilities (`ABILITY`, `ABILITY_NAMES`, `hasAbility`, `abilitiesOf`, `authorizeControlRecord`, `canDistributeKey`, `verifyOwnerTransfer`); Control transitions (`proposeControlTransition`, `proposeControlPut`, `decodeControlPutBody`: accepted / already-committed / CONTROL_HEAD_MISMATCH / refused, pure, no durable CAS); Data Epochs (`rotateEpoch`, `classifyDataUnit` → accept / quarantine `STALE_DATA_EPOCH` / reject, `serverAcceptsDataPut`, `isSequenceWithinFrontier`, `KEY_EPOCH_REASON`); Key Packages (`sealKeyPackage`, `openKeyPackage`, `receiveKeyPackage`, `verifyKeyPackage`, `keyPackageHpkeInfo`, `keyPackageHpkeAad`); Data Units (`dataUnitAad`, `encodeDataUnitPayload`, `sealDataUnit`, `checkDataUnit` for the DEK-free server checks, `receiveDataUnit` → accepted / duplicate / equivocation / held / quarantined / rejected / local-failure, the `DataProfileCodec` hook, the `SeenUnits` contract with the test-only `InMemorySeenUnits`); messages (`MESSAGE_TYPE`, `ERROR_CODE`, typed bodies `MessageBodies`, `decodeMessage` / `encodeMessage`, `decodeEnvelope`, `decodeFrame` for binary/text frames with `closesConnection`, `messageErrorWireCode`, `newMessageId`, `createMessage`, `replyTo`, `DEFAULT_MAX_MESSAGE_BYTES`; no sockets); the session handshake (`WIRE_PROFILE`, `authTranscript`, `signAuthProof`, `verifyAuthProof`, `selectWireProfile`, pure `startServerSession`/`serverReceive` and `startClientHandshake`/`clientReceive` steps, `AuthenticatedSession` with an opaque hosting credential and no abilities; `clientConnectionTransition` §63 and `serverSessionTransition` §64); low-level deterministic CBOR (`encode`, `decodeStrict`, `decodeDeterministic`, `isDeterministic`, `cborMap`) under the `@openlfcp/wire/cbor` subpath |
 | `@openlfcp/storage` | Storage interfaces only (adapters such as a future `@openlfcp/storage-node` live elsewhere) | core | `ActorSequenceReservation` (durable-before-use contract; durable implementations are LFCP-034 to LFCP-036), `nextActorSequence`, `SequenceReuseGuard`, and `InMemoryActorSequenceReservation` for tests and development only (not crash-safe) |
-| `@openlfcp/shared-objects` | SHARED-OBJECTS-PROFILE-01 (`org.openlfcp.shared-objects.v1`) | core, crypto | Task over logical state (`Task`, `parseTask`, `createTask`, intent mutators `setTitle`, `setStatus`, `complete`, `reopen`, `cancel`, `setDue`/`clearDue`, `setScheduled`/`clearScheduled`, `setPriority`, `addTag`/`removeTag`, `assign`/`unassign`, `deleteTask`/`restoreTask`); profile validation (`validateRoot`, `objectProblems`, `validateTransition`: `PROFILE_INVALID` with §74.1 diagnostics); `principalRef`, `deriveActorId`, `frameProfilePayload`/`unframeProfilePayload`, Local Date and timestamp checks. The Automerge binding is LFCP-031 |
+| `@openlfcp/shared-objects` | SHARED-OBJECTS-PROFILE-01 (`org.openlfcp.shared-objects.v1`) | core, crypto | Task over logical state (`Task`, `parseTask`, `createTask`, intent mutators `setTitle`, `setStatus`, `complete`, `reopen`, `cancel`, `setDue`/`clearDue`, `setScheduled`/`clearScheduled`, `setPriority`, `addTag`/`removeTag`, `assign`/`unassign`, `deleteTask`/`restoreTask`); profile validation (`validateRoot`, `objectProblems`, `validateTransition`: `PROFILE_INVALID` with §74.1 diagnostics); `principalRef`, `deriveActorId`, `frameProfilePayload`/`unframeProfilePayload`, Local Date and timestamp checks; the Automerge binding `SharedObjectsReplica` (`create`, `empty`, `fromSave`, `fromSnapshot`, `fromChanges`, `rebuildWithout`; `apply` one intent → one change with its §11 plaintext, `receive`/`receiveChange` → applied / duplicate / missing_dependencies, `task` views with `ScalarView` conflicts, `conflicts`, `collisions`, `validate`, `save`, `snapshot`, change notifications), `resolveFieldConflict`, `ObjectIdCollisionError`, and the §11/§13 byte checks `checkChange`, `frameChange`/`unframeChange`, `frameSnapshot`/`unframeSnapshot` |
 | `@openlfcp/client` | Session, Control Plane and Data Plane synchronization | core, wire, storage, crypto | `createDataUnit` (sequence from an `ActorSequenceReservation` only; checks head, profile, data/write and DEK before reserving) |
 
 ```text
@@ -60,15 +61,20 @@ fails on:
 - an edge outside the graph;
 - any `obsidian` dependency or import;
 - any `@noble/*` dependency or import outside `@openlfcp/crypto`;
+- any `@automerge/*` dependency or import outside `@openlfcp/shared-objects`;
 - any `node:` or Node built-in import or Node-only global (`process`,
   `Buffer`, …) in these packages.
 
 Its self-tests live in `scripts/boundary-fixtures/`.
 
-Runtime dependencies are deliberately few. Only `@openlfcp/crypto` has
-external ones: `@noble/hashes` and `@noble/curves`, and for HPKE `hpke` with
+Runtime dependencies are deliberately few. `@openlfcp/crypto` has
+`@noble/hashes` and `@noble/curves`, and for HPKE `hpke` with
 `@panva/hpke-noble`, which runs the same noble packages (one copy each). They are audited, pure
 JavaScript and run unchanged in Node.js, browsers and Obsidian.
+`@openlfcp/shared-objects` has `@automerge/automerge`, pinned at 3.5.0, the
+profile's compatibility target. It ships WebAssembly, which each runtime
+loads through the package's conditional exports; see
+[its README](packages/shared-objects/README.md).
 
 Each package is ESM-only and publish-ready in shape:
 
