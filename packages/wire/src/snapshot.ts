@@ -8,7 +8,6 @@ import {
   hash32,
   LfcpError,
   type PrincipalId,
-  type ResourceId,
   toHex,
 } from "@openlfcp/core";
 import {

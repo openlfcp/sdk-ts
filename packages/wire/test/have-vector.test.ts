@@ -1,10 +1,4 @@
-import {
-  type ControlRecordId,
-  controlRecordId,
-  type PrincipalId,
-  principalId,
-  toHex,
-} from "@openlfcp/core";
+import { type PrincipalId, principalId, toHex } from "@openlfcp/core";
 import { describe, expect, it } from "vitest";
 import {
   type ActorRange,
