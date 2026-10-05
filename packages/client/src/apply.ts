@@ -10,7 +10,9 @@ import {
 import { decryptDataUnit, deriveActorDataKey, type ResourceDEK } from "@openlfcp/crypto";
 import type { DataUnitRow, DataUnitStatus, LfcpStorage, StorageWrite } from "@openlfcp/storage";
 import {
+  beyondCutoff,
   type ControlView,
+  canonicalFrontierFromCbor,
   checkDataUnit,
   classifyDataUnit,
   type DataProfileCodec,
@@ -22,6 +24,7 @@ import {
   type ReceivedDataUnit,
   receiveDataUnit,
 } from "@openlfcp/wire";
+import { decodeDeterministic } from "@openlfcp/wire/cbor";
 import { dataUnitRow, StoredSeenUnits } from "./storage.js";
 
 /**
@@ -113,6 +116,8 @@ export interface DataProfileHandler<T> {
    * after a restart (DataUnitApplier.replayStored).
    */
   has?(unitId: DataUnitId): boolean;
+  /** Forgets the whole profile state, to rebuild it from accepted units (SNAP-EP). */
+  reset?(): void;
 }
 
 interface Applied {
@@ -201,6 +206,12 @@ export interface EpochReconciliation {
   readonly objects: readonly string[];
   /** Merged units that now wait in the profile for an excluded unit's content. */
   readonly pending: readonly DataUnitId[];
+  /**
+   * The Key Epoch cut off units a loaded Snapshot covered: the Snapshot
+   * state was dropped and rebuilt from accepted units (SNAP-EP); the units
+   * it covered must be fetched again.
+   */
+  readonly snapshotDropped: boolean;
 }
 
 export interface DataUnitApplierOptions extends DataUnitCheckOptions {
@@ -209,7 +220,7 @@ export interface DataUnitApplierOptions extends DataUnitCheckOptions {
    * marks live (the wire SeenUnits runs on it). InMemoryLfcpStorage for
    * tests and development only.
    */
-  readonly storage: Pick<LfcpStorage, "dataUnits" | "commit">;
+  readonly storage: Pick<LfcpStorage, "dataUnits" | "snapshots" | "commit">;
   /** The DEK of a Data Epoch, if this client holds it (e.g. dekResolver). */
   readonly dek: (epoch: DataEpoch) => ResourceDEK | undefined | Promise<ResourceDEK | undefined>;
   /** The profiles this client implements. */
@@ -232,7 +243,7 @@ const LFCP_ACCEPTED: readonly DataUnitStatus[] = ["merged", "profile-pending"];
 export class DataUnitApplier {
   readonly #options: DataUnitApplierOptions;
   readonly #handlers: ReadonlyMap<string, DataProfileHandler<unknown>>;
-  readonly #storage: Pick<LfcpStorage, "dataUnits" | "commit">;
+  readonly #storage: Pick<LfcpStorage, "dataUnits" | "snapshots" | "commit">;
   readonly #seen: StoredSeenUnits;
 
   constructor(options: DataUnitApplierOptions) {
@@ -591,11 +602,59 @@ export class DataUnitApplier {
    * the remaining accepted units; they are quarantined (STALE_DATA_EPOCH)
    * and un-accepted.
    */
+  // PROVISIONAL (SNAP-EP): a Key Epoch learned after a Snapshot was loaded
+  // that puts any unit the Snapshot covers beyond its cutoff drops the
+  // Snapshot-derived state: the profile is rebuilt from accepted units only,
+  // the covered units are fetched again, and G-EP7 then applies normally.
+  async #dropCutSnapshots(
+    view: ControlView,
+    handler: DataProfileHandler<unknown>,
+  ): Promise<boolean> {
+    const resource = view.state.resourceId;
+    const snapshots = await this.#storage.snapshots.list(resource);
+    if (snapshots.length === 0 || handler.reset === undefined) return false;
+    const covered = (await this.#storage.dataUnits.withStatus(resource, "merged")).filter(
+      (u) => u.accepted && u.detail === "covered by a Snapshot",
+    );
+    const cut =
+      snapshots.some(
+        (x) =>
+          beyondCutoff(
+            view,
+            x.dataEpoch,
+            canonicalFrontierFromCbor(decodeDeterministic(x.frontier)),
+          ) !== undefined,
+      ) || covered.some((u) => classifyDataUnit(view, u).kind === "quarantine");
+    if (!cut) return false;
+    await this.#write([
+      ...snapshots.map((x): StorageWrite => ({ op: "delete-snapshot", snapshotId: x.snapshotId })),
+      ...covered.flatMap((u): StorageWrite[] => [
+        { op: "set-accepted", unitId: u.unitId, accepted: false },
+        {
+          op: "set-data-unit-status",
+          unitId: u.unitId,
+          status: "seen",
+          detail: "Snapshot dropped (SNAP-EP)",
+        },
+      ]),
+    ]);
+    handler.reset();
+    await this.replayStored(view);
+    return true;
+  }
+
   async reconcileEpochs(view: ControlView): Promise<EpochReconciliation> {
     const handler = this.#handlers.get(view.state.dataProfile);
-    const empty: EpochReconciliation = Object.freeze({ excluded: [], objects: [], pending: [] });
-    if (handler === undefined) return empty;
+    if (handler === undefined)
+      return Object.freeze({ excluded: [], objects: [], pending: [], snapshotDropped: false });
     const resource = view.state.resourceId;
+    const snapshotDropped = await this.#dropCutSnapshots(view, handler);
+    const empty: EpochReconciliation = Object.freeze({
+      excluded: [],
+      objects: [],
+      pending: [],
+      snapshotDropped,
+    });
     const candidates = [
       ...(await this.#storage.dataUnits.withStatus(resource, "merged")),
       ...(await this.#storage.dataUnits.withStatus(resource, "profile-pending")),
@@ -631,6 +690,7 @@ export class DataUnitApplier {
       ),
     ]);
     return Object.freeze({
+      snapshotDropped,
       excluded: Object.freeze(excluded),
       objects: result.objects,
       pending: result.pending,

@@ -138,6 +138,7 @@ export class Side {
           apply: (u, v) => profile.apply(u, v as never),
           exclude: (ids) => profile.exclude(ids),
           has: (id) => profile.has(id),
+          reset: () => profile.reset(),
         },
       ],
     });

@@ -754,7 +754,8 @@ export class SyncClient {
     if (epochsChanged) {
       const applied = await ctx.binding.applier.reconcileEpochs(chain);
       const outbound = await this.#o.outbound.reconcileEpochs(chain);
-      if (applied.excluded.length > 0 || outbound.length > 0) {
+      if (applied.snapshotDropped) ctx.covered = []; // SNAP-EP: covered units are fetched again
+      if (applied.excluded.length > 0 || outbound.length > 0 || applied.snapshotDropped) {
         ctx.binding.checkpointer?.noteChange();
         this.#emit({ type: "epoch-reconciled", resourceId: R, applied, outbound });
       }
