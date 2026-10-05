@@ -1,0 +1,4 @@
+{
+  "description": "The only test.todo entries the sdk-ts run accepts (scripts/todo-guard.mjs): features MVP 0.1 defers. Each names its entry in .github docs/release/deferred-wire-01-features.md. Any other todo fails the run, and so does an entry here that no longer matches a todo.",
+  "todos": []
+}
