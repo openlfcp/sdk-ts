@@ -281,10 +281,6 @@
         "outcome": "LFCP-025"
       }
     },
-    "stale_control_head_put": {
-      "task": "LFCP-026",
-      "reason": "A CONTROL_PUT message: message codec (LFCP-026); the stale-head result itself is LFCP-022."
-    },
     "actor_seq1_prev_not_null_D1": {
       "reason": "Structurally valid; §26.2 asks for a report to the sync engine (G4: LFCP-025/LFCP-028).",
       "parts": {

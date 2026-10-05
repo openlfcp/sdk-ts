@@ -29,6 +29,7 @@ import {
 import {
   type ControlRecord,
   canonicalFrontierFromCbor,
+  controlPutBodyFromCbor,
   decodeControlRecord,
   decodeControlRecordPayload,
   decodeDataUnitPayload,
@@ -49,6 +50,7 @@ import {
   parseSignedObject,
   parseSnapshot,
   principalDescriptorFromKeys,
+  proposeControlPut,
   type Signer,
   signControlRecord,
   signObject,
@@ -339,6 +341,31 @@ const controlRecordNegative: Handler = (c, context) => {
       : result.kind === "invalid"
         ? result.wireCode
         : null;
+  const outcome = negative(c, actual);
+  return { checks: [...checks, ...outcome.checks], pending: outcome.pending };
+};
+
+/**
+ * LFCP-022: a CONTROL_PUT against the coordinator's state at the vector's
+ * current head. Only the §47 body is decoded (field 4 of the envelope,
+ * read with generic CBOR); the envelope codec itself is LFCP-026.
+ */
+const controlPutNegative: Handler = (c, context) => {
+  const message = decodeStrict(hexOf(c.inputs, "message_cbor"));
+  const field = (k: number): CborValue | undefined =>
+    isCborMap(message) ? message.entries.find(([key]) => key === k)?.[1] : undefined;
+  const checks: Check[] = [equalCheck("inputs.message_cbor/type", 23, field(0))]; // §33: 23 = CONTROL_PUT
+  const ctx = c.context as { current_control_head?: unknown } | undefined;
+  const chain = validateControlChain(publishedChain(context));
+  if (chain.kind !== "linear") throw new Error("the published Control Chain does not validate");
+  const head = referenced(context, ctx?.current_control_head);
+  const state = chain.stateAt(head);
+  if (state === undefined) throw new Error("the context head is not on the published chain");
+  const result = proposeControlPut(state, controlPutBodyFromCbor(field(4) as CborValue));
+  if (result.kind === "head-mismatch")
+    checks.push(bytesCheck("context.current_control_head", head, result.currentHead));
+  const actual =
+    result.kind === "accepted" || result.kind === "already-committed" ? null : result.wireCode;
   const outcome = negative(c, actual);
   return { checks: [...checks, ...outcome.checks], pending: outcome.pending };
 };
@@ -783,6 +810,7 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   "bytes/wire_message": wireMessage,
   "validation/data_unit": signedNegative(parseDataUnit, (p) => expectedSignerOf(p.payload)),
   "validation/control_record": controlRecordNegative,
+  "validation/control_put": controlPutNegative,
   "validation/key_package": signedNegative(parseKeyPackage, (p) => expectedSignerOf(p.payload)),
   "validation/snapshot": signedNegative(parseSnapshot, (p) => expectedSignerOf(p.payload)),
   "validation/principal": principalNegative,
