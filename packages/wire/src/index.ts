@@ -103,6 +103,30 @@ export {
   serverAcceptsDataPut,
 } from "./epoch.js";
 export {
+  type AuthenticatedSession,
+  type AuthProofCheck,
+  type AuthTranscriptFields,
+  authTranscript,
+  type ClientHandshakeConfig,
+  type ClientSession,
+  type ClientStep,
+  clientReceive,
+  decodeAuthTranscript,
+  isResourceMessage,
+  type RandomSource,
+  type ReadySession,
+  type ServerHandshakeConfig,
+  type ServerSession,
+  type ServerStep,
+  selectWireProfile,
+  serverReceive,
+  signAuthProof,
+  startClientHandshake,
+  startServerSession,
+  verifyAuthProof,
+  WIRE_PROFILE,
+} from "./handshake.js";
+export {
   type ActorHave,
   actorHaveFromCbor,
   actorHaveToCbor,
@@ -203,6 +227,14 @@ export {
   principalDescriptorFromKeys,
   principalDescriptorToCbor,
 } from "./principal.js";
+export {
+  type ClientConnectionEvent,
+  type ClientConnectionState,
+  clientConnectionTransition,
+  type ServerSessionEvent,
+  type ServerSessionState,
+  serverSessionTransition,
+} from "./session-state.js";
 export {
   type ControlPutBody,
   controlPutBodyFromCbor,
