@@ -2,10 +2,6 @@
   "suite": "LFCP-TEST-VECTORS-01",
   "note": "Cases or parts of cases that sdk-ts cannot check yet, with the task that implements them (LFCP-017). Remove an entry when its task lands: the runner fails on stale entries.",
   "cases": {
-    "dek_commitments": {
-      "task": "LFCP-018",
-      "reason": "DEK commitment (§11) is Data Epoch key material."
-    },
     "C0_genesis": {
       "reason": "Generic payload, signature, IDs and re-signing run here; typed Control Record bodies do not.",
       "parts": {
@@ -92,56 +88,44 @@
       }
     },
     "D1_bob_epoch0_seq1": {
-      "reason": "Payload, COSE, signature against the actor and unit ID run here; key derivation and AEAD do not.",
+      "reason": "Payload, COSE, signature against the actor, unit ID, actor key and nonce run here; the AAD and AEAD do not.",
       "parts": {
-        "actor_key/derive": "LFCP-018",
-        "nonce/derive": "LFCP-018",
         "aad_cbor/construct": "LFCP-025",
         "ciphertext/encrypt": "LFCP-025"
       }
     },
     "D2_bob_epoch0_seq2": {
-      "reason": "Payload, COSE, signature against the actor and unit ID run here; key derivation and AEAD do not.",
+      "reason": "Payload, COSE, signature against the actor, unit ID, actor key and nonce run here; the AAD and AEAD do not.",
       "parts": {
-        "actor_key/derive": "LFCP-018",
-        "nonce/derive": "LFCP-018",
         "aad_cbor/construct": "LFCP-025",
         "ciphertext/encrypt": "LFCP-025"
       }
     },
     "D3_bob_epoch0_seq3_stale": {
-      "reason": "Payload, COSE, signature against the actor and unit ID run here; key derivation and AEAD do not.",
+      "reason": "Payload, COSE, signature against the actor, unit ID, actor key and nonce run here; the AAD and AEAD do not.",
       "parts": {
-        "actor_key/derive": "LFCP-018",
-        "nonce/derive": "LFCP-018",
         "aad_cbor/construct": "LFCP-025",
         "ciphertext/encrypt": "LFCP-025"
       }
     },
     "D4_carol_epoch1_seq1": {
-      "reason": "Payload, COSE, signature against the actor and unit ID run here; key derivation and AEAD do not.",
+      "reason": "Payload, COSE, signature against the actor, unit ID, actor key and nonce run here; the AAD and AEAD do not.",
       "parts": {
-        "actor_key/derive": "LFCP-018",
-        "nonce/derive": "LFCP-018",
         "aad_cbor/construct": "LFCP-025",
         "ciphertext/encrypt": "LFCP-025"
       }
     },
     "SNAPSHOT-01": {
-      "reason": "Payload, canonical frontier, COSE, signature against the publisher and Snapshot ID run here; Snapshot encryption does not.",
+      "reason": "Payload, canonical frontier, COSE, signature against the publisher, Snapshot ID, Snapshot key and nonce run here; the AAD and encryption do not.",
       "parts": {
         "aad_cbor/construct": "LFCP-029",
-        "snapshot_key/derive": "LFCP-029",
-        "nonce/derive": "LFCP-029",
         "ciphertext/encrypt": "LFCP-029"
       }
     },
     "SNAPSHOT-02": {
-      "reason": "Payload, canonical frontier, COSE, signature against the publisher and Snapshot ID run here; Snapshot encryption does not.",
+      "reason": "Payload, canonical frontier, COSE, signature against the publisher, Snapshot ID, Snapshot key and nonce run here; the AAD and encryption do not.",
       "parts": {
         "aad_cbor/construct": "LFCP-029",
-        "snapshot_key/derive": "LFCP-029",
-        "nonce/derive": "LFCP-029",
         "ciphertext/encrypt": "LFCP-029"
       }
     },

@@ -6,13 +6,26 @@
 
 import {
   bytesEqual,
+  dataEpoch,
   fromBase64url,
   fromHex,
   type PrincipalId,
+  resourceId,
   toBase64url,
   toHex,
 } from "@openlfcp/core";
-import { importAgreementKey, importSigningKey } from "@openlfcp/crypto";
+import {
+  dataUnitNonce,
+  dekCommitment,
+  deriveActorDataKey,
+  deriveSnapshotKey,
+  exportSecretKeyBytes,
+  importAgreementKey,
+  importResourceDEK,
+  importSigningKey,
+  type ResourceDEK,
+  snapshotNonce,
+} from "@openlfcp/crypto";
 import {
   canonicalFrontierFromCbor,
   decodeControlRecordPayload,
@@ -296,6 +309,47 @@ const keyPackage: Handler = (c, context) => {
   };
 };
 
+// ---------------------------------------------------------------------------
+// Data Epoch keys. The suite's dek_commitments case maps each
+// fixtures.resource.dek<N> to its epoch through inputs.dek<N>_epoch.
+
+function resourceFixture(context: HandlerContext): Fields {
+  return (context.suite.fixtures as { resource?: Fields } | undefined)?.resource;
+}
+
+/** The fixture DEK for `epoch`, found through the dek_commitment case's inputs. */
+function dekForEpoch(context: HandlerContext, epoch: bigint): ResourceDEK {
+  for (const c of context.suite.cases) {
+    if (c.type !== "bytes" || c.kind !== "dek_commitment") continue;
+    for (const [field, value] of Object.entries(c.inputs ?? {})) {
+      const m = /^(dek\d+)_epoch$/.exec(field);
+      if (m && BigInt(value as number) === epoch)
+        return importResourceDEK(hexOf(resourceFixture(context), m[1] as string));
+    }
+  }
+  throw new Error(`no fixture DEK for epoch ${epoch}`);
+}
+
+const dekCommitments: Handler = (c, context) => {
+  const resource = hexOf(resourceFixture(context), "id");
+  const checks: Check[] = [];
+  for (const [field, value] of Object.entries(c.inputs ?? {})) {
+    const m = /^(dek\d+)_epoch$/.exec(field);
+    if (m === null) continue;
+    const name = `${m[1]}_commitment`;
+    checks.push(
+      sameBytes(name, hexOf(c.expected, name), () =>
+        dekCommitment(
+          resourceId(resource),
+          dataEpoch(BigInt(value as number)),
+          importResourceDEK(hexOf(resourceFixture(context), m[1] as string)),
+        ),
+      ),
+    );
+  }
+  return { checks };
+};
+
 const dataUnit: Handler = (c, context) => {
   const e = c.expected;
   const payload = hexOf(e, "payload_cbor");
@@ -310,6 +364,14 @@ const dataUnit: Handler = (c, context) => {
   );
   return {
     checks: [
+      sameBytes("actor_key/derive", hexOf(e, "actor_key"), () => {
+        const p = decodeDataUnitPayload(payload);
+        const dek = dekForEpoch(context, p.dataEpoch);
+        return exportSecretKeyBytes(deriveActorDataKey(dek, p.resourceId, p.dataEpoch, p.actor));
+      }),
+      sameBytes("nonce/derive", hexOf(e, "nonce"), () =>
+        dataUnitNonce(decodeDataUnitPayload(payload).actorSeq),
+      ),
       deterministic("aad_cbor/deterministic", hexOf(e, "aad_cbor")),
       sameBytes(
         "ciphertext/payload-field",
@@ -321,7 +383,7 @@ const dataUnit: Handler = (c, context) => {
       ...signed.checks,
       bytesCheck("unit_id", hexOf(e, "unit_id"), objectId(cose)),
     ],
-    pending: ["actor_key/derive", "nonce/derive", "aad_cbor/construct", "ciphertext/encrypt"],
+    pending: ["aad_cbor/construct", "ciphertext/encrypt"],
   };
 };
 
@@ -352,6 +414,14 @@ const snapshot: Handler = (c, context) => {
         Array.isArray(canonicalFrontierFromCbor(decodeStrict(frontier))),
       ),
       sameBytes("frontier_cbor/payload-field", frontier, field5),
+      sameBytes("snapshot_key/derive", hexOf(e, "snapshot_key"), () => {
+        const p = decodeSnapshotPayload(payload);
+        const dek = dekForEpoch(context, p.dataEpoch);
+        return exportSecretKeyBytes(deriveSnapshotKey(dek, p.resourceId, p.dataEpoch, p.publisher));
+      }),
+      sameBytes("nonce/derive", hexOf(e, "nonce"), () =>
+        snapshotNonce(decodeSnapshotPayload(payload).snapshotSeq),
+      ),
       deterministic("aad_cbor/deterministic", hexOf(e, "aad_cbor")),
       sameBytes(
         "ciphertext/payload-field",
@@ -382,7 +452,7 @@ const snapshot: Handler = (c, context) => {
       ...signed.checks,
       bytesCheck("snapshot_id", hexOf(e, "snapshot_id"), objectId(cose)),
     ],
-    pending: ["aad_cbor/construct", "snapshot_key/derive", "nonce/derive", "ciphertext/encrypt"],
+    pending: ["aad_cbor/construct", "ciphertext/encrypt"],
   };
 };
 
@@ -527,6 +597,7 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   "bytes/control_record": controlRecord,
   "bytes/owner_transfer": ownerTransfer,
   "bytes/key_package": keyPackage,
+  "bytes/dek_commitment": dekCommitments,
   "bytes/data_unit": dataUnit,
   "bytes/snapshot": snapshot,
   "bytes/invite_uri": inviteUri,
