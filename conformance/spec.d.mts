@@ -26,3 +26,4 @@ export function openSpec(options?: {
 }): Spec;
 export function log(line: string): void;
 export function writeSummary(name: string, summary: unknown): string;
+export function readRepoText(path: string): string;

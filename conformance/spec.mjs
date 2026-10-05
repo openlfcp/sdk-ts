@@ -108,3 +108,8 @@ export function writeSummary(name, summary) {
   writeFileSync(join(dir, `${name}.json`), `${JSON.stringify(summary, null, 2)}\n`);
   return `conformance/.results/${name}.json`;
 }
+
+/** A text file of this repository (for source-level checks), by repository-relative path. */
+export function readRepoText(path) {
+  return readFileSync(join(ROOT, path), "utf8");
+}
