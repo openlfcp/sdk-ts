@@ -268,6 +268,8 @@ export type StorageWrite =
   | { readonly op: "set-accepted"; readonly unitId: DataUnitId; readonly accepted: boolean }
   | { readonly op: "put-key-package"; readonly row: KeyPackageRow }
   | { readonly op: "put-snapshot"; readonly row: SnapshotRow }
+  /** Forgets a stored Snapshot (e.g. Snapshot-derived state dropped, SNAP-EP). */
+  | { readonly op: "delete-snapshot"; readonly snapshotId: Hash32 }
   | { readonly op: "put-resource"; readonly row: ResourceRow }
   | { readonly op: "put-route"; readonly resourceId: ResourceId; readonly route: RouteRow }
   | { readonly op: "enqueue"; readonly item: OutboundItem }

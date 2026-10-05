@@ -406,6 +406,9 @@ export class SqliteLfcpStorage implements LfcpStorage {
         );
         return;
       }
+      case "delete-snapshot":
+        db.prepare("DELETE FROM snapshots WHERE snapshot_id = ?").run(blob(w.snapshotId));
+        return;
       case "put-snapshot": {
         const s = w.row;
         this.#immutable(

@@ -170,6 +170,9 @@ function apply(s: State, w: StorageWrite): void {
     case "put-key-package":
       putImmutable(s.keyPackages, w.row.packageId, w.row, "Key Package");
       return;
+    case "delete-snapshot":
+      s.snapshots.delete(hex(w.snapshotId));
+      return;
     case "put-snapshot":
       putImmutable(s.snapshots, w.row.snapshotId, w.row, "Snapshot");
       return;

@@ -406,6 +406,13 @@ export function runStorageContract(
       eq(await s.snapshots.get(snapshot.snapshotId), snapshot, "get");
       eq(await s.snapshots.list(R, { epoch: E1 }), [snapshot], "list");
       eq(await s.snapshots.list(R, { epoch: E0 }), [], "other epoch");
+      await ok(s, [{ op: "delete-snapshot", snapshotId: snapshot.snapshotId }], "delete");
+      eq(await s.snapshots.get(snapshot.snapshotId), undefined, "deleted");
+      await ok(
+        s,
+        [{ op: "delete-snapshot", snapshotId: snapshot.snapshotId }],
+        "deleting again is harmless",
+      );
     });
 
     test("keeps routes, Resource metadata, outbound items and profile checkpoints", async ({
