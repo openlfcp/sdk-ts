@@ -81,6 +81,17 @@ export interface CorpusExpansion {
   readonly expected: { readonly within_limits: boolean };
 }
 
+/** A list of changes applied in order, each accepted, rejected or held (§11.2; since mvp-0.1-baseline.8). */
+export interface CorpusDepthCase {
+  readonly id: string;
+  readonly description: string;
+  readonly rule: string;
+  readonly changes: readonly {
+    readonly change_hex: string;
+    readonly expected: "accept" | "reject" | "held";
+  }[];
+}
+
 export interface Corpus {
   readonly automerge_version: string;
   readonly profile: string;
@@ -97,6 +108,17 @@ export interface Corpus {
       readonly snapshot_floor: Readonly<Record<string, number>>;
     };
     readonly cases: readonly CorpusExpansion[];
+  };
+  /** Since mvp-0.1-baseline.8. */
+  readonly depth: {
+    readonly limit: number;
+    readonly cases: readonly CorpusDepthCase[];
+    readonly snapshots: readonly {
+      readonly id: string;
+      readonly description: string;
+      readonly save_hex: string;
+      readonly expected: "accept" | "reject";
+    }[];
   };
 }
 

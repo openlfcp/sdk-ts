@@ -29,6 +29,7 @@ import {
   deriveActorId,
   frameChange,
   frameSnapshot,
+  MAX_DOCUMENT_DEPTH,
   SharedObjectsReplica as Replica,
   SharedObjectsDataProfile,
   type SharedObjectsReplica,
@@ -242,6 +243,63 @@ describe(`Automerge reference corpus expansion limits at ${spec.lock.tag}`, () =
       if (x.kind === "change" && !x.expected.within_limits)
         expect(() => checkChange(bytes)).toThrow(
           expect.objectContaining({ diagnostic: "INVALID_AUTOMERGE_BYTES" }),
+        );
+    });
+  }
+});
+
+describe(`Automerge reference corpus depth bound at ${spec.lock.tag}`, () => {
+  it("states the SDK's bound", () => {
+    expect(corpus.depth.limit).toBe(MAX_DOCUMENT_DEPTH);
+  });
+
+  for (const x of corpus.depth.cases) {
+    for (const path of ["one by one", "in one batch"] as const) {
+      it(`${x.id} (${path}): ${x.changes.map((c) => c.expected).join(", ")}`, () => {
+        // §11.2: each change in order on an empty replica, as a receiver would.
+        const replica = Replica.empty(options);
+        const bytes = x.changes.map((c) => fromHex(c.change_hex));
+        let got: string[];
+        if (path === "one by one")
+          got = bytes.map((b) => {
+            try {
+              const r = replica.receiveChange(b);
+              return r.status === "applied"
+                ? "accept"
+                : r.status === "missing_dependencies"
+                  ? "held"
+                  : r.status;
+            } catch (e) {
+              expect(e).toMatchObject({
+                code: "PROFILE_INVALID",
+                diagnostic: "INVALID_AUTOMERGE_BYTES",
+              });
+              return "reject";
+            }
+          });
+        else {
+          const r = replica.receiveChanges(bytes);
+          got = bytes.map((b) => {
+            const hash = checkChange(b).hash;
+            if (r.refused.some((f) => f.change.hash === hash)) return "reject";
+            return r.waiting.some((w) => w.hash === hash) ? "held" : "accept";
+          });
+        }
+        expect(got).toEqual(x.changes.map((c) => c.expected));
+      });
+    }
+  }
+
+  for (const s of corpus.depth.snapshots) {
+    it(`${s.id}: ${s.expected}`, () => {
+      const load = () => Replica.fromSnapshot(frameSnapshot(fromHex(s.save_hex)), options);
+      if (s.expected === "accept") expect(load).not.toThrow();
+      else
+        expect(load).toThrow(
+          expect.objectContaining({
+            code: "PROFILE_INVALID",
+            diagnostic: "INVALID_AUTOMERGE_BYTES",
+          }),
         );
     });
   }
