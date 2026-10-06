@@ -1,6 +1,6 @@
 {
   "name": "@openlfcp/storage",
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0",
   "description": "Storage interfaces for LFCP clients (no adapters).",
   "keywords": [
     "openlfcp",
@@ -42,7 +42,7 @@
   ],
   "publishConfig": {
     "access": "public",
-    "tag": "next"
+    "tag": "latest"
   },
   "dependencies": {
     "@openlfcp/core": "workspace:^"

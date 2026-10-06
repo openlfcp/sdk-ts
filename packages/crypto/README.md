@@ -13,8 +13,8 @@ ESM only; Node.js 24 or later (browsers and Electron for every package except `@
 Part of the OpenLFCP TypeScript SDK, which implements the OpenLFCP MVP 0.1
 subset of [LFCP-WIRE-01](https://github.com/openlfcp/spec/blob/main/wire/LFCP-WIRE-01.md)
 at `mvp-0.1-baseline.8`, not every deferred WIRE-01 feature. It does not
-claim full LFCP-WIRE-01 conformance. This is a release candidate
-(`0.1.0-rc.1`, npm dist-tag `next`): APIs may still change.
+claim full LFCP-WIRE-01 conformance. This is the MVP 0.1 release
+(`0.1.0`, npm dist-tag `latest`). Until 1.0, minor versions may change APIs.
 
 ## Links
 
