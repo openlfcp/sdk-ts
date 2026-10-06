@@ -16,7 +16,7 @@ import {
   Oracle,
   World,
 } from "./harness.js";
-import { converge, program } from "./program.js";
+import { converge, program, TIMEOUT } from "./program.js";
 
 const map = (obs: Observation, f: (id: string, t: ObservedTask) => ObservedTask | undefined) =>
   Object.fromEntries(
@@ -66,7 +66,9 @@ const property = (fault: Fault | undefined) =>
 const detects = (fault: Fault | undefined): boolean =>
   fc.check(property(fault), { numRuns: 40, seed: 0x037 }).failed;
 
-describe("LFCP-037 tests of testing", () => {
+// Each test runs a 40-run property: about 2 s here, nearly 6 s on a GitHub
+// runner, so the suite takes the property timeout, not vitest's 5 s.
+describe("LFCP-037 tests of testing", { timeout: TIMEOUT }, () => {
   it("the property passes without a fault", () => {
     expect(detects(undefined)).toBe(false);
   });

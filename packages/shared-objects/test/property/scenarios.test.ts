@@ -7,13 +7,14 @@
 
 import { describe, expect, it } from "vitest";
 import { checkConverged, World } from "./harness.js";
+import { TIMEOUT } from "./program.js";
 
 // Intent kinds of World.op (see harness.ts #intent): k selects the intent,
 // v the value from its pool.
 const K = { title: 0, status: 1, due: 5, addTag: 9, removeTag: 10, delete: 13 } as const;
 const V = { done: 2, cancelled: 3, api: 0, plan: 0, review: 2, oct15: 1 } as const;
 
-describe("LFCP-037 scenario 12: multiple objects", () => {
+describe("LFCP-037 scenario 12: multiple objects", { timeout: TIMEOUT }, () => {
   it("conflicts in Task A do not corrupt Task B", () => {
     const world = new World(3, 2);
     const [a, b] = world.objects.map((o) => o.id) as [string, string];
