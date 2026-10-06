@@ -30,6 +30,30 @@ jobs:
           ref: refs/tags/${{ steps.spec-lock.outputs.tag }}
           path: spec
           fetch-depth: 0
+      # The live interop tests (conformance/interop, the chaos suite
+      # included) run against the Rust reference server at server.lock,
+      # built here; the server builds against sdk-rs at its own sdk-rs.lock
+      # (a path dependency, ../sdk-rs).
+      - id: server-lock
+        run: echo "commit=$(jq -er .commit server.lock)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: openlfcp/server
+          ref: ${{ steps.server-lock.outputs.commit }}
+          path: server
+      - id: sdk-rs-lock
+        working-directory: server
+        run: echo "commit=$(jq -er .commit sdk-rs.lock)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: openlfcp/sdk-rs
+          ref: ${{ steps.sdk-rs-lock.outputs.commit }}
+          path: sdk-rs
+      - uses: dtolnay/rust-toolchain@stable
+      # The server builds into one target directory outside the checkouts.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server -> ../server-target
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: sdk-ts/package.json
@@ -42,5 +66,16 @@ jobs:
       - run: pnpm build
       - run: pnpm lint
       - run: pnpm typecheck
+      # Built before the tests, which then only find it built (a cold build
+      # takes minutes, longer than a test hook may).
+      - name: Build the reference server
+        run: cargo build --manifest-path ../server/Cargo.toml
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/server-target
       # Includes the conformance run (pnpm test:conformance runs it alone).
+      # LFCP_REQUIRE_LIVE=1: a live test that would skip fails the run.
       - run: pnpm test
+        env:
+          LFCP_REQUIRE_LIVE: "1"
+          LFCP_SERVER_DIR: ${{ github.workspace }}/server
+          LFCP_SERVER_TARGET_DIR: ${{ github.workspace }}/server-target
