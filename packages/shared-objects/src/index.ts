@@ -19,6 +19,7 @@ export {
   type ChunkExpansion,
   checkChangeExpansion,
   checkSnapshotExpansion,
+  MAX_DOCUMENT_DEPTH,
   SNAPSHOT_LIMITS_FLOOR,
   type SnapshotLimits,
 } from "./chunk-limits.js";

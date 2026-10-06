@@ -16,9 +16,14 @@ import {
 } from "./automerge-bytes.js";
 import {
   checkSnapshotExpansion,
+  MAX_DOCUMENT_DEPTH,
   SNAPSHOT_LIMITS_FLOOR,
   type SnapshotLimits,
 } from "./chunk-limits.js";
+
+/** The decoded actions that create an object (§11.2). */
+const MAKE_ACTIONS: ReadonlySet<string> = new Set(["makeMap", "makeList", "makeText", "makeTable"]);
+
 import { ProfileInvalidError } from "./profile-invalid.js";
 import { ProfileError, parseTask, type Task, type TaskIntent } from "./task.js";
 import {
@@ -221,12 +226,27 @@ type AMap = Record<string, unknown>;
 
 const scalarString = (s: string): A.ImmutableString => new A.ImmutableString(s);
 
-/** A logical value as Automerge input: every string becomes a scalar string (G-SC3). */
-function scalarize(value: Json): unknown {
+/**
+ * A logical value as Automerge input: every string becomes a scalar string
+ * (G-SC3). `depth` is the depth of `value` if it is a map or list (an
+ * object's field value is depth 1, §30); a writer never nests deeper than
+ * MAX_VALUE_DEPTH, and checking here keeps Automerge from ever building a
+ * deep value (§11.2: deep nesting can trap its wasm module).
+ */
+function scalarize(value: Json, depth = 1): unknown {
   if (typeof value === "string") return scalarString(value);
-  if (Array.isArray(value)) return value.map(scalarize);
+  const nested = Array.isArray(value) || isMap(value);
+  if (nested && depth > MAX_VALUE_DEPTH)
+    throw new ProfileError([
+      problem(
+        "INVALID_FIELD_TYPE",
+        "",
+        `a value nests maps or lists deeper than ${MAX_VALUE_DEPTH} levels (§30)`,
+      ),
+    ]);
+  if (Array.isArray(value)) return value.map((v) => scalarize(v, depth + 1));
   if (isMap(value))
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scalarize(v)]));
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scalarize(v, depth + 1)]));
   return value;
 }
 
@@ -469,11 +489,24 @@ const actorHex = (opts: ReplicaOptions): string =>
   toHex(deriveActorId(opts.resource, opts.principal));
 
 /**
+ * Whether a thrown value is a wasm trap (the engine's module is dead, not
+ * the change refused): it is rethrown as it is, never turned into
+ * INVALID_AUTOMERGE_BYTES, so a crash-loop breaker sees it.
+ */
+function isWasmTrap(e: unknown): boolean {
+  const trap = (globalThis as { WebAssembly?: { RuntimeError?: abstract new () => unknown } })
+    .WebAssembly?.RuntimeError;
+  if (trap !== undefined && e instanceof trap) return true;
+  return e instanceof Error && /\b(module|instance)\b.*\bterminated\b/i.test(e.message);
+}
+
+/**
  * Applies one change that passed the receive checks. Automerge can throw
  * after changing the document in place (a change that skips a sequence
  * number stays in its graph without its operations), so on any engine error
  * the handle is dropped: the document is rebuilt from the changes it held,
- * which must give back the heads it had. Exported for tests.
+ * which must give back the heads it had. A wasm trap is rethrown as it
+ * is: the module is dead, and only a restart recovers. Exported for tests.
  */
 export function applyChecked(
   doc: Doc,
@@ -483,6 +516,7 @@ export function applyChecked(
   try {
     return { next: A.applyChanges(doc, [bytes])[0] };
   } catch (e) {
+    if (isWasmTrap(e)) throw e;
     const error = e instanceof Error ? e : new Error(String(e));
     let restored: Doc;
     try {
@@ -515,6 +549,7 @@ export function applyBatchChecked(
       )[0],
     };
   } catch (e) {
+    if (isWasmTrap(e)) throw e;
     const error = e instanceof Error ? e : new Error(String(e));
     return { restored: restoreWithout(doc, batch, heads), error };
   }
@@ -549,6 +584,8 @@ export class SharedObjectsReplica {
   #doc: Doc;
   /** Highest sequence seen per actor (hex). */
   readonly #seqs = new Map<string, number>();
+  /** §11.2: known object depths (object ID → depth below the root), filled as objects appear. */
+  readonly #depths = new Map<string, number>();
   /**
    * Conflicted fields per object, kept current on every change. Automerge
    * 3.5.0 getConflicts on an A.view reports the current conflicts, not those
@@ -566,6 +603,65 @@ export class SharedObjectsReplica {
     for (const meta of A.getChangesMetaSince(doc, [])) this.#noteSeq(meta.actor, meta.seq);
     for (const [id, object] of Object.entries(this.#objects() ?? {}))
       if (isMap(object as Json)) this.#conflicted.set(id, conflictedFields(object as AMap));
+  }
+
+  /**
+   * §11.2: the depths of the objects `change` creates (object ID → depth),
+   * in operation order, given the objects of the document and `prior` (the
+   * same batch). Refuses an object deeper than MAX_DOCUMENT_DEPTH, or one
+   * written into an object the document does not have, before the engine.
+   */
+  #createdDepths(change: CheckedChange, prior: ReadonlyMap<string, number>): Map<string, number> {
+    const decoded = A.decodeChange(change.bytes);
+    const created = new Map<string, number>();
+    decoded.ops.forEach((op, i) => {
+      if (!MAKE_ACTIONS.has(op.action)) return;
+      const parent =
+        op.obj === "_root"
+          ? 0
+          : (created.get(op.obj) ?? prior.get(op.obj) ?? this.#depthOf(op.obj));
+      if (parent === undefined)
+        throw new ProfileInvalidError(
+          "INVALID_AUTOMERGE_BYTES",
+          `the change writes into object ${op.obj}, which this document does not have (§11.2)`,
+        );
+      if (parent + 1 > MAX_DOCUMENT_DEPTH)
+        throw new ProfileInvalidError(
+          "INVALID_AUTOMERGE_BYTES",
+          `the change creates an object deeper than ${MAX_DOCUMENT_DEPTH} levels (§11.2)`,
+        );
+      created.set(`${decoded.startOp + i}@${decoded.actor}`, parent + 1);
+    });
+    return created;
+  }
+
+  /**
+   * The depth of an object of the document: cached, else its path (objects
+   * never move, so the path of a live object has one element per level), else
+   * (a deleted object) every object's depth from the history, once.
+   */
+  #depthOf(obj: string): number | undefined {
+    const known = this.#depths.get(obj);
+    if (known !== undefined) return known;
+    let path: readonly unknown[] | undefined;
+    try {
+      path = A.getBackend(this.#doc).objInfo(obj as never).path;
+    } catch {
+      return undefined; // not an object of this document
+    }
+    if (path !== undefined) {
+      this.#depths.set(obj, path.length);
+      return path.length;
+    }
+    for (const bytes of A.getAllChanges(this.#doc)) {
+      const c = A.decodeChange(bytes);
+      c.ops.forEach((op, i) => {
+        if (!MAKE_ACTIONS.has(op.action)) return;
+        const parent = op.obj === "_root" ? 0 : this.#depths.get(op.obj);
+        if (parent !== undefined) this.#depths.set(`${c.startOp + i}@${c.actor}`, parent + 1);
+      });
+    }
+    return this.#depths.get(obj);
   }
 
   #noteSeq(actor: string, seq: number): void {
@@ -877,7 +973,7 @@ export class SharedObjectsReplica {
       const problems = objectProblems(task, id);
       if (problems.length > 0) throw new ProfileError(problems);
       return this.#commit(intent.intent, [id], (d) => {
-        (d.objects as AMap)[id] = scalarize(task); // §53: the whole Task in one change
+        (d.objects as AMap)[id] = scalarize(task, 0); // §53: the whole Task in one change (the object map is depth 0)
       });
     }
 
@@ -923,8 +1019,10 @@ export class SharedObjectsReplica {
     const bytes = A.getLastLocalChange(next);
     if (bytes === undefined) throw new Error("Automerge made no local change");
     let checked: CheckedChange;
+    let created: Map<string, number>;
     try {
       checked = checkChange(bytes);
+      created = this.#createdDepths(checked, new Map());
     } catch (e) {
       // §11.1: a writer never emits a change over the limits. The handle
       // this replica held is outdated by A.change: rebuild it without the change.
@@ -945,6 +1043,7 @@ export class SharedObjectsReplica {
       );
     this.#doc = next;
     this.#noteSeq(checked.actor, checked.seq);
+    for (const [id, d] of created) this.#depths.set(id, d);
     return Object.freeze({
       intent: message,
       change: checked.bytes,
@@ -1005,6 +1104,7 @@ export class SharedObjectsReplica {
     const seqs = new Map<string, number>();
     const latest = (actor: string) => seqs.get(actor) ?? this.#seqs.get(actor) ?? 0;
     const admitted: CheckedChange[] = [];
+    const batchDepths = new Map<string, number>();
     const duplicates: CheckedChange[] = [];
     const done = all.map(() => false);
     const ready = all.flatMap((_, i) => (blocking[i] === 0 && !unreachable[i] ? [i] : []));
@@ -1041,6 +1141,15 @@ export class SharedObjectsReplica {
         });
         continue;
       } else {
+        // §11.2: the depths of the objects it creates, given the document and the batch so far.
+        let created: Map<string, number>;
+        try {
+          created = this.#createdDepths(c, batchDepths);
+        } catch (e) {
+          refused.push({ change: c, error: e as LfcpError });
+          continue;
+        }
+        for (const [id, d] of created) batchDepths.set(id, d);
         seqs.set(c.actor, c.seq);
         admitted.push(c);
       }
@@ -1057,6 +1166,7 @@ export class SharedObjectsReplica {
       if ("next" in batch) {
         this.#doc = batch.next;
         for (const c of admitted) this.#noteSeq(c.actor, c.seq);
+        for (const [id, d] of batchDepths) this.#depths.set(id, d);
       } else {
         this.#doc = batch.restored;
         applied = [];
@@ -1119,6 +1229,8 @@ export class SharedObjectsReplica {
         "INVALID_AUTOMERGE_BYTES",
         `actor ${change.actor} sequence ${change.seq} skips sequence ${(this.#seqs.get(change.actor) ?? 0) + 1} (§14.1)`,
       );
+    // §11.2: no object deeper than MAX_DOCUMENT_DEPTH, before the engine.
+    const created = this.#createdDepths(change, new Map());
     const before = A.getHeads(this.#doc);
     const applied = applyChecked(this.#doc, change.bytes);
     if ("error" in applied) {
@@ -1131,6 +1243,7 @@ export class SharedObjectsReplica {
     const next = applied.next;
     this.#doc = next;
     this.#noteSeq(change.actor, change.seq);
+    for (const [id, d] of created) this.#depths.set(id, d);
     return Object.freeze({
       status: "applied",
       change,

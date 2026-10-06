@@ -50,6 +50,12 @@ export const SNAPSHOT_LIMITS_FLOOR = Object.freeze({
 
 export type SnapshotLimits = typeof SNAPSHOT_LIMITS_FLOOR;
 
+/** §11.2: no object of a document is deeper than this (the root is depth 0). */
+export const MAX_DOCUMENT_DEPTH = 256;
+
+/** The operation actions that create an object (§11.2): makeMap, makeList, makeText, makeTable. */
+export const OBJECT_ACTIONS: ReadonlySet<number> = new Set([0, 2, 4, 6]);
+
 /** What a chunk expands to (for tests and diagnostics). */
 export interface ChunkExpansion {
   /** The largest value count of any column (a change's op count is its action column's). */
@@ -62,6 +68,8 @@ export interface ChunkExpansion {
   readonly columns: readonly { readonly spec: number; readonly rows: number }[];
   /** A change's other actors (hex), in order: actor index i + 1 (§11.1). Empty for a Snapshot. */
   readonly otherActors: readonly string[];
+  /** A Snapshot's deepest object (§11.2); 0 for a change (its depths depend on the document). */
+  readonly maxDepth: number;
 }
 
 const MAGIC = [0x85, 0x6f, 0x4a, 0x83];
@@ -313,6 +321,7 @@ export function checkChangeExpansion(bytes: Uint8Array): ChunkExpansion {
     columnBytes: tally.columnBytes,
     columns: Object.freeze(columns),
     otherActors: Object.freeze(otherActors.map(toHexString)),
+    maxDepth: 0,
   });
 }
 
@@ -345,6 +354,90 @@ function inflateCapped(input: Uint8Array, budget: number): Uint8Array {
   return out;
 }
 
+/** The values of an actor (1), integer (2) or delta (3) column: null for a null row. */
+function columnValues(type: number, data: Uint8Array): (number | null)[] {
+  const c = new Cursor(data);
+  const out: (number | null)[] = [];
+  let acc = 0;
+  const one = (): number => {
+    if (type === TYPE_DELTA) {
+      acc += c.sleb();
+      return acc;
+    }
+    return c.uleb();
+  };
+  while (!c.done) {
+    const header = c.sleb();
+    if (header > 0) {
+      if (type === TYPE_DELTA) {
+        const delta = c.sleb();
+        for (let i = 0; i < header; i++) {
+          acc += delta;
+          out.push(acc);
+        }
+      } else {
+        const v = c.uleb();
+        for (let i = 0; i < header; i++) out.push(v);
+      }
+    } else if (header < 0) for (let i = 0; i < -header; i++) out.push(one());
+    else {
+      const nulls = c.uleb();
+      for (let i = 0; i < nulls; i++) out.push(null);
+    }
+  }
+  return out;
+}
+
+/**
+ * §11.2: the deepest object of a document chunk, from its operation
+ * columns (object, operation ID, action), computed without recursion.
+ * Refuses an object deeper than MAX_DOCUMENT_DEPTH, a cycle, or an object
+ * written into one the document never created.
+ */
+function documentDepth(columns: ReadonlyMap<number, Uint8Array>): number {
+  const col = (spec: number) => {
+    const data = columns.get(spec);
+    return data === undefined ? [] : columnValues(spec & 7, data);
+  };
+  const action = col((4 << 4) | 2);
+  const objActor = col((0 << 4) | 1);
+  const objCtr = col((0 << 4) | 2);
+  const idActor = col((2 << 4) | 1);
+  const idCtr = col((2 << 4) | 3);
+  const ROOT = "_root";
+  const parent = new Map<string, string>();
+  action.forEach((a, i) => {
+    if (a === null || !OBJECT_ACTIONS.has(a)) return;
+    const id = `${idCtr[i]}@${idActor[i]}`;
+    const oc = objCtr[i] ?? null;
+    parent.set(id, oc === null ? ROOT : `${oc}@${objActor[i]}`);
+  });
+  const depth = new Map<string, number>([[ROOT, 0]]);
+  let deepest = 0;
+  for (const start of parent.keys()) {
+    const path: string[] = [];
+    let at = start;
+    while (!depth.has(at)) {
+      path.push(at);
+      if (path.length > MAX_DOCUMENT_DEPTH)
+        refuse(`an object is deeper than ${MAX_DOCUMENT_DEPTH} levels (§11.2)`);
+      const up = parent.get(at);
+      if (up === undefined)
+        refuse("an object is written into one the document never created (§11.2)");
+      at = up as string;
+    }
+    let d = depth.get(at) as number;
+    for (let k = path.length - 1; k >= 0; k--) {
+      d += 1;
+      if (d > MAX_DOCUMENT_DEPTH)
+        refuse(`an object is deeper than ${MAX_DOCUMENT_DEPTH} levels (§11.2)`);
+      depth.set(path[k] as string, d);
+    }
+    if (d > deepest) deepest = d;
+  }
+  return deepest;
+}
+
 /**
  * §13.1: checks a Snapshot's save (exactly one document chunk) against
  * `limits` (at least SNAPSHOT_LIMITS_FLOOR) before the engine sees it,
@@ -365,6 +458,7 @@ export function checkSnapshotExpansion(
   const opLimit = rowLimits(opMetas, limits);
   let inflated = 0;
   const columns: { spec: number; rows: number }[] = [];
+  const opData = new Map<number, Uint8Array>();
   for (const [m, limitOf] of [
     ...changeMetas.map((m) => [m, changeLimit] as const),
     ...opMetas.map((m) => [m, opLimit] as const),
@@ -376,7 +470,10 @@ export function checkSnapshotExpansion(
       refuse(`Snapshot columns hold more than ${limits.maxInflatedBytes} bytes`);
     const bounds = { actors, group: Number.POSITIVE_INFINITY, rows: limitOf(m.spec) };
     columns.push({ spec: m.spec, rows: countColumn(m.spec & 7, data, tally, bounds) });
+    if (limitOf === opLimit) opData.set(m.spec & ~DEFLATE_BIT, data);
   }
+  // §11.2: depths from the operation columns, once their sizes are known to be bounded.
+  const maxDepth = documentDepth(opData);
   tally.columnBytes = inflated;
   // The rest is the document's head indices.
   return Object.freeze({
@@ -386,5 +483,6 @@ export function checkSnapshotExpansion(
     columnBytes: tally.columnBytes,
     columns: Object.freeze(columns),
     otherActors: Object.freeze([]),
+    maxDepth,
   });
 }
