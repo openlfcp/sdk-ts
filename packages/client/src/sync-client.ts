@@ -205,7 +205,56 @@ export type SyncEvent =
       readonly resourceId?: ResourceId;
       readonly code: string;
       readonly message: string;
+    }
+  /**
+   * The server refused the Resource for good (see ResourceRefusal): it is
+   * CLOSED and is not opened again until open() is called for it.
+   */
+  | {
+      readonly type: "resource-refused";
+      readonly resourceId: ResourceId;
+      readonly refusal: ResourceRefusal;
     };
+
+/**
+ * Why a server will not sync a Resource with this session, from a NACK
+ * whose code no retry can change (TERMINAL_RESOURCE_CODES): the server does
+ * not host it (§41: purged, never hosted, a restored server), it was
+ * tombstoned (§24), the session Principal may not read it (§41, §84: never
+ * granted or revoked), or the request itself is not acceptable to it. The
+ * Resource stays CLOSED; open() asks again.
+ */
+export interface ResourceRefusal {
+  /** The §62 name, e.g. RESOURCE_NOT_HOSTED. */
+  readonly code: string;
+  /** The server's diagnostic, if any (never key material, §60). */
+  readonly diagnostic?: string;
+  /** The server that refused (the session URL). */
+  readonly url: string;
+  /** Which request was refused: "open", "control", "keys", "data-get", "data-have" or "snapshot". */
+  readonly request: string;
+}
+
+/**
+ * §62 codes that end syncing a Resource on this server when they refuse
+ * RESOURCE_OPEN or one of its reads (CONTROL_GET, KEY_PACKAGE_GET, DATA_GET,
+ * DATA_HAVE, SNAPSHOT_GET). Repeating the same request cannot change them:
+ * the server's hosting or the Resource's Control state must change first,
+ * and the application decides when to ask again. Every other code is
+ * transient for these requests (RATE_LIMITED, INTERNAL_ERROR, QUOTA_EXCEEDED,
+ * unknown codes) and is retried with the ReconnectPolicy's backoff, except
+ * where the request has its own fallback: KEY_PACKAGE_GET → KEY_BLOCKED,
+ * SNAPSHOT_GET → replaying the units (§29.2).
+ */
+export const TERMINAL_RESOURCE_CODES: ReadonlySet<string> = new Set([
+  "RESOURCE_NOT_HOSTED",
+  "RESOURCE_NOT_FOUND",
+  "RESOURCE_TOMBSTONED",
+  "AUTHORIZATION_FAILED",
+  "PROTOCOL_UNSUPPORTED",
+  "MALFORMED_MESSAGE",
+  "PROFILE_UNSUPPORTED",
+]);
 
 const NACK_NAME = new Map<bigint, string>(Object.entries(ERROR_CODE).map(([k, v]) => [v, k]));
 
@@ -262,6 +311,12 @@ interface ResourceContext {
    * server never pushes our own records back to us.
    */
   controlStale: boolean;
+  /** Refused for good by the server (TERMINAL_RESOURCE_CODES); cleared by open(). */
+  refusal: ResourceRefusal | null;
+  /** Transient refusals in a row, for the reopen backoff; reset on LIVE. */
+  refusedAttempt: number;
+  /** When to open again after a transient refusal (caller's clock), or null. */
+  reopenAt: number | null;
 }
 
 const SUBSCRIBE_DATA_AND_CONTROL = 0b11n;
@@ -366,6 +421,11 @@ export class SyncClient {
     return this.#resources.get(toHex(resource))?.state ?? "CLOSED";
   }
 
+  /** Why the server refused the Resource for good, or null (see ResourceRefusal). */
+  resourceRefusal(resource: ResourceId): ResourceRefusal | null {
+    return this.#resources.get(toHex(resource))?.refusal ?? null;
+  }
+
   /** Connects, and reconnects after losses (per the ReconnectPolicy) until stop(). */
   start(): void {
     if (this.#trapped) return;
@@ -408,10 +468,17 @@ export class SyncClient {
         covered: [],
         unitsSinceSnapshot: 0,
         lastRound: "",
+        refusal: null,
+        refusedAttempt: 0,
+        reopenAt: null,
       };
       this.#resources.set(key, ctx);
     }
     ctx.wanted = true;
+    // An explicit open asks the server again after a refusal.
+    ctx.refusal = null;
+    ctx.refusedAttempt = 0;
+    ctx.reopenAt = null;
     if (this.#connection.state === "READY")
       this.#serial(() => this.#sendOpen(ctx as ResourceContext));
   }
@@ -471,6 +538,14 @@ export class SyncClient {
     if (this.#connection.state === "READY") this.#expireRequests(now);
     this.#serial(async () => {
       for (const ctx of this.#resources.values()) {
+        if (
+          ctx.reopenAt !== null &&
+          now >= ctx.reopenAt &&
+          ctx.state === "CLOSED" &&
+          ctx.wanted &&
+          this.#connection.state === "READY"
+        )
+          await this.#sendOpen(ctx);
         if (ctx.state === "LIVE" && now - ctx.lastHave >= this.#antiEntropyMs)
           this.#sendHave(ctx, now);
         if (ctx.state === "KEY_BLOCKED" && now - ctx.lastKeyRequest >= this.#antiEntropyMs)
@@ -548,6 +623,7 @@ export class SyncClient {
     const next = resourcePhaseTransition(ctx.state, event);
     if (next === undefined) return false;
     ctx.state = next;
+    if (next === "LIVE") ctx.refusedAttempt = 0;
     this.#emit({ type: "resource-state", resourceId: ctx.binding.resourceId, state: next });
     if (next === "LIVE" && ctx.controlStale) {
       ctx.controlStale = false;
@@ -606,6 +682,7 @@ export class SyncClient {
     ctx.fetched = [];
     ctx.controlTarget = null;
     ctx.early = [];
+    ctx.reopenAt = null;
     this.#request(
       { kind: "open", resource: toHex(R) },
       createMessage("RESOURCE_OPEN", {
@@ -733,12 +810,54 @@ export class SyncClient {
       `${request.kind} refused${m.body.diagnostic ? `: ${m.body.diagnostic}` : ""}`,
       ctx?.binding.resourceId,
     );
-    if (ctx === undefined) return;
-    if (request.kind === "open") this.#move(ctx, "CLOSE");
+    if (ctx === undefined || request.kind === "close") return;
+    if (TERMINAL_RESOURCE_CODES.has(code)) {
+      this.#refuse(ctx, {
+        code,
+        url: this.#o.url,
+        request: request.kind,
+        ...(m.body.diagnostic === undefined ? {} : { diagnostic: m.body.diagnostic }),
+      });
+      return;
+    }
     if (request.kind === "keys") this.#keyBlocked(ctx);
     // A Snapshot is an optimization (§29.2): without it, replay the units.
-    if (request.kind === "snapshot" && ctx.snapshotPending)
-      this.#serial(() => this.#afterSnapshot(ctx));
+    else if (request.kind === "snapshot") {
+      if (ctx.snapshotPending) this.#serial(() => this.#afterSnapshot(ctx));
+    }
+    // A transient refusal of the open or of a sync round: the Resource
+    // would otherwise sit there until the next reconnect. Start over after
+    // a backoff. A refused DATA_HAVE is simply sent again (§69).
+    else if (request.kind !== "data-have") this.#retryLater(ctx);
+  }
+
+  /** The server refused the Resource for good: CLOSED, not reopened until open() asks again. */
+  #refuse(ctx: ResourceContext, refusal: ResourceRefusal): void {
+    const subscribed = ctx.state !== "CLOSED" && ctx.state !== "OPENING";
+    ctx.wanted = false;
+    ctx.reopenAt = null;
+    ctx.refusal = Object.freeze(refusal);
+    // Stop any pushes the server may still send for it (§43).
+    if (subscribed && this.#connection.state === "READY")
+      this.#request(
+        { kind: "close", resource: toHex(ctx.binding.resourceId) },
+        createMessage("RESOURCE_CLOSE", { resourceId: ctx.binding.resourceId }),
+      );
+    this.#move(ctx, "CLOSE");
+    this.#emit({ type: "resource-refused", resourceId: ctx.binding.resourceId, refusal });
+  }
+
+  /** CLOSED now, opened again after the ReconnectPolicy's delay for this Resource's attempt. */
+  #retryLater(ctx: ResourceContext): void {
+    if (ctx.state !== "CLOSED" && ctx.state !== "OPENING" && this.#connection.state === "READY")
+      this.#request(
+        { kind: "close", resource: toHex(ctx.binding.resourceId) },
+        createMessage("RESOURCE_CLOSE", { resourceId: ctx.binding.resourceId }),
+      );
+    this.#move(ctx, "CLOSE");
+    ctx.refusedAttempt += 1;
+    const delay = (this.#o.reconnect ?? defaultReconnect)(ctx.refusedAttempt);
+    ctx.reopenAt = delay === null ? null : this.#o.now() + delay;
   }
 
   // -------------------------------------------------------------------------

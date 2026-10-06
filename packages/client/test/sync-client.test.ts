@@ -869,7 +869,7 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     ).toBe(true);
   });
 
-  it("surfaces a refused RESOURCE_OPEN and leaves the Resource CLOSED", async () => {
+  it("RESOURCE_NOT_HOSTED is a terminal refusal: CLOSED, an event, no retry until open() asks again (POST-017)", async () => {
     const server = new FakeServer();
     const clock = { t: 0 };
     const chain = chainFor(206);
@@ -883,9 +883,121 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     await settle(200);
     await bob.sync.idle();
     expect(bob.sync.resourceState(chain.R)).toBe("CLOSED");
+    const refusal = {
+      code: "RESOURCE_NOT_HOSTED",
+      diagnostic: "not hosted",
+      url: "ws://127.0.0.1:1/v1/ws",
+      request: "open",
+    };
+    expect(bob.sync.resourceRefusal(chain.R)).toEqual(refusal);
+    expect(bob.events.filter((e) => e.type === "resource-refused")).toEqual([
+      { type: "resource-refused", resourceId: chain.R, refusal },
+    ]);
+    // The error event stays for applications that only log errors.
     expect(bob.events.find((e) => e.type === "error")).toMatchObject({
       code: "RESOURCE_NOT_HOSTED",
     });
+    // No retry on the clock …
+    for (let i = 0; i < 5; i++) {
+      clock.t += 60_000;
+      bob.sync.tick(clock.t);
+      await settle(20);
+    }
+    await bob.sync.idle();
+    expect(server.of("RESOURCE_OPEN")).toHaveLength(1);
+    // … nor after a reconnect.
+    server.current.drop();
+    await settle(50);
+    clock.t += 2000;
+    bob.sync.tick(clock.t);
+    await settle(200);
+    await bob.sync.idle();
+    expect(server.sockets).toHaveLength(2);
+    expect(bob.sync.connectionState).toBe("READY");
+    expect(server.of("RESOURCE_OPEN")).toHaveLength(1);
+    // An explicit open asks the server again.
+    bob.sync.open(bob.binding(chain.R));
+    expect(bob.sync.resourceRefusal(chain.R)).toBeNull();
+    await settle(200);
+    await bob.sync.idle();
+    expect(server.of("RESOURCE_OPEN")).toHaveLength(2);
+    expect(bob.sync.resourceRefusal(chain.R)).toEqual(refusal);
+  });
+
+  it("a transient refusal of the open is retried with backoff instead of waiting for a reconnect", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(208);
+    const bob = client(BOB, server, clock);
+    const codes = [22n, 17n, 6n]; // INTERNAL_ERROR, RATE_LIMITED, then RESOURCE_NOT_HOSTED
+    server.onMessage = (m, s) => {
+      if (m.type === "RESOURCE_OPEN") s.reply(m, "NACK", { code: codes.shift() ?? 6n });
+      return [];
+    };
+    bob.sync.open(bob.binding(chain.R));
+    bob.sync.start();
+    await settle(200);
+    await bob.sync.idle();
+    expect(server.of("RESOURCE_OPEN")).toHaveLength(1);
+    expect(bob.sync.resourceRefusal(chain.R)).toBeNull();
+    // Not before the backoff (the test policy: 1000 ms) …
+    clock.t += 500;
+    bob.sync.tick(clock.t);
+    await settle(50);
+    expect(server.of("RESOURCE_OPEN")).toHaveLength(1);
+    // … then again, on the same connection.
+    for (const expected of [2, 3]) {
+      clock.t += 1000;
+      bob.sync.tick(clock.t);
+      await settle(100);
+      await bob.sync.idle();
+      expect(server.of("RESOURCE_OPEN")).toHaveLength(expected);
+    }
+    expect(server.sockets).toHaveLength(1);
+    expect(bob.sync.resourceRefusal(chain.R)?.code).toBe("RESOURCE_NOT_HOSTED");
+    clock.t += 10_000;
+    bob.sync.tick(clock.t);
+    await settle(50);
+    expect(server.of("RESOURCE_OPEN")).toHaveLength(3);
+  });
+
+  it("AUTHORIZATION_FAILED on a read mid-sync (a revoked reader) refuses the Resource and closes it", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(209);
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    const v = chain.view();
+    const u = await createQueuedDataUnit(new InMemoryLfcpStorage(), {
+      view: v,
+      controlHead: v.state.head,
+      actor: OWNER.signer,
+      dek: DEK0,
+      profile: TEXT,
+      previousUnitId: null,
+      value: "hello",
+    });
+    hostOf(server, chain, [u.bytes]);
+    const host = server.onMessage;
+    server.onMessage = (m, s) => {
+      if (m.type !== "DATA_GET") return host(m, s);
+      s.reply(m, "NACK", { code: 4n });
+      return [];
+    };
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(200);
+    await owner.sync.idle();
+    expect(owner.sync.resourceState(chain.R)).toBe("CLOSED");
+    expect(owner.sync.resourceRefusal(chain.R)).toMatchObject({
+      code: "AUTHORIZATION_FAILED",
+      request: "data-get",
+    });
+    expect(server.of("RESOURCE_CLOSE")).toHaveLength(1);
+    clock.t += 120_000;
+    owner.sync.tick(clock.t);
+    await settle(50);
+    expect(server.of("RESOURCE_OPEN")).toHaveLength(1);
   });
 
   it("names the §62 code of a refused RESOURCE_HOST", async () => {

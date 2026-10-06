@@ -89,9 +89,11 @@ export {
   defaultReconnect,
   type ReconnectPolicy,
   type ResourceBinding,
+  type ResourceRefusal,
   type SnapshotBinding,
   SyncClient,
   type SyncClientOptions,
   type SyncEvent,
   startSyncDriver,
+  TERMINAL_RESOURCE_CODES,
 } from "./sync-client.js";
