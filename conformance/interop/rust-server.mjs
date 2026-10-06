@@ -105,6 +105,11 @@ export async function startRustServer() {
       `state_dir = ${JSON.stringify(join(dir, "state"))}`,
       `public_urls = [${JSON.stringify(url)}]`,
       "heartbeat_ms = 5000",
+      // Every test client is 127.0.0.1, and a test file shares one server:
+      // the server's per-IP connection rate and its new Resources per IP
+      // per day (POST-003) would refuse the suite, not a client.
+      "connections_per_ip_per_minute = 0",
+      "hosts_per_ip_per_day = 0",
       `log_level = "debug"`,
       "",
     ].join("\n"),
