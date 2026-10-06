@@ -12,7 +12,8 @@
 // 4. Each packed package.json: the release version, every @openlfcp/*
 //    dependency rewritten from workspace:^ to ^<version> (or the exact
 //    version), no "workspace:" left, publishConfig { access public, tag
-//    next }, license, repository and engines set.
+//    "latest" for a final version, "next" for a prerelease }, license,
+//    repository and engines set.
 // 5. The eight tarballs installed into a fresh project with npm (from the
 //    tarball files; --prefer-offline uses the npm cache for third-party
 //    dependencies), then every package imported in Node ESM, with a small
@@ -55,6 +56,8 @@ export const PUBLISH_ORDER = [
 const VERSION = JSON.parse(
   readFileSync(join(root, "packages", "core", "package.json"), "utf8"),
 ).version;
+/** The dist-tag: `next` for a prerelease (`0.1.0-rc.1`), `latest` for a final release. */
+const DIST_TAG = VERSION.includes("-") ? "next" : "latest";
 const failures = [];
 const fail = (what) => {
   failures.push(what);
@@ -197,7 +200,8 @@ try {
       if (dep.startsWith("@openlfcp/") && range !== `^${version}` && range !== version)
         fail(`${where}: ${dep} is "${range}", expected "^${version}"`);
     if (m.publishConfig?.access !== "public") fail(`${where}: publishConfig.access is not public`);
-    if (m.publishConfig?.tag !== "next") fail(`${where}: publishConfig.tag is not "next"`);
+    if (m.publishConfig?.tag !== DIST_TAG)
+      fail(`${where}: publishConfig.tag is not "${DIST_TAG}" (version ${m.version})`);
     if (m.license !== "Apache-2.0") fail(`${where}: license ${m.license}`);
     if (m.repository?.directory !== `packages/${name}`) fail(`${where}: repository.directory`);
     if (m.engines?.node === undefined) fail(`${where}: engines.node is missing`);
@@ -250,6 +254,7 @@ try {
   console.log(
     `  total ${(total / 1024).toFixed(1)} KiB; publish order: ${PUBLISH_ORDER.join(" → ")}`,
   );
+  console.log(`  version ${VERSION}, dist-tag ${DIST_TAG}`);
 } catch (e) {
   fail(e.stderr ? `${e.message}\n${e.stderr}` : String(e.message ?? e));
 } finally {

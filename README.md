@@ -210,11 +210,13 @@ building or testing a consumer, and again after changing the SDK.
 ## Publication
 
 The packages are named `@openlfcp/*` from the start, but they are published
-to npm only at milestones, as `0.x` versions under the `next` dist-tag. The
-project owner does this. The repository has no publish script or CI publish
-job.
+to npm only at milestones, as `0.x` versions. A release candidate (a
+prerelease version such as `0.1.0-rc.1`) goes under the `next` dist-tag, a
+final release (such as `0.1.0`) under `latest`. The project owner does this.
+The repository has no publish script or CI publish job.
 
-Every package carries `publishConfig.tag: "next"`, its own LICENSE and a
+Every package carries `publishConfig.tag` (`latest` for a final release,
+`next` for a prerelease), its own LICENSE and a
 README, and publishes only `dist/` (JavaScript and type declarations, no
 source maps). Before a publish, `pnpm release:check`
 (`scripts/release-check.mjs`) verifies the release locally and offline-capable:
