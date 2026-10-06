@@ -1,15 +1,31 @@
 {
   "name": "@openlfcp/core",
-  "version": "0.0.0",
+  "version": "0.1.0-rc.1",
   "description": "Identifiers, shared protocol types, errors and byte helpers for LFCP.",
+  "keywords": [
+    "openlfcp",
+    "lfcp",
+    "local-first",
+    "end-to-end-encryption",
+    "identifiers",
+    "errors",
+    "bytes"
+  ],
   "license": "Apache-2.0",
+  "homepage": "https://github.com/openlfcp/sdk-ts/tree/main/packages/core#readme",
+  "bugs": {
+    "url": "https://github.com/openlfcp/sdk-ts/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/openlfcp/sdk-ts.git",
+    "url": "https://github.com/openlfcp/sdk-ts.git",
     "directory": "packages/core"
   },
   "type": "module",
   "sideEffects": false,
+  "engines": {
+    "node": ">=24"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -17,9 +33,12 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.map",
+    "!dist/**/*.tsbuildinfo"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "tag": "next"
   }
 }

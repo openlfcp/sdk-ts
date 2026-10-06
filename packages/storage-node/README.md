@@ -14,6 +14,14 @@ on it. The Obsidian plugin does not use it: Obsidian has its own adapter
 (LFCP-059), which runs the same contract suite (`runStorageContract` from
 `@openlfcp/storage/contract`).
 
+## Scope
+
+Part of the OpenLFCP TypeScript SDK, which implements the OpenLFCP MVP 0.1
+subset of [LFCP-WIRE-01](https://github.com/openlfcp/spec/blob/main/wire/LFCP-WIRE-01.md)
+at `mvp-0.1-baseline.8`, not every deferred WIRE-01 feature. It does not
+claim full LFCP-WIRE-01 conformance. This is a release candidate
+(`0.1.0-rc.1`, npm dist-tag `next`): APIs may still change.
+
 ## SQLite
 
 ```ts
@@ -80,3 +88,13 @@ against SQLite and the file store. `test/crash.test.ts` kills a writing child
 process with `SIGKILL` and checks the reopened database: no sequence reuse, no
 torn batch, every committed batch present. Every test uses its own temporary
 directory and deletes it.
+
+## Links
+
+- Specification: [openlfcp/spec](https://github.com/openlfcp/spec)
+- Source and the other SDK packages: [openlfcp/sdk-ts](https://github.com/openlfcp/sdk-ts)
+- Issues: [openlfcp/sdk-ts/issues](https://github.com/openlfcp/sdk-ts/issues)
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

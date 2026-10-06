@@ -16,6 +16,14 @@ The TypeScript implementation of
 LFCP verification, decryption and authorization happen before a change
 reaches the replica (§95). The replica has no Markdown or editor concepts.
 
+## Scope
+
+Part of the OpenLFCP TypeScript SDK, which implements the OpenLFCP MVP 0.1
+subset of [LFCP-WIRE-01](https://github.com/openlfcp/spec/blob/main/wire/LFCP-WIRE-01.md)
+at `mvp-0.1-baseline.8`, not every deferred WIRE-01 feature. It does not
+claim full LFCP-WIRE-01 conformance. This is a release candidate
+(`0.1.0-rc.1`, npm dist-tag `next`): APIs may still change.
+
 ## Automerge and WebAssembly
 
 The package depends on `@automerge/automerge` **3.5.0**, pinned exactly,
@@ -71,3 +79,13 @@ section and decision ID:
   actor; any other is `PROFILE_INVALID` / `CHANGE_ACTOR_MISMATCH`.
 - **SOG-2** (§74.1): one diagnostic per field value, the first in the table's
   order, with `IMMUTABLE_FIELD_MUTATED` last (`firstPerField`).
+
+## Links
+
+- Specification: [openlfcp/spec](https://github.com/openlfcp/spec)
+- Source and the other SDK packages: [openlfcp/sdk-ts](https://github.com/openlfcp/sdk-ts)
+- Issues: [openlfcp/sdk-ts/issues](https://github.com/openlfcp/sdk-ts/issues)
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

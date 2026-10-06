@@ -18,6 +18,14 @@ The application names the database. Use one per client install: an IndexedDB
 origin is often shared (all Obsidian vaults share `app://obsidian.md`), and two
 installs must never share sequence counters.
 
+## Scope
+
+Part of the OpenLFCP TypeScript SDK, which implements the OpenLFCP MVP 0.1
+subset of [LFCP-WIRE-01](https://github.com/openlfcp/spec/blob/main/wire/LFCP-WIRE-01.md)
+at `mvp-0.1-baseline.8`, not every deferred WIRE-01 feature. It does not
+claim full LFCP-WIRE-01 conformance. This is a release candidate
+(`0.1.0-rc.1`, npm dist-tag `next`): APIs may still change.
+
 ## Guarantees
 
 - **Atomicity.** One `commit()` is one readwrite transaction over every object
@@ -63,3 +71,13 @@ there: secrets belong in a `SecretStore`.
   writer.
 - **Plaintext.** Profile checkpoints are plaintext CRDT state. They are
   protected at rest only by the runtime's profile directory.
+
+## Links
+
+- Specification: [openlfcp/spec](https://github.com/openlfcp/spec)
+- Source and the other SDK packages: [openlfcp/sdk-ts](https://github.com/openlfcp/sdk-ts)
+- Issues: [openlfcp/sdk-ts/issues](https://github.com/openlfcp/sdk-ts/issues)
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

@@ -1,15 +1,33 @@
 {
   "name": "@openlfcp/crypto",
-  "version": "0.0.0",
-  "description": "Thin wrapper over audited primitives (SHA-256, Ed25519, X25519, HKDF, ChaCha20-Poly1305, HPKE) for LFCP; the only package that uses @noble/*.",
+  "version": "0.1.0-rc.1",
+  "description": "The cryptography of LFCP (SHA-256, Ed25519, X25519, HKDF, ChaCha20-Poly1305, HPKE) on audited primitives (@noble, hpke).",
+  "keywords": [
+    "openlfcp",
+    "lfcp",
+    "local-first",
+    "end-to-end-encryption",
+    "ed25519",
+    "x25519",
+    "hpke",
+    "chacha20-poly1305",
+    "cryptography"
+  ],
   "license": "Apache-2.0",
+  "homepage": "https://github.com/openlfcp/sdk-ts/tree/main/packages/crypto#readme",
+  "bugs": {
+    "url": "https://github.com/openlfcp/sdk-ts/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/openlfcp/sdk-ts.git",
+    "url": "https://github.com/openlfcp/sdk-ts.git",
     "directory": "packages/crypto"
   },
   "type": "module",
   "sideEffects": false,
+  "engines": {
+    "node": ">=24"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -17,10 +35,13 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.map",
+    "!dist/**/*.tsbuildinfo"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "tag": "next"
   },
   "dependencies": {
     "@noble/ciphers": "^2.4.0",

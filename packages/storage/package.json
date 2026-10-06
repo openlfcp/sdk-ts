@@ -1,15 +1,30 @@
 {
   "name": "@openlfcp/storage",
-  "version": "0.0.0",
+  "version": "0.1.0-rc.1",
   "description": "Storage interfaces for LFCP clients (no adapters).",
+  "keywords": [
+    "openlfcp",
+    "lfcp",
+    "local-first",
+    "end-to-end-encryption",
+    "storage",
+    "persistence"
+  ],
   "license": "Apache-2.0",
+  "homepage": "https://github.com/openlfcp/sdk-ts/tree/main/packages/storage#readme",
+  "bugs": {
+    "url": "https://github.com/openlfcp/sdk-ts/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/openlfcp/sdk-ts.git",
+    "url": "https://github.com/openlfcp/sdk-ts.git",
     "directory": "packages/storage"
   },
   "type": "module",
   "sideEffects": false,
+  "engines": {
+    "node": ">=24"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -21,10 +36,13 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.map",
+    "!dist/**/*.tsbuildinfo"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "tag": "next"
   },
   "dependencies": {
     "@openlfcp/core": "workspace:^"
