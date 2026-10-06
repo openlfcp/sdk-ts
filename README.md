@@ -167,7 +167,10 @@ target directory (`$LFCP_SERVER_TARGET_DIR`), starts it on a temporary
 state directory, and is skipped, saying why, when cargo or the checkout
 is missing. With `LFCP_REQUIRE_LIVE=1` a missing cargo or checkout fails
 the run instead (cargo is often not on the default `PATH`; on macOS add
-`~/.rustup/toolchains/stable-aarch64-apple-darwin/bin`).
+`~/.rustup/toolchains/stable-aarch64-apple-darwin/bin`). `server.lock`
+pins the server commit these live tests run against; CI checks out that
+commit, and sdk-rs at the server's own `sdk-rs.lock`, and runs them with
+`LFCP_REQUIRE_LIVE=1`.
 `rust-server-invite.test.ts` runs the LFCP-053 invitation flow
 the same way: invite, claim and sync as the claimant, and every other claim
 refused. `rust-server-restart.test.ts` (LFCP-038) runs a client in a child
