@@ -211,6 +211,22 @@ to npm only at milestones, as `0.x` versions under the `next` dist-tag. The
 project owner does this. The repository has no publish script or CI publish
 job.
 
+Every package carries `publishConfig.tag: "next"`, its own LICENSE and a
+README, and publishes only `dist/` (JavaScript and type declarations, no
+source maps). Before a publish, `pnpm release:check`
+(`scripts/release-check.mjs`) verifies the release locally and offline-capable:
+
+- a clean build in a fresh copy;
+- `pnpm pack` of every package, with only allowed files in each tarball;
+- the rewritten `@openlfcp/*` dependency ranges;
+- an install of all eight tarballs into a fresh project, with a smoke import
+  and a round trip;
+- tarball sizes.
+
+It publishes nothing. Packages are published in dependency order: core →
+crypto → storage → wire → storage-node → storage-idb → shared-objects →
+client. The owner's step-by-step is `.github: docs/release/npm-publish-checklist.md`.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).

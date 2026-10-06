@@ -15,7 +15,8 @@
     "test": "vitest run",
     "test:conformance": "vitest run conformance/",
     "lint": "biome check . && node scripts/check-boundaries.mjs && node scripts/check-boundaries.mjs --self-test",
-    "format": "biome check --write ."
+    "format": "biome check --write .",
+    "release:check": "node scripts/release-check.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.15",
