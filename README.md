@@ -235,6 +235,7 @@ source maps). Before a publish, `pnpm release:check`
 It publishes nothing. Packages are published in dependency order: core →
 crypto → storage → wire → storage-node → storage-idb → shared-objects →
 client. The owner's step-by-step is `.github: docs/release/npm-publish-checklist.md`.
+What each release changed: [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
