@@ -3,7 +3,7 @@
 An LFCP client on top of the other packages: the WebSocket session (`SyncClient`), Control and Data Plane synchronization, the outbound queue, applying received units to a Data Profile (`DataUnitApplier`) with the crash-loop breaker, invitations, Snapshots and storage helpers.
 
 ```sh
-npm install @openlfcp/client@next
+npm install @openlfcp/client
 ```
 
 ESM only; Node.js 24 or later (browsers and Electron for every package except `@openlfcp/storage-node`).

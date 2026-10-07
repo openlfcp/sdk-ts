@@ -3,7 +3,7 @@
 Identifiers, shared protocol types, errors and byte helpers used by every other `@openlfcp/*` package: Resource, Principal, Control Record and Data Unit IDs, uint64 sequences and epochs, `LfcpError` with the LFCP wire codes, hex and base64url helpers.
 
 ```sh
-npm install @openlfcp/core@next
+npm install @openlfcp/core
 ```
 
 ESM only; Node.js 24 or later (browsers and Electron for every package except `@openlfcp/storage-node`).

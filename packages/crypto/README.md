@@ -3,7 +3,7 @@
 The cryptography of LFCP on audited primitives: SHA-256, Ed25519 signatures (strict verification), X25519, HKDF, ChaCha20-Poly1305 and HPKE for Key Packages, Resource DEKs and their commitments. It is the only package that uses `@noble/*` and `hpke` directly.
 
 ```sh
-npm install @openlfcp/crypto@next
+npm install @openlfcp/crypto
 ```
 
 ESM only; Node.js 24 or later (browsers and Electron for every package except `@openlfcp/storage-node`).

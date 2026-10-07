@@ -3,7 +3,7 @@
 LFCP-WIRE-01 structures and codecs: deterministic CBOR (`@openlfcp/wire/cbor`), COSE_Sign1, Principal Descriptors, Control Records and chain validation, Data Units, Key Packages, Snapshots, invitations and the wire messages with the session handshake.
 
 ```sh
-npm install @openlfcp/wire@next
+npm install @openlfcp/wire
 ```
 
 ESM only; Node.js 24 or later (browsers and Electron for every package except `@openlfcp/storage-node`).

@@ -3,7 +3,7 @@
 The storage interfaces of an LFCP client (`LfcpStorage`, `SecretStore`, sequence reservations), an in-memory implementation for tests and development, and the shared contract test suite (`@openlfcp/storage/contract`) every adapter passes. Durable adapters: `@openlfcp/storage-node` (SQLite) and `@openlfcp/storage-idb` (IndexedDB).
 
 ```sh
-npm install @openlfcp/storage@next
+npm install @openlfcp/storage
 ```
 
 ESM only; Node.js 24 or later (browsers and Electron for every package except `@openlfcp/storage-node`).
