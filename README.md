@@ -175,6 +175,10 @@ the run instead (cargo is often not on the default `PATH`; on macOS add
 pins the server commit these live tests run against; CI checks out that
 commit, and sdk-rs at the server's own `sdk-rs.lock`, and runs them with
 `LFCP_REQUIRE_LIVE=1`.
+No server outlives its test process: `conformance/interop/reaper.mjs`
+kills it when the process exits, and a watchdog `sh` started with it kills
+it and removes its directory when the process is SIGKILLed or crashes
+(POSIX only; `rust-server-orphan.test.ts` checks this).
 `rust-server-invite.test.ts` runs the LFCP-053 invitation flow
 the same way: invite, claim and sync as the claimant, and every other claim
 refused. `rust-server-restart.test.ts` (LFCP-038) runs a client in a child

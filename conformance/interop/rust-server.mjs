@@ -9,6 +9,9 @@
 // startRustServer resolves { skip: "<why>" } and the test is skipped,
 // unless LFCP_REQUIRE_LIVE=1: then it throws, so a gate that must run the
 // live tests cannot pass by skipping them.
+//
+// Each server is guarded (reaper.mjs): if the test process dies without
+// stopping it, the server is killed and its directory removed.
 
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -16,6 +19,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ROOT } from "../spec.mjs";
+import { guardChild } from "./reaper.mjs";
 
 const SERVER_DIR = resolve(ROOT, process.env.LFCP_SERVER_DIR ?? "../server");
 const TARGET_DIR =
@@ -116,10 +120,12 @@ export async function startRustServer() {
   );
   let log = "";
   let child;
+  let release = () => {};
   const spawnServer = async () => {
     child = spawn(built.bin, ["--config", join(dir, "server.toml")], {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    release = guardChild(child, [dir]);
     child.stdout.on("data", (d) => {
       log += d.toString();
     });
@@ -133,6 +139,7 @@ export async function startRustServer() {
       ? Promise.resolve()
       : new Promise((r) => c.once("exit", () => r(undefined)));
   if (!(await spawnServer())) {
+    release();
     child.kill("SIGKILL");
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`the Rust server did not become healthy:\n${log.slice(-2000)}`);
@@ -140,21 +147,27 @@ export async function startRustServer() {
   return {
     url,
     stateDir: join(dir, "state"),
+    get pid() {
+      return child.pid;
+    },
     files: () => readTree(join(dir, "state")),
     log: () => log,
     kill: async () => {
       const c = child;
+      release();
       if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
       await exited(c);
     },
     restart: async () => {
       const c = child;
+      release();
       if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
       await exited(c);
       if (!(await spawnServer()))
         throw new Error(`the Rust server did not restart:\n${log.slice(-2000)}`);
     },
     stop: async () => {
+      release();
       if (child.exitCode === null && child.signalCode === null) {
         child.kill("SIGTERM");
         await new Promise((r) => {

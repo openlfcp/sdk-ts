@@ -5,6 +5,8 @@ export interface RunningRustServer {
   readonly url: string;
   /** The server's state directory (its database and any other files it persists). */
   readonly stateDir: string;
+  /** The running server's process ID (a new one after restart). */
+  readonly pid: number;
   /** Every file under the state directory now, with its bytes (database, WAL, SHM, …). */
   files(): { readonly path: string; readonly bytes: Uint8Array }[];
   /** Everything the server logged so far (debug level: message types and codes, never payloads). */
