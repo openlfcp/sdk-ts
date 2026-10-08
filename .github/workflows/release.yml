@@ -84,11 +84,22 @@ jobs:
             (cd "packages/$p" && pnpm pack --pack-destination "$RUNNER_TEMP/tarballs")
           done
           ls -l "$RUNNER_TEMP/tarballs"
+      # npm refuses even a dry run over a published version, so a version
+      # the registry already has is skipped, as the publish job skips it:
+      # a dispatch on main after a release, or a rerun after a partial
+      # publish, stays green.
       - name: npm publish --dry-run of each tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DIST_TAG: ${{ steps.version.outputs.dist-tag }}
         run: |
           for p in core crypto storage wire storage-node storage-idb shared-objects client; do
-            npm publish "$RUNNER_TEMP/tarballs/openlfcp-$p-${{ steps.version.outputs.version }}.tgz" \
-              --dry-run --tag "${{ steps.version.outputs.dist-tag }}" --access public
+            if npm view "@openlfcp/$p@$VERSION" version >/dev/null 2>&1; then
+              echo "::notice::@openlfcp/$p@$VERSION is already published: dry run skipped"
+              continue
+            fi
+            npm publish "$RUNNER_TEMP/tarballs/openlfcp-$p-$VERSION.tgz" \
+              --dry-run --tag "$DIST_TAG" --access public
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
