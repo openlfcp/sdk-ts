@@ -42,6 +42,15 @@ remove or rename any.
   stays as an anchor. A move under itself or a descendant, or after itself,
   is refused. SS09 (repeated moves) and SS02 (concurrent inserts, merged)
   reach their reference states.
+- `tree()` on `SectionReplica` and `SectionDocument`, and `deriveTree`
+  (LFCP-02-014): the effective tree of a section and its structural facts
+  (`PLACEMENT_CONFLICT` with its candidate placements, `PARENT_CYCLE`,
+  `BLOCKED_PARENT`, `LIFECYCLE_CONFLICT`), hidden nodes and the
+  classification, computed iteratively; every case of the corpus matches.
+  `node.resolve_placement` and `structure.resolve` write explicit
+  resolutions (SS15 and SS26 reach their reference states); `node.move` on
+  a conflicted node is refused with `NODE_IN_CONFLICT`, and an intent
+  naming no node with `UNKNOWN_NODE`.
 
 ## 0.1.3 — 2026-10-08
 
