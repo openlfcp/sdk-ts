@@ -498,9 +498,9 @@ describe("authoring the shared sections corpus (LFCP-02-012)", () => {
         r.commit(edit(para, 14 + at, 0, inserted.slice(at, at + 8192).join(""))(r));
       expect(r.changes()).toHaveLength(2 + 3);
       expect(canonical(r.toJSON() as Json)).toEqual(canonical(ref as unknown as Json));
-      expect(() => r.commit(edit(para, 0, 0, long(8193))(r))).toThrow(
-        expect.objectContaining({ code: "OVER_BUDGET" }),
-      );
+      // One edit over the Text budget is written in runs, one change each (§12.3).
+      const c = r.commit(edit(para, 0, 0, long(8193))(r));
+      expect(c?.parts).toHaveLength(2);
     });
   });
 });

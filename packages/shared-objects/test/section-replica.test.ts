@@ -354,7 +354,7 @@ describe("SectionReplica: refusals before commit (SDK-SECTIONS-INTEGRATION-01 §
     );
   });
 
-  it("refuses a batch over the §16.2 node budget", () => {
+  it("splits a batch over the §16.2 node budget into several changes, one batch (§12)", () => {
     const r = built();
     const many: SectionIntent[] = Array.from(
       { length: AUTHORING_BUDGET.createdNodes + 1 },
@@ -367,8 +367,61 @@ describe("SectionReplica: refusals before commit (SDK-SECTIONS-INTEGRATION-01 §
         createdBy: alice,
       }),
     );
-    const e = refusal(() => r.commit(many));
-    expect([e.code, e.intentIndex]).toEqual(["OVER_BUDGET", AUTHORING_BUDGET.createdNodes]);
+    const c = r.commit(many);
+    expect(c?.parts).toHaveLength(2);
+    expect(c?.hash).toBe(c?.parts.at(-1)?.hash);
+    expect(c?.affectedNodeIds).toHaveLength(AUTHORING_BUDGET.createdNodes + 1);
+    const other = SectionReplica.empty({ resource, principal: bob });
+    expect(other.receiveChanges(r.changes()).refused).toEqual([]);
+    expect(other.revision()).toBe(r.revision());
+  });
+
+  it("writes a long text in runs within the Text budget (§12.3)", () => {
+    const r = built();
+    const long = "ж".repeat(20_000);
+    const c = r.commit([
+      {
+        intent: "paragraph.create",
+        id: id(1500),
+        parent: SECTION,
+        after: null,
+        text: long,
+        createdBy: alice,
+      },
+    ]);
+    expect(c?.parts).toHaveLength(3);
+    expect(view(r).nodes[id(1500)]?.text).toBe(long);
+    const e = r.commit([
+      {
+        intent: "text.edit",
+        id: P,
+        base: r.revision(),
+        edits: [{ index: 5, deleteCount: 1, insert: "😀".repeat(9000) }],
+      },
+    ]);
+    expect(e?.parts).toHaveLength(2);
+    expect(view(r).nodes[P]?.text).toBe(`Draft${"😀".repeat(9000)}contract`);
+    expect(
+      SectionReplica.empty({ resource, principal: bob }).receiveChanges(r.changes()).refused,
+    ).toEqual([]);
+  });
+
+  it("writes ready only in the last change of an import (§12.1)", () => {
+    const r = SectionReplica.empty({ resource, principal: alice });
+    const tasks: SectionIntent[] = Array.from({ length: 300 }, (_, k) => ({
+      intent: "task.create_in_section",
+      task: task(id(3000 + k), `Task ${k}`),
+      parent: SECTION,
+      after: null,
+    }));
+    const c = r.commit([create, ...tasks]);
+    expect(c?.parts.length).toBe(2);
+    const first = SectionReplica.empty({ resource, principal: bob });
+    first.receiveChanges([c?.parts[0]?.change as Uint8Array]);
+    expect(first.validate().state).toBe("importing");
+    first.receiveChanges([c?.parts[1]?.change as Uint8Array]);
+    expect(first.validate().state).toBe("ready");
+    expect(first.tree().tree).toHaveLength(300);
   });
 });
 

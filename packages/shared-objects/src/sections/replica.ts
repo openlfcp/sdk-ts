@@ -207,6 +207,70 @@ interface BatchState {
   v?: SectionValidation | undefined;
   /** Nodes whose ancestor chain to the section is verified eligible in this batch. */
   readonly chainOk: Set<string>;
+  /** §12.3: where a run of a long Text edit continues, per node (a UTF-16 index). */
+  readonly cursor: Map<string, number>;
+}
+
+/** §12.3: the next run of a long Text edit, at the node's cursor in this batch. Internal. */
+interface TextContinue {
+  readonly intent: "text.continue";
+  readonly id: string;
+  readonly deleteCount: number;
+  readonly insert: string;
+}
+type Step = SectionIntent | TextContinue;
+
+/**
+ * §12, §12.3: splits what one change cannot carry. A Text edit or a new
+ * node's text over the Text budget continues in runs at its cursor; a
+ * batch that creates the section writes `ready` in its last change
+ * (§12.1), whatever number of changes it becomes.
+ */
+function expand(intents: readonly SectionIntent[]): Step[] {
+  const LIMIT = AUTHORING_BUDGET.textOperations;
+  const runs = (id: string, deleteCount: number, insert: string[]): TextContinue[] => {
+    const out: TextContinue[] = [];
+    for (let left = deleteCount; left > 0; left -= LIMIT)
+      out.push({ intent: "text.continue", id, deleteCount: Math.min(left, LIMIT), insert: "" });
+    for (let at = 0; at < insert.length; at += LIMIT)
+      out.push({
+        intent: "text.continue",
+        id,
+        deleteCount: 0,
+        insert: insert.slice(at, at + LIMIT).join(""),
+      });
+    return out;
+  };
+  const out: Step[] = [];
+  let ready = false;
+  for (const intent of intents) {
+    if (intent.intent === "section.create" && intent.ready !== false) {
+      out.push({ ...intent, ready: false });
+      ready = true;
+    } else if (intent.intent === "text.edit" && intent.edits.length === 1) {
+      const e = intent.edits[0] as TextEdit;
+      const insert = Array.from(e.insert);
+      if (e.deleteCount + insert.length <= LIMIT) out.push(intent);
+      else {
+        const d0 = Math.min(e.deleteCount, LIMIT);
+        const i0 = insert.slice(0, LIMIT - d0);
+        out.push({ ...intent, edits: [{ index: e.index, deleteCount: d0, insert: i0.join("") }] });
+        out.push(...runs(intent.id, e.deleteCount - d0, insert.slice(i0.length)));
+      }
+    } else if (
+      (intent.intent === "paragraph.create" ||
+        intent.intent === "item.create" ||
+        intent.intent === "raw.create") &&
+      typeof intent.text === "string" &&
+      Array.from(intent.text).length > LIMIT
+    ) {
+      const text = Array.from(intent.text);
+      out.push({ ...intent, text: text.slice(0, LIMIT).join("") });
+      out.push(...runs(intent.id, 0, text.slice(LIMIT)));
+    } else out.push(intent);
+  }
+  if (ready) out.push({ intent: "section.mark_ready" });
+  return out;
 }
 
 /** Intents after which every verified ancestor chain still holds. */
@@ -224,9 +288,25 @@ const KEEPS_CHAINS: ReadonlySet<string> = new Set([
 /** §16.2: what one change may carry. */
 export const AUTHORING_BUDGET = Object.freeze({ textOperations: 8192, createdNodes: 256 });
 
+/** One change of a batch, as its Data Unit carries it. */
+export interface SectionChangePart {
+  readonly change: Uint8Array;
+  /** The §11 Data Unit plaintext [1, change]. */
+  readonly plaintext: Uint8Array;
+  readonly hash: string;
+  readonly seq: number;
+}
+
+/**
+ * A committed batch. A batch over the §16.2 budgets is several changes
+ * (§12, §12.3): `parts`, in order, one Data Unit each; `change`, `hash`,
+ * `seq` and `plaintext` name the last of them (the only one, usually).
+ */
 export interface SectionLocalChange {
   /** The intents of the batch, by name. */
   readonly intents: readonly string[];
+  /** Every change of the batch, in order. */
+  readonly parts: readonly SectionChangePart[];
   readonly change: Uint8Array;
   /** The §11 Data Unit plaintext [1, change]. */
   readonly plaintext: Uint8Array;
@@ -635,64 +715,93 @@ export class SectionReplica {
       );
     if (A.getActorId(this.#doc) !== this.#actor)
       throw new Error("the document actor is not the §2 actor");
-    const writes: Write[] = [];
     const affected = new Set<string>();
     let scratch = A.clone(this.#doc);
-    const budget = { text: 0, nodes: 0 };
     // The validation of the document before the batch: nodes the batch
     // creates are valid by construction, so it is computed again only when
     // the batch changes the section itself (create, ready).
-    const state: BatchState = { chainOk: new Set() };
+    const state: BatchState = { chainOk: new Set(), cursor: new Map() };
     // structure.resolve is its moves, each one checked after the ones before it.
-    const steps = intents.flatMap((intent, i): [SectionIntent, number][] =>
+    const steps = expand(intents).flatMap((intent): Step[] =>
       intent.intent === "structure.resolve"
-        ? intent.moves.map((m) => [{ intent: "node.resolve_placement", ...m }, i])
-        : [[intent, i]],
+        ? intent.moves.map((m) => ({ intent: "node.resolve_placement", ...m }))
+        : [intent],
     );
-    steps.forEach(([intent, i]) => {
-      const write = this.#prepare(scratch, state, intent, i, affected, budget);
-      if (
-        budget.text > AUTHORING_BUDGET.textOperations ||
-        budget.nodes > AUTHORING_BUDGET.createdNodes
-      )
+    // §12, §16.2: each change carries at most the budgets; a batch over them
+    // is several changes, one after the other.
+    const chunks: Write[][] = [[]];
+    const used = { text: 0, nodes: 0 };
+    let i = -1;
+    for (const step of steps) {
+      if (step.intent !== "text.continue") i = Math.min(i + 1, intents.length - 1);
+      const cost = { text: 0, nodes: 0 };
+      const write = this.#prepare(scratch, state, step, i, affected, cost);
+      if (cost.text > AUTHORING_BUDGET.textOperations || cost.nodes > AUTHORING_BUDGET.createdNodes)
         throw new SectionIntentError(
           "OVER_BUDGET",
-          `the batch is over the §16.2 budgets (${budget.text} Text operations, ${budget.nodes} nodes)`,
+          `one intent is over the §16.2 budgets (${cost.text} Text operations, ${cost.nodes} nodes)`,
           i,
         );
+      const current = chunks[chunks.length - 1] as Write[];
+      if (
+        current.length > 0 &&
+        (used.text + cost.text > AUTHORING_BUDGET.textOperations ||
+          used.nodes + cost.nodes > AUTHORING_BUDGET.createdNodes)
+      ) {
+        chunks.push([write]);
+        used.text = cost.text;
+        used.nodes = cost.nodes;
+      } else {
+        current.push(write);
+        used.text += cost.text;
+        used.nodes += cost.nodes;
+      }
       scratch = A.change(scratch, { time: 0 }, write);
-      writes.push(write);
-      if (intent.intent === "section.create" || intent.intent === "section.mark_ready")
+      if (step.intent === "section.create" || step.intent === "section.mark_ready")
         state.v = undefined;
       // Only creations keep every verified ancestor chain as it was.
-      if (!KEEPS_CHAINS.has(intent.intent)) state.chainOk.clear();
-    });
+      if (!KEEPS_CHAINS.has(step.intent)) state.chainOk.clear();
+    }
 
     const message = intents.map((x) => x.intent).join(",");
     const before = A.getHeads(this.#doc);
     // On a clone: A.change outdates the handle it is given, and this
     // replica keeps its own until apply().
-    const next = A.change(A.clone(this.#doc, { actor: this.#actor }), { message, time: 0 }, (d) => {
-      for (const w of writes) w(d);
-    });
-    if (A.getHeads(next).join() === before.join()) return null;
-    const bytes = A.getLastLocalChange(next) as Uint8Array;
-    let checked: CheckedChange;
-    try {
-      checkChangeExpansion(bytes);
-      checked = checkChange(bytes);
-    } catch (e) {
-      throw new SectionIntentError(
-        "OVER_BUDGET",
-        `the batch is larger than one change may be (SOP §11.1: ${(e as Error).message})`,
+    let next = A.clone(this.#doc, { actor: this.#actor });
+    const parts: SectionChangePart[] = [];
+    for (const chunk of chunks) {
+      if (chunk.length === 0) continue;
+      const heads = A.getHeads(next).join();
+      next = A.change(next, { message, time: 0 }, (d) => {
+        for (const w of chunk) w(d);
+      });
+      if (A.getHeads(next).join() === heads) continue;
+      const bytes = A.getLastLocalChange(next) as Uint8Array;
+      let checked: CheckedChange;
+      try {
+        checkChangeExpansion(bytes);
+        checked = checkChange(bytes);
+      } catch (e) {
+        throw new SectionIntentError(
+          "OVER_BUDGET",
+          `a change of the batch is larger than one change may be (SOP §11.1: ${(e as Error).message})`,
+        );
+      }
+      parts.push(
+        Object.freeze({
+          change: checked.bytes,
+          plaintext: frameProfilePayload(checked.bytes),
+          hash: checked.hash,
+          seq: checked.seq,
+        }),
       );
     }
+    if (parts.length === 0 || A.getHeads(next).join() === before.join()) return null;
+    const last = parts[parts.length - 1] as SectionChangePart;
     const change: SectionLocalChange = Object.freeze({
       intents: Object.freeze(intents.map((x) => x.intent)),
-      change: checked.bytes,
-      plaintext: frameProfilePayload(checked.bytes),
-      hash: checked.hash,
-      seq: checked.seq,
+      parts: Object.freeze(parts),
+      ...last,
       affectedNodeIds: Object.freeze([...affected].sort()),
       modelRevision: revisionOf(next),
     });
@@ -707,8 +816,8 @@ export class SectionReplica {
         if (revisionOf(this.#doc) !== base)
           throw new Error("the replica changed since the batch was staged; stage it again");
         this.#doc = next;
-        if (this.#seqs !== undefined && checked.seq > (this.#seqs.get(checked.actor) ?? 0))
-          this.#seqs.set(checked.actor, checked.seq);
+        if (this.#seqs !== undefined && last.seq > (this.#seqs.get(this.#actor) ?? 0))
+          this.#seqs.set(this.#actor, last.seq);
         applied = true;
       },
       revert: () => {
@@ -729,7 +838,7 @@ export class SectionReplica {
   #prepare(
     doc: Doc,
     state: BatchState,
-    intent: SectionIntent,
+    intent: Step,
     i: number,
     affected: Set<string>,
     budget: { text: number; nodes: number },
@@ -883,6 +992,8 @@ export class SectionReplica {
       }
       budget.nodes += 1;
       affected.add(id);
+      // A long text continues in later runs (§12.3) from the end of this one.
+      if (!isTask) state.cursor.set(id, (intent as { text: string }).text.length);
       if (intent.parent === sectionId || state.chainOk.has(intent.parent)) state.chainOk.add(id);
       const parent = intent.parent;
       return (d) => {
@@ -903,6 +1014,21 @@ export class SectionReplica {
       };
     }
 
+    if (intent.intent === "text.continue") {
+      // §12.3: the next run of a long edit, where the previous one ended.
+      const id = intent.id;
+      const at = state.cursor.get(id);
+      const text = String(((doc.nodes as AMap)[id] as AMap | undefined)?.text ?? "");
+      if (at === undefined)
+        refuse("INVALID_INTENT", `no Text edit of ${id} to continue (§12.3)`, id);
+      const removed = Array.from(text.slice(at)).slice(0, intent.deleteCount).join("");
+      budget.text += intent.deleteCount + Array.from(intent.insert).length;
+      state.cursor.set(id, (at as number) + intent.insert.length);
+      affected.add(id);
+      const path = ["nodes", id, "text"];
+      return (d) => A.splice(d as never, path, at as number, removed.length, intent.insert);
+    }
+
     if (
       intent.intent === "text.edit" ||
       intent.intent === "paragraph.split" ||
@@ -921,6 +1047,14 @@ export class SectionReplica {
 
       if (intent.intent === "text.edit") {
         const ranges = rebase(doc, path, intent.base, intent.edits, refuse, id);
+        const lastRange = ranges[ranges.length - 1];
+        if (lastRange !== undefined) {
+          // A later run of this edit (§12.3) continues after what it inserts.
+          const shift = ranges
+            .slice(0, -1)
+            .reduce((n, r) => n + r.insert.length - (r.to - r.from), 0);
+          state.cursor.set(id, lastRange.from + shift + lastRange.insert.length);
+        }
         for (const e of intent.edits) {
           checkString(e.insert, "inserted text", refuse);
           budget.text += Array.from(e.insert).length + e.deleteCount;
