@@ -248,7 +248,7 @@ export interface SectionUnit {
 export interface SectionRefusal {
   /** Its position in the received list. */
   readonly index: number;
-  /** Its change hash, when its bytes decode. */
+  /** Its change hash; undefined when the SOP checks refused the bytes, which are then never decoded. */
   readonly hash: string | undefined;
   /** The §14.1 diagnostic (SOP §74.1 for the inherited checks), or ACTOR_EQUIVOCATION when held. */
   readonly diagnostic: string;
@@ -366,7 +366,8 @@ export class SectionReplica {
       try {
         c = checkChange(unit.bytes);
       } catch (e) {
-        refused.push(refusal(index, hashOf(unit.bytes), e, false));
+        // Never decoded again, not even for its hash: the checks refused to expand it.
+        refused.push(refusal(index, undefined, e, false));
         return;
       }
       if (
@@ -987,14 +988,6 @@ function adjacent(doc: Doc, v: SectionValidation, first: string, second: string)
     if (e.parent === parent) return e.id === second;
   }
   return false;
-}
-
-function hashOf(bytes: Uint8Array): string | undefined {
-  try {
-    return A.decodeChange(bytes).hash;
-  } catch {
-    return undefined;
-  }
 }
 
 function refusal(
