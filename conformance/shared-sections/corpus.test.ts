@@ -60,6 +60,7 @@ interface Case {
     readonly hidden: readonly string[];
     readonly recovery: readonly { id: string; code: string }[];
     readonly retainedConcurrentEdits: readonly string[];
+    readonly scalarConflicts: readonly { id: string; field: string; values: readonly string[] }[];
     readonly texts: Readonly<Record<string, string>>;
     readonly tasks: Readonly<Record<string, Record<string, unknown>>>;
   };
@@ -167,6 +168,7 @@ describe("shared sections corpus", () => {
       expect(t.invalid).toEqual(c.expected.invalid);
       expect(t.collisions).toEqual(c.expected.collisions ?? []);
       expect(t.retainedConcurrentEdits).toEqual(c.expected.retainedConcurrentEdits);
+      expect(t.scalarConflicts).toEqual(c.expected.scalarConflicts);
       expect(replayed.tree().tree).toEqual(t.tree);
 
       // §14.1 (LFCP-02-017): every change, injected ones included, received

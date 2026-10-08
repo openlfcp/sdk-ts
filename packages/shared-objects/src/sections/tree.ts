@@ -60,6 +60,17 @@ export interface SectionTree {
    * edit is retained, not visibly applied: it needs the user's attention.
    */
   readonly retainedConcurrentEdits: readonly string[];
+  /**
+   * SOP §44–§47: the Task scalar fields with concurrent values (title,
+   * status, lifecycle, due, priority), each with its values sorted. A
+   * provisional value may show; the conflict stays visible until a user
+   * resolves it.
+   */
+  readonly scalarConflicts: readonly {
+    readonly id: string;
+    readonly field: string;
+    readonly values: readonly string[];
+  }[];
   /** Each blocked node's candidate placements and their parents (§7 recovery information). */
   readonly candidates: ReadonlyMap<
     string,
@@ -70,6 +81,9 @@ export interface SectionTree {
 }
 
 type AMap = Record<string, unknown>;
+
+/** The Task scalar fields whose concurrent values tree() reports. */
+const CONFLICT_FIELDS = ["title", "status", "lifecycle", "due", "priority"] as const;
 
 const str = (v: unknown): string | undefined =>
   A.isImmutableString(v) ? v.toString() : typeof v === "string" ? v : undefined;
@@ -261,6 +275,14 @@ export function deriveTree(
     ),
     collisions: validation.collisions,
     retainedConcurrentEdits: Object.freeze(retained),
+    scalarConflicts: Object.freeze(
+      Object.keys(objects).flatMap((id) =>
+        CONFLICT_FIELDS.flatMap((field) => {
+          const vs = values(objects[id] as AMap, field);
+          return vs.length > 1 ? [{ id, field, values: vs.map((v) => v ?? "").sort() }] : [];
+        }),
+      ),
+    ),
     candidates,
     validation,
   });
