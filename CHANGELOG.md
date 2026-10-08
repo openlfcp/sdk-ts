@@ -64,6 +64,13 @@ The 0.1.x sustaining release for MVP 0.2 wave W0: spec
 
 ### Changed
 
+- `@openlfcp/client`, outbound queue (§51, §51.1): the units of one actor
+  in a `DATA_PUT` go oldest first, since a server checks each unit's
+  `previous` in message order. A unit refused with `UNKNOWN_PREVIOUS`
+  whose `previous` is our own unit still queued waits for that unit's ACK,
+  and that unit, lost on the way, is sent again at once. The request
+  timeout now doubles per unanswered send in a row, no longer per attempt:
+  answered refusals never lengthen it.
 - `@openlfcp/client`, behaviour (LFCP-WIRE-01 §86, baseline.9): a Key
   Package the client opened is now stored (`keyPackages`), like the ones it
   sends, for as long as it keeps the Resource.

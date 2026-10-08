@@ -13,7 +13,7 @@ import {
   importResourceDEK,
   importSigningKey,
 } from "@openlfcp/crypto";
-import { InMemoryLfcpStorage } from "@openlfcp/storage";
+import { InMemoryLfcpStorage, type OutboundItem } from "@openlfcp/storage";
 import {
   type ChainResult,
   type ControlBody,
@@ -561,5 +561,58 @@ describe("OutboundQueue (LFCP-036)", () => {
     q.session({ durability: 2n, maxMessageBytes: 1100n });
     expect(await q.next(R, T0)).toEqual([]);
     expect((await storage.outbound.list(R))[0]?.blocked?.reason).toBe("too-large");
+  });
+
+  it("sends each actor's units oldest first in a DATA_PUT (§51.1: checked in message order)", async () => {
+    const { storage, R, units } = await writer(205, 3);
+    // Unit 1 queued again last (as after it was dequeued and re-enqueued).
+    const first = (await storage.outbound.list(R)).find(
+      (o) => hex(o.itemId) === hex(units[0]?.unitId as Uint8Array),
+    ) as OutboundItem;
+    await storage.commit([{ op: "dequeue", itemId: first.itemId }]);
+    await storage.commit([{ op: "enqueue", item: first }]);
+    const [m] = (await new OutboundQueue({ storage }).next(R, T0)) as OutboundMessage[];
+    expect(
+      m?.message.type === "DATA_PUT" &&
+        m.message.body.objects.map((b) => parseDataUnit(b).payload.actorSeq),
+    ).toEqual([1n, 2n, 3n]);
+  });
+
+  it("UNKNOWN_PREVIOUS: a unit waits for its own lost previous, which is sent again at once (§51.1)", async () => {
+    const { storage, R, units } = await writer(206, 2);
+    const q = new OutboundQueue({ storage, maxObjectsPerMessage: 1 });
+    const [m1, m2] = (await q.next(R, T0)) as OutboundMessage[];
+    expect(m1 && ids(m1)).toEqual([hex(units[0]?.unitId as Uint8Array)]);
+    // m1 is lost; the server refuses unit 2, which names unit 1.
+    const r = await q.onNack(nack(m2 as OutboundMessage, "UNKNOWN_PREVIOUS", units[0]?.unitId), T0);
+    expect(r).toMatchObject({ kind: "needs-offer", resourceId: R });
+    // Unit 1 is due again at once, not after its request timeout; unit 2 waits.
+    const again = await q.next(R, T0);
+    expect(again.map(ids)).toEqual([[hex(units[0]?.unitId as Uint8Array)]]);
+    await q.offered(R);
+    expect(await q.next(R, T0)).toEqual([]); // still behind unit 1, which is queued
+    await q.onAck(ack(again[0] as OutboundMessage, [units[0]?.unitId as Uint8Array]), T0);
+    const after = await q.next(R, T0);
+    expect(after.map(ids)).toEqual([[hex(units[1]?.unitId as Uint8Array)]]);
+  });
+
+  it("refusals the client recovers from never lengthen the request timeout", async () => {
+    const { storage, R, units } = await writer(207, 1);
+    const q = new OutboundQueue({ storage, requestTimeout: { baseMs: 1000, maxMs: 8000 } });
+    const at = (ms: number) => new Date(Date.parse(T0) + ms).toISOString();
+    for (let i = 0; i < 4; i++) {
+      const [m] = (await q.next(R, at(i))) as OutboundMessage[];
+      // The server lacks a unit of another writer's history: offered, then sent again.
+      await q.onNack(
+        nack(m as OutboundMessage, "UNKNOWN_PREVIOUS", new Uint8Array(32).fill(7)),
+        at(i),
+      );
+      await q.offered(R);
+    }
+    // Four answered sends: the next unanswered one waits the base timeout, not 2^4 times it.
+    const [last] = (await q.next(R, at(10))) as OutboundMessage[];
+    expect(last && ids(last)).toEqual([hex(units[0]?.unitId as Uint8Array)]);
+    expect(await q.next(R, at(10 + 999))).toEqual([]);
+    expect(await q.next(R, at(10 + 1000))).toHaveLength(1);
   });
 });

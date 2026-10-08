@@ -1735,7 +1735,7 @@ export class SyncClient {
         units.map((u) => ({ id: toHex(u.unitId), bytes: u.bytes })),
       );
     }
-    this.#o.outbound.offered(R);
+    await this.#o.outbound.offered(R);
     if (sent > 0) await this.#offerKeys(ctx);
     await this.#flush(ctx);
   }

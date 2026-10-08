@@ -4,6 +4,7 @@ import {
   type ControlRecordId,
   type DataEpoch,
   dataUnitId,
+  fromHex,
   type Hash32,
   hash32,
   type PrincipalId,
@@ -32,6 +33,7 @@ import {
   type LfcpMessage,
   MESSAGE_TYPE,
   parseControlRecord,
+  parseDataUnit,
   unionHaves,
   type WireErrorName,
 } from "@openlfcp/wire";
@@ -179,7 +181,8 @@ export type NackOutcome =
   /**
    * The server lacks the unit a Data Unit names as its `previous`
    * (UNKNOWN_PREVIOUS, §51.1): it lost what it acknowledged. Retried once
-   * the client offered what the server lacks (§68.1, `offered`).
+   * the client offered what the server lacks (§68.1, `offered`), or, when
+   * that unit is our own and still queued, once it is acknowledged.
    */
   | {
       readonly kind: "needs-offer";
@@ -220,7 +223,7 @@ export interface OutboundQueueOptions {
   /**
    * How long a sent message waits for its answer on a live connection
    * before its items are due again (a lost request or reply, §70
-   * at-least-once): `baseMs`, doubling per attempt of the item, at most
+   * at-least-once): `baseMs`, doubling per unanswered send in a row, at most
    * `maxMs`. Default 10 s to 60 s. A re-put is harmless: the server answers
    * a repeated object with the same ACK (§47, §70).
    */
@@ -237,6 +240,21 @@ interface Flight {
 
 const AT_ONCE: RetryPolicy = { nextAttempt: () => null };
 
+/** Data Units by actor, then actor sequence; unparsable bytes last (they are blocked when sent). */
+function unitOrder(a: OutboundItem, b: OutboundItem): number {
+  const key = (o: OutboundItem): [string, bigint] => {
+    try {
+      const p = parseDataUnit(o.bytes).payload;
+      return [toHex(p.actor), p.actorSeq];
+    } catch {
+      return ["~", 0n];
+    }
+  };
+  const [x, y] = [key(a), key(b)];
+  if (x[0] !== y[0]) return x[0] < y[0] ? -1 : 1;
+  return x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0;
+}
+
 export class OutboundQueue {
   readonly #storage: OutboundQueueOptions["storage"];
   readonly #retry: RetryPolicy;
@@ -251,14 +269,21 @@ export class OutboundQueue {
   readonly #flights = new Map<string, Flight>();
   /** item ID hex → message ID hex */
   readonly #inFlight = new Map<string, string>();
+  /**
+   * Unanswered sends in a row per item (request timeouts), for the
+   * timeout backoff: an answered send (ACK or NACK) starts it again, so
+   * refusals the client recovers from never lengthen the wait.
+   */
+  readonly #unanswered = new Map<string, number>();
   /** Items to send one per message (to find which one a per-object NACK meant). */
   readonly #solo = new Set<string>();
   /** Items waiting for a Control sync (MISSING_DEPENDENCY). */
   readonly #awaitingControl = new Set<string>();
   /** Items waiting until what the server lacks was offered (UNKNOWN_PREVIOUS, §68.1). */
-  readonly #awaitingOffer = new Set<string>();
-  /** item ID hex → Resource ID hex, for the items in #awaitingOffer. */
-  readonly #resourceOf = new Map<string, string>();
+  readonly #awaitingOffer = new Map<
+    string,
+    { readonly resource: string; readonly previous: string | null }
+  >();
 
   constructor(options: OutboundQueueOptions) {
     this.#storage = options.storage;
@@ -283,6 +308,7 @@ export class OutboundQueue {
       for (const id of flight.itemIds)
         if (this.#inFlight.get(toHex(id)) === key) {
           this.#inFlight.delete(toHex(id));
+          this.#unanswered.set(toHex(id), (this.#unanswered.get(toHex(id)) ?? 0) + 1);
           overdue.push(id);
         }
     }
@@ -322,7 +348,11 @@ export class OutboundQueue {
     const writes: StorageWrite[] = [];
     const limit = this.#maxMessageBytes - OVERHEAD;
     for (const kind of KIND_ORDER) {
+      // §51, §51.1: a server checks a DATA_PUT's units in message order, so
+      // each actor's units go oldest first (the `previous` link of a unit
+      // can then be an earlier unit of the same message).
       const items = due.filter((o) => o.kind === kind);
+      if (kind === "data-unit") items.sort(unitOrder);
       let batch: OutboundItem[] = [];
       let size = 0;
       const flush = () => {
@@ -380,10 +410,8 @@ export class OutboundQueue {
     await this.#commit(writes);
     for (const m of out) {
       const key = toHex(m.message.messageId);
-      const attempts = Math.max(
-        ...m.itemIds.map((id) => (due.find((o) => bytesEqual(o.itemId, id))?.attempts ?? 0) + 1),
-      );
-      const wait = Math.min(this.#timeout.maxMs, this.#timeout.baseMs * 2 ** (attempts - 1));
+      const unanswered = Math.max(...m.itemIds.map((id) => this.#unanswered.get(toHex(id)) ?? 0));
+      const wait = Math.min(this.#timeout.maxMs, this.#timeout.baseMs * 2 ** unanswered);
       this.#flights.set(key, {
         resourceId: resource,
         type: m.message.type,
@@ -446,8 +474,10 @@ export class OutboundQueue {
     const flight = this.#flights.get(key);
     if (flight === undefined) return undefined;
     this.#flights.delete(key);
-    for (const id of flight.itemIds)
+    for (const id of flight.itemIds) {
       if (this.#inFlight.get(toHex(id)) === key) this.#inFlight.delete(toHex(id));
+      this.#unanswered.delete(toHex(id));
+    }
     return flight;
   }
 
@@ -504,6 +534,10 @@ export class OutboundQueue {
       this.#forget(item.itemId);
     }
     const writes: StorageWrite[] = acked.map((itemId) => ({ op: "dequeue", itemId }));
+    // Units held for UNKNOWN_PREVIOUS behind one of ours that is now on the server.
+    const landed = new Set(acked.map((id) => toHex(id)));
+    for (const [key, wait] of [...this.#awaitingOffer])
+      if (wait.previous !== null && landed.has(wait.previous)) this.#awaitingOffer.delete(key);
     for (const ids of byResource.values()) {
       const resourceId = (await this.#storage.outbound.get(ids[0] as Hash32))?.resourceId;
       if (resourceId === undefined) continue;
@@ -547,7 +581,7 @@ export class OutboundQueue {
     this.#solo.delete(key);
     this.#awaitingControl.delete(key);
     this.#awaitingOffer.delete(key);
-    this.#resourceOf.delete(key);
+    this.#unanswered.delete(key);
   }
 
   async #block(
@@ -637,14 +671,32 @@ export class OutboundQueue {
         return Object.freeze({ kind: "needs-control-sync", items: Object.freeze(items) });
       case "UNKNOWN_PREVIOUS": {
         const d = message.body.details;
+        const previous = d instanceof Uint8Array && d.length === 32 ? hash32(d) : null;
+        // Each unit waits on its OWN previous: the details name only the
+        // first refused unit's, and a later unit of the message may name
+        // one that is itself waiting here.
         for (const id of items) {
-          this.#awaitingOffer.add(toHex(id));
-          this.#resourceOf.set(toHex(id), toHex(flight.resourceId));
+          const item = await this.#storage.outbound.get(id);
+          let own: string | null = null;
+          try {
+            const p = item === undefined ? null : parseDataUnit(item.bytes).payload.prevDataUnitId;
+            own = p === null || p === undefined ? null : toHex(p);
+          } catch {
+            own = null;
+          }
+          this.#awaitingOffer.set(toHex(id), { resource: toHex(flight.resourceId), previous: own });
         }
+        // The server lacks a unit of ours we sent before: on one connection
+        // it would have handled that message first, so it was lost. It is
+        // due again now rather than after its request timeout (a late ACK
+        // still removes it).
+        for (const wait of this.#awaitingOffer.values())
+          if (wait.previous !== null && this.#inFlight.has(wait.previous))
+            this.#inFlight.delete(wait.previous);
         return Object.freeze({
           kind: "needs-offer",
           resourceId: flight.resourceId,
-          previous: d instanceof Uint8Array && d.length === 32 ? hash32(d) : null,
+          previous,
           items: Object.freeze(items),
         });
       }
@@ -677,12 +729,18 @@ export class OutboundQueue {
    * What the server of `resource` lacked was offered (§68.1): items held
    * for UNKNOWN_PREVIOUS are due again, behind the offered objects.
    */
-  offered(resource: ResourceId): void {
-    for (const key of [...this.#awaitingOffer])
-      if (this.#resourceOf.get(key) === toHex(resource)) {
-        this.#awaitingOffer.delete(key);
-        this.#resourceOf.delete(key);
+  async offered(resource: ResourceId): Promise<void> {
+    for (const [key, wait] of [...this.#awaitingOffer]) {
+      if (wait.resource !== toHex(resource)) continue;
+      // The unit the server lacks is our own, still queued (e.g. its
+      // message was lost): its successors wait for its ACK (onAck), or the
+      // server would refuse them again.
+      if (wait.previous !== null) {
+        const own = await this.#storage.outbound.get(hash32(fromHex(wait.previous)));
+        if (own !== undefined && own.blocked === null) continue;
       }
+      this.#awaitingOffer.delete(key);
+    }
   }
 
   /**
