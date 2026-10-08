@@ -319,7 +319,7 @@ describe("section schema (§3, §4, §14.2)", () => {
     expect(nodeDiagnostics(A.merge(a, b))).toEqual({ [PARA]: "IMMUTABLE_FIELD_MUTATED" });
   });
 
-  it("reports ID collisions apart, a Task node sharing its Task's ID excepted (§3)", () => {
+  it("does not isolate an ID reused across categories (§3 is the writer's rule)", () => {
     const doc = section((d) => {
       d.placements[PARA] = {
         id: S(PARA),
@@ -328,9 +328,9 @@ describe("section schema (§3, §4, §14.2)", () => {
         created_by: S(ALICE),
       };
     });
-    expect(validateSection(doc).collisions).toEqual([PARA]);
-    expect(validateSection(doc).collided).toEqual([PARA]);
-    expect(validateSection(section()).collisions).toEqual([]);
+    const v = validateSection(doc);
+    expect([v.collisions, v.collided]).toEqual([[], []]);
+    expect(v.nodes.has(PARA)).toBe(false);
   });
 
   it("a node whose own, Task or selected placement ID collides is not validated (§14.2)", () => {

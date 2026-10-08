@@ -94,10 +94,12 @@ export interface SectionValidation {
   /** Each invalid object (a Task or a preserved unknown Shared Object), per field (SOP §74.1). */
   readonly objects: ReadonlyMap<string, readonly ProfileProblem[]>;
   /**
-   * §3, SOP §21 OBJECT_ID_COLLISION: IDs used by more than one entity (a
-   * Task node and its Task excepted), or concurrently created twice under
-   * one key. A separate named error, not a diagnostic; such entities are
-   * not usable.
+   * §14.2, SOP §21 OBJECT_ID_COLLISION: IDs under which `nodes`,
+   * `objects` or `placements` holds concurrent maps, sorted. A separate
+   * named error, not a diagnostic. Reusing one ID across categories (a
+   * node ID equal to a PlacementId, say) is a writer error (§3) that a
+   * reader does not check: isolating it would let any writer take out
+   * another's node with an ordinary change.
    */
   readonly collisions: readonly string[];
   /**
@@ -358,12 +360,8 @@ export function validateSection(doc: A.Doc<unknown>): SectionValidation {
   const placementKeys = placementsObj === undefined ? [] : r.keys(placementsObj);
   const objectKeys = objectsObj === undefined ? [] : r.keys(objectsObj);
 
-  // §3, SOP §21: collisions. A key created concurrently twice holds two maps.
+  // §14.2, SOP §21: collisions. A key created concurrently twice holds two maps.
   const collisions = new Set<string>();
-  const owners = new Map<string, number>();
-  const own = (id: string | undefined) => {
-    if (id !== undefined) owners.set(id, (owners.get(id) ?? 0) + 1);
-  };
   for (const [obj, keys] of [
     [nodesObj, nodeKeys],
     [placementsObj, placementKeys],
@@ -371,18 +369,12 @@ export function validateSection(doc: A.Doc<unknown>): SectionValidation {
   ] as const)
     for (const k of keys) if (obj !== undefined && r.all(obj, k).length > 1) collisions.add(k);
 
-  // §4.2: nodes. The Task of a task node shares its ID; every other ID is unique.
   const kinds = new Map<string, NodeKind>();
   for (const k of nodeKeys) {
     const node = nodesObj === undefined ? undefined : r.map(nodesObj, k);
     const kind = node === undefined ? undefined : r.str(node, "kind");
     if (kind !== undefined && isNodeKind(kind)) kinds.set(k, kind);
-    if (kinds.get(k) !== "task") own(k);
   }
-  own(sectionId);
-  for (const k of placementKeys) own(k);
-  for (const k of objectKeys) own(k);
-  for (const [id, n] of owners) if (n > 1) collisions.add(id);
 
   // Objects: SOP Tasks and preserved unknown Shared Objects (§2, §3).
   const objects = new Map<string, readonly ProfileProblem[]>();
