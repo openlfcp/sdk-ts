@@ -51,6 +51,13 @@ remove or rename any.
   resolutions (SS15 and SS26 reach their reference states); `node.move` on
   a conflicted node is refused with `NODE_IN_CONFLICT`, and an intent
   naming no node with `UNKNOWN_NODE`.
+- `node.delete` and `node.restore` on `SectionReplica` (LFCP-02-015): a
+  Task node's lifecycle is its Task's, another node's its own; each is a
+  fresh causal write, also for a value already visible, and descendants are
+  never rewritten. `tree()` hides a deleted node and its subtree and
+  reports `retainedConcurrentEdits` (EDIT_UNDER_DELETED_ANCESTOR) from the
+  change history. SS07, SS08, SS24, SS25 and SS27, written through these
+  intents, reach their reference states.
 
 ## 0.1.3 — 2026-10-08
 
