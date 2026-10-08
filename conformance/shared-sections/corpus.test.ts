@@ -10,7 +10,9 @@
 //   in the state the classification implies (IMPORTING, §12.1);
 // - Task strings are scalar strings and paragraph/item bodies are Text;
 // - the effective tree, hidden nodes, recovery facts and classification
-//   are the corpus's (LFCP-02-014).
+//   are the corpus's (LFCP-02-014);
+// - received through SectionReplica.receiveChanges, every change is
+//   admitted or refused (§14.1) and held as the corpus says (LFCP-02-017).
 //
 // SS01 and SS18 are checked in detail. The effective tree, structural
 // facts and admission are later tasks (LFCP-02-013..017).
@@ -21,6 +23,7 @@ import {
   deriveSectionActorId,
   SECTIONS_PROFILE_ID,
   SectionDocument,
+  SectionReplica,
 } from "@openlfcp/shared-objects/sections";
 import { describe, expect, it } from "vitest";
 import { openSpec } from "../spec.mjs";
@@ -37,6 +40,8 @@ interface Change extends Bytes {
   readonly actor: string;
   readonly seq: number;
   readonly deps: readonly string[];
+  /** The fixture Principal that signs the Data Unit, for an injected change. */
+  readonly signer?: string;
 }
 interface Case {
   readonly id: string;
@@ -74,6 +79,9 @@ interface Suite {
 }
 
 const suite = openSpec().readJson(CORPUS) as Suite;
+const resource = resourceId(fromHex(suite.identities.resource_hex));
+const principal = (name: string) =>
+  principalId(fromHex((suite.identities.actors[name] as { principal_hex: string }).principal_hex));
 const bytes = (b: Bytes) => Uint8Array.from(atob(b.base64), (c) => c.charCodeAt(0));
 const load = (c: Case) => SectionDocument.fromSave(bytes(c.reference_snapshot));
 const heldHash = (h: string | { readonly change: string }) =>
@@ -97,7 +105,6 @@ describe("shared sections corpus", () => {
   });
 
   it("derives every fixture actor with the section domain (§2)", () => {
-    const resource = resourceId(fromHex(suite.identities.resource_hex));
     for (const a of Object.values(suite.identities.actors))
       expect(toHex(deriveSectionActorId(resource, principalId(fromHex(a.principal_hex))))).toBe(
         a.actor_hex,
@@ -161,7 +168,28 @@ describe("shared sections corpus", () => {
       expect(t.collisions).toEqual(c.expected.collisions ?? []);
       expect(t.retainedConcurrentEdits).toEqual(c.expected.retainedConcurrentEdits);
       expect(replayed.tree().tree).toEqual(t.tree);
-    });
+
+      // §14.1 (LFCP-02-017): every change, injected ones included, received
+      // through the production admission. The refused ones and the ones held
+      // behind them are the corpus's; the rest reach its heads and tree.
+      const all = [...c.base_changes, ...c.branches.A, ...c.branches.B, ...c.after_merge];
+      const receiver = SectionReplica.empty({ resource, principal: principal("C") });
+      const r = receiver.receiveChanges(
+        all.map((ch) => ({
+          bytes: bytes(ch),
+          ...(ch.signer === undefined ? {} : { signer: principal(ch.signer) }),
+        })),
+      );
+      expect(
+        r.refused
+          .filter((x) => !x.held)
+          .map((x) => ({ change: all[x.index]?.change_hash, diagnostic: x.diagnostic })),
+      ).toEqual(c.expected.refused);
+      expect([...r.waiting].sort()).toEqual(c.expected.held.map(heldHash).sort());
+      expect(receiver.revision()).toBe(heads.join(","));
+      expect(receiver.tree().tree).toEqual(t.tree);
+      // SS55 and SS56 replay 64 changes of 8,192 Text operations several ways.
+    }, 30_000);
 
   it("SS01: Task fields are scalars in objects, the paragraph is node Text (§2, §4.2)", () => {
     const c = suite.cases.find((x) => x.id === "SS01") as Case;

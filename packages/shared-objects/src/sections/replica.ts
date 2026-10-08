@@ -14,11 +14,13 @@ import {
   SNAPSHOT_LIMITS_FLOOR,
   type SnapshotLimits,
 } from "../admission/limits.js";
+import { admitBatch } from "../admission/sequence.js";
 import { ProfileInvalidError } from "../profile-invalid.js";
 import { prepareTaskIntent, type ReplicaIntent } from "../replica.js";
 import type { Task } from "../task.js";
 import type { Json } from "../validate.js";
 import { frameProfilePayload, isUtcTimestamp, principalRef } from "../values.js";
+import { SectionAdmission } from "./admission.js";
 import { type SectionValidation, validateSection } from "./schema.js";
 import { deriveTree, type SectionTree } from "./tree.js";
 import {
@@ -236,6 +238,35 @@ export interface SectionLocalChange {
   readonly modelRevision: string;
 }
 
+/** A received change with the Principal that signed its Data Unit (§2). */
+export interface SectionUnit {
+  readonly bytes: Uint8Array;
+  readonly signer?: PrincipalId;
+}
+
+/** A received change that was not merged. */
+export interface SectionRefusal {
+  /** Its position in the received list. */
+  readonly index: number;
+  /** Its change hash, when its bytes decode. */
+  readonly hash: string | undefined;
+  /** The §14.1 diagnostic (SOP §74.1 for the inherited checks), or ACTOR_EQUIVOCATION when held. */
+  readonly diagnostic: string;
+  /** Held (SOP §14.1, POST-001): its actor and sequence belong to another change; retried after a rebuild. */
+  readonly held: boolean;
+  readonly message: string;
+}
+
+export interface SectionReceiveResult {
+  /** Merged now, in causal order. */
+  readonly admitted: readonly string[];
+  /** Already in the document. */
+  readonly duplicates: readonly string[];
+  /** Missing a dependency: not received yet, or refused, or waiting itself. */
+  readonly waiting: readonly string[];
+  readonly refused: readonly SectionRefusal[];
+}
+
 export interface SectionReplicaOptions {
   readonly resource: ResourceId;
   readonly principal: PrincipalId;
@@ -315,6 +346,84 @@ export class SectionReplica {
     );
     const unapplied = checked.filter((c) => !A.hasHeads(doc, [c.hash])).map((c) => c.hash);
     return { replica: new SectionReplica(doc, opts), unapplied };
+  }
+
+  /**
+   * Receives changes others wrote, as LFCP accepted them (§14.1): each
+   * passes the inherited SOP checks (framing, §11.1 expansion, the signer's
+   * actor when `signer` is given, the sequence check, holding a taken
+   * actor sequence) and the section rules A1–A5 and §12.1, against its
+   * causal history, before the engine applies any. A refused change is
+   * never merged; the changes that depend on it wait.
+   */
+  receiveChanges(items: readonly (Uint8Array | SectionUnit)[]): SectionReceiveResult {
+    const refused: SectionRefusal[] = [];
+    const checked: CheckedChange[] = [];
+    const indexOf = new Map<string, number>();
+    items.forEach((item, index) => {
+      const unit = item instanceof Uint8Array ? { bytes: item } : item;
+      let c: CheckedChange;
+      try {
+        c = checkChange(unit.bytes);
+      } catch (e) {
+        refused.push(refusal(index, hashOf(unit.bytes), e, false));
+        return;
+      }
+      if (
+        unit.signer !== undefined &&
+        c.actor !== toHex(deriveSectionActorId(this.resource, unit.signer))
+      ) {
+        refused.push({
+          index,
+          hash: c.hash,
+          diagnostic: "CHANGE_ACTOR_MISMATCH",
+          held: false,
+          message: `the change's actor ${c.actor} is not the §2 actor of the unit's signer`,
+        });
+        return;
+      }
+      if (indexOf.has(c.hash)) return;
+      indexOf.set(c.hash, index);
+      checked.push(c);
+    });
+    const seqs = this.#sequences();
+    const admission = new SectionAdmission(this.#doc, this.resource);
+    const decided = admitBatch(
+      checked,
+      {
+        hasChange: (hash) => A.hasHeads(this.#doc, [hash]),
+        latestSeq: (actor) => seqs.get(actor) ?? 0,
+      },
+      (c) => admission.accept(c),
+    );
+    for (const r of decided.refused)
+      refused.push(refusal(indexOf.get(r.change.hash) ?? -1, r.change.hash, r.error, r.held));
+    if (decided.admitted.length > 0) {
+      // The admission applied each admitted change, at its turn, to its working copy.
+      this.#doc = admission.document as Doc;
+      for (const c of decided.admitted)
+        if (c.seq > (seqs.get(c.actor) ?? 0)) seqs.set(c.actor, c.seq);
+    }
+    const hashes = (list: readonly CheckedChange[]) => Object.freeze(list.map((c) => c.hash));
+    return Object.freeze({
+      admitted: hashes(decided.admitted),
+      duplicates: hashes(decided.duplicates),
+      waiting: hashes(decided.waiting),
+      refused: Object.freeze(refused.sort((a, b) => a.index - b.index)),
+    });
+  }
+
+  /** Each actor's latest sequence number in the document, read once and kept current. */
+  #seqs: Map<string, number> | undefined;
+  #sequences(): Map<string, number> {
+    if (this.#seqs === undefined) {
+      this.#seqs = new Map();
+      for (const bytes of A.getAllChanges(this.#doc)) {
+        const c = A.decodeChange(bytes);
+        if (c.seq > (this.#seqs.get(c.actor) ?? 0)) this.#seqs.set(c.actor, c.seq);
+      }
+    }
+    return this.#seqs;
   }
 
   /** §3, §4, §14.2. */
@@ -878,6 +987,26 @@ function adjacent(doc: Doc, v: SectionValidation, first: string, second: string)
     if (e.parent === parent) return e.id === second;
   }
   return false;
+}
+
+function hashOf(bytes: Uint8Array): string | undefined {
+  try {
+    return A.decodeChange(bytes).hash;
+  } catch {
+    return undefined;
+  }
+}
+
+function refusal(
+  index: number,
+  hash: string | undefined,
+  e: unknown,
+  held: boolean,
+): SectionRefusal {
+  const diagnostic =
+    (e as { diagnostic?: string }).diagnostic ??
+    (held ? "ACTOR_EQUIVOCATION" : ((e as { code?: string }).code ?? "INVALID_AUTOMERGE_BYTES"));
+  return { index, hash, diagnostic, held, message: e instanceof Error ? e.message : String(e) };
 }
 
 function checkString(
