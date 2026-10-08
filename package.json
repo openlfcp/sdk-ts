@@ -14,7 +14,7 @@
     "typecheck": "tsc -b && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:conformance": "vitest run conformance/",
-    "lint": "biome check . && node scripts/check-boundaries.mjs && node scripts/check-boundaries.mjs --self-test",
+    "lint": "biome check . && node scripts/check-boundaries.mjs && node scripts/check-boundaries.mjs --self-test && node scripts/pack-files.mjs --self-test",
     "format": "biome check --write .",
     "release:check": "node scripts/release-check.mjs"
   },

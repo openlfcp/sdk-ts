@@ -20,6 +20,9 @@
 //    round trip: a Principal from fresh keys, a wire message encoded and
 //    decoded, a Shared Objects Task, in-memory and SQLite storage.
 // 6. A summary with each tarball's size and file count.
+// 7. This checkout as `pnpm publish` would pack it (`npm pack --dry-run`):
+//    the same files as the clean build's tarball, dist/ included. A
+//    publish uploads the checkout, not the clean copy: build it first.
 //
 // Nothing is published. Exit status 0 only when every check passed. The
 // temporary directory is removed unless --keep is given.
@@ -37,6 +40,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkoutPackProblems, packJsonFiles } from "./pack-files.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const keep = process.argv.includes("--keep");
@@ -149,6 +153,8 @@ try {
     run("pnpm", ["pack", "--pack-destination", packs], dir);
   }
   const tarballs = new Map();
+  /** Each clean tarball's file paths, without the package/ prefix (step 7). */
+  const cleanFiles = new Map();
   for (const name of PUBLISH_ORDER) {
     const file = join(packs, `openlfcp-${name}-${manifests.get(name).version}.tgz`);
     try {
@@ -180,6 +186,10 @@ try {
     ])
       if (!entries.includes(required)) fail(`@openlfcp/${name}: ${required} is missing`);
     summary.push({ name, bytes: statSync(tarball).size, files: entries.length });
+    cleanFiles.set(
+      name,
+      entries.map((e) => e.replace(/^package\//, "")),
+    );
   }
   if (failures.length === 0)
     console.log("  only package.json, README.md, LICENSE and dist/**/*.{js,d.ts}");
@@ -255,6 +265,21 @@ try {
     `  total ${(total / 1024).toFixed(1)} KiB; publish order: ${PUBLISH_ORDER.join(" → ")}`,
   );
   console.log(`  version ${VERSION}, dist-tag ${DIST_TAG}`);
+
+  // ---------------------------------------------------------------- 7. this checkout
+  step("this checkout as pnpm publish packs it");
+  let packed = 0;
+  for (const name of PUBLISH_ORDER) {
+    const files = packJsonFiles(
+      run("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], join(root, "packages", name)),
+    );
+    const problems = checkoutPackProblems(name, files, cleanFiles.get(name) ?? []);
+    for (const p of problems) fail(p);
+    if (problems.length === 0) packed++;
+  }
+  if (packed === PUBLISH_ORDER.length)
+    console.log("  every package as built in the clean copy, dist/ included");
+  else console.log("  run `pnpm build` in this checkout before publishing from it");
 } catch (e) {
   fail(e.stderr ? `${e.message}\n${e.stderr}` : String(e.message ?? e));
 } finally {
