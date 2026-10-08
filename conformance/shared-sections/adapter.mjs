@@ -77,12 +77,13 @@ export async function runCase(input) {
     delivery === "checkpoint"
       ? SectionReplica.fromSave(bytes(input.base_snapshot), opts, "local-state")
       : SectionReplica.empty(opts);
-  const units =
+  const records =
     delivery === "reverse"
-      ? [...all].reverse().flatMap((ch) => [unit(ch), unit(ch)])
+      ? [...all].reverse().flatMap((ch) => [ch, ch])
       : delivery === "checkpoint"
-        ? [...input.branches.A, ...input.branches.B, ...input.after_merge].map(unit)
-        : all.map(unit);
+        ? [...input.branches.A, ...input.branches.B, ...input.after_merge]
+        : all;
+  const units = records.map(unit);
   const received = replica.receiveChanges(units);
   const tree = replica.tree();
   const state = replica.toJSON();
@@ -127,8 +128,10 @@ export async function runCase(input) {
     },
     // One entry per change: a duplicate unit of a refused change is refused again.
     refused: received.refused
-      .filter((x, i, all) => !x.held && all.findIndex((y) => y.hash === x.hash) === i)
-      .map((x) => ({ change: x.hash, diagnostic: x.diagnostic })),
+      .filter((x) => !x.held)
+      // Bytes the SDK refused before decoding have no hash from it: the case's record names it.
+      .map((x) => ({ change: x.hash ?? records[x.index]?.change_hash, diagnostic: x.diagnostic }))
+      .filter((x, i, all) => all.findIndex((y) => y.change === x.change) === i),
     held: [...received.waiting].sort(),
     snapshot: snapshotCounts(replica.save()),
   };
