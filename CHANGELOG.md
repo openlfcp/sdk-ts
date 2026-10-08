@@ -10,6 +10,23 @@ remove or rename any.
 eight 0.1.2 packages on npm hold only `package.json`, `README.md` and
 `LICENSE`, and are deprecated. Every change of 0.1.2 below ships in 0.1.3.
 
+0.1.3 is the first release published by CI: the tag `v0.1.3` runs
+`.github/workflows/release.yml`, which builds, checks and packs the
+packages from a fresh checkout and publishes them with npm Trusted
+Publishing (OIDC, with provenance), after an approval in the GitHub
+environment `npm-publish`. The dist-tag `next` is no longer moved for a
+final release: it names the latest prerelease.
+
+### Added
+
+- `.github/workflows/release.yml`: a pushed tag `vX.Y.Z` publishes the
+  eight packages through npm Trusted Publishing; `workflow_dispatch` runs
+  the same path as a dry run. A version the registry already has is
+  skipped, so a run that failed midway can be run again.
+  `scripts/registry-check.mjs` then checks the registry as a user sees it:
+  every package's `dist.fileCount`, its dist-tag, and a fresh install that
+  imports all eight.
+
 ### Fixed
 
 - `pnpm release:check` also packs this checkout as `pnpm publish` would
