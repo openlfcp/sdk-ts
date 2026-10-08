@@ -16,7 +16,10 @@
 //   state and a VALID tree;
 // - SS07, SS08, SS24, SS25 and SS27: deletion and restoration written by
 //   this writer on two branches (and C's resolution) reach the reference
-//   state, hidden nodes and retained concurrent edits included.
+//   state, hidden nodes and retained concurrent edits included;
+// - SS06, SS14, SS16, SS17, SS40 and SS47 to SS51: Text edits, splits and
+//   joins written through the Text intents (LFCP-02-016) reach the
+//   reference state, concurrent ones included.
 
 import { fromHex, principalId, resourceId, toHex } from "@openlfcp/core";
 import { createTask } from "@openlfcp/shared-objects";
@@ -378,5 +381,126 @@ describe("authoring the shared sections corpus (LFCP-02-012)", () => {
           want.retainedConcurrentEdits,
         ]);
       });
+  });
+
+  describe("Text, split and join (LFCP-02-016)", () => {
+    const task = ids.task as string;
+    const para = ids.para as string;
+    const extra = ids.extra as string;
+    type Step = (r: SectionReplica) => SectionIntent[];
+    /** The placement of `node` in case `id`'s reference state. */
+    const slotOf = (id: string, node: string) =>
+      (reference(id).toJSON() as unknown as State).nodes[node]?.placement as string;
+    const edit =
+      (node: string, index: number, deleteCount: number, insert: string): Step =>
+      (r) => [
+        {
+          intent: "text.edit",
+          id: node,
+          base: r.revision(),
+          edits: [{ index, deleteCount, insert }],
+        },
+      ];
+    const length = (r: SectionReplica, node: string) =>
+      Array.from((r.toJSON() as unknown as State).nodes[node]?.text ?? "").length;
+    const split =
+      (id: string, at: number, newId: string): Step =>
+      (r) => [
+        {
+          intent: "paragraph.split",
+          id: para,
+          base: r.revision(),
+          at,
+          newId,
+          createdBy: principal("A"),
+          placementId: slotOf(id, newId),
+        },
+      ];
+    const join: Step = () => [{ intent: "node.join", id: para, second: extra }];
+    const joinBase =
+      (id: string): Step =>
+      () => [
+        {
+          intent: "paragraph.create",
+          id: extra,
+          parent: task,
+          after: para,
+          text: "Second note",
+          createdBy: principal("A"),
+          placementId: slotOf(id, extra),
+        },
+      ];
+    const alphabet = Array.from("абвгдеж😀");
+    const long = (n: number) =>
+      Array.from({ length: n }, (_, k) => alphabet[k % alphabet.length]).join("");
+    const cases: Record<string, { base?: Step; a: Step[]; b?: Step[] }> = {
+      SS06: {
+        a: [() => [{ intent: "node.delete", id: task }]],
+        b: [edit(para, 0, 0, "Retained ")],
+      },
+      SS14: {
+        base: (r) => edit(para, 0, length(r, para), "А😀Б")(r),
+        a: [edit(para, 2, 0, "!")],
+        b: [edit(para, 0, 0, "Я: ")],
+      },
+      SS16: { a: [split("SS16", 6, extra)] },
+      SS17: { base: joinBase("SS17"), a: [join] },
+      SS47: { a: [split("SS47", 6, ids.a as string)], b: [split("SS47", 5, ids.b as string)] },
+      SS48: { a: [split("SS48", 6, ids.a as string)], b: [edit(para, 14, 0, " v2")] },
+      SS49: { base: joinBase("SS49"), a: [join], b: [edit(extra, 11, 0, "!")] },
+      SS50: { base: joinBase("SS50"), a: [join], b: [join] },
+      SS51: { base: joinBase("SS51"), a: [split("SS51", 6, ids.a as string)], b: [join] },
+    };
+    const run = (steps: { base?: Step; a: Step[]; b?: Step[] }) => {
+      const start = authorSS01();
+      if (steps.base) start.commit(steps.base(start));
+      const branch = (who: "A" | "B", list: Step[]) => {
+        const r = SectionReplica.fromSave(
+          start.save(),
+          { resource, principal: principal(who) },
+          "local-state",
+        );
+        for (const step of list) r.commit(step(r));
+        return r.changes();
+      };
+      return SectionReplica.fromChanges([...branch("A", steps.a), ...branch("B", steps.b ?? [])], {
+        resource,
+        principal: principal("C"),
+      }).replica;
+    };
+    for (const [id, steps] of Object.entries(cases))
+      it(`${id}: written through the Text intents, reaches the reference state`, () => {
+        const merged = run(steps);
+        const ref = reference(id);
+        expect(canonical(merged.toJSON() as Json)).toEqual(canonical(ref.toJSON() as Json));
+        const got = merged.tree();
+        const want = ref.tree();
+        expect([
+          got.classification,
+          got.tree,
+          got.hidden,
+          got.recovery,
+          got.retainedConcurrentEdits,
+        ]).toEqual([
+          want.classification,
+          want.tree,
+          want.hidden,
+          want.recovery,
+          want.retainedConcurrentEdits,
+        ]);
+      });
+
+    it("SS40: a 20,000-character insertion in three runs within the Text budget", () => {
+      const ref = reference("SS40").toJSON() as unknown as State;
+      const inserted = Array.from(ref.nodes[para]?.text ?? "").slice(14);
+      const r = authorSS01();
+      for (let at = 0; at < inserted.length; at += 8192)
+        r.commit(edit(para, 14 + at, 0, inserted.slice(at, at + 8192).join(""))(r));
+      expect(r.changes()).toHaveLength(2 + 3);
+      expect(canonical(r.toJSON() as Json)).toEqual(canonical(ref as unknown as Json));
+      expect(() => r.commit(edit(para, 0, 0, long(8193))(r))).toThrow(
+        expect.objectContaining({ code: "OVER_BUDGET" }),
+      );
+    });
   });
 });

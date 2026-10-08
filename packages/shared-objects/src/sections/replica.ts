@@ -70,7 +70,9 @@ export type SectionIntentCode =
   /** A value outside its domain: an ID, a list style, a timestamp, a string (§3, §4). */
   | "INVALID_INTENT"
   /** The batch is over an authoring budget of §16.2. */
-  | "OVER_BUDGET";
+  | "OVER_BUDGET"
+  /** A Text position names a base revision the SDK cannot rebase onto the current Text (§10). */
+  | "STALE_BASE";
 
 /** A batch refused before commit, with the intent it concerns (SDK-SECTIONS-INTEGRATION-01 §3.6). */
 export class SectionIntentError extends Error {
@@ -149,10 +151,53 @@ export type SectionIntent =
    * descendants are not rewritten.
    */
   | { readonly intent: "node.delete" | "node.restore"; readonly id: string }
+  /**
+   * §10: edits of a node's existing Text, in Unicode scalar positions of the
+   * Text at `base` (a modelRevision): sorted, not overlapping, each against
+   * the base text as CodeMirror changes are. They are rebased onto the
+   * current Text; a deleted range that changed since `base` is STALE_BASE.
+   */
+  | {
+      readonly intent: "text.edit";
+      readonly id: string;
+      readonly base: string;
+      readonly edits: readonly TextEdit[];
+    }
+  /**
+   * §10: the node keeps the prefix before `at` (a scalar position at
+   * `base`); a new node of the same kind, `newId`, gets the suffix right
+   * after it under the same parent. An item's children stay with it.
+   */
+  | ({
+      readonly intent: "paragraph.split" | "item.split";
+      readonly id: string;
+      readonly base: string;
+      readonly at: number;
+      readonly newId: string;
+      readonly createdBy: PrincipalId;
+    } & Pick<Position, "placementId">)
+  /**
+   * §10: two adjacent paragraphs, or items of one list style, without
+   * children: `id` gets `separator` (default LF) and `second`'s current
+   * text, and `second` is deleted with its Text history kept.
+   */
+  | {
+      readonly intent: "node.join";
+      readonly id: string;
+      readonly second: string;
+      readonly separator?: string;
+    }
   /** §4.2: ordered or bullet list membership, on task and item nodes. */
   | { readonly intent: "node.set_list_style"; readonly id: string; readonly listStyle: ListStyle }
   /** A SHARED-OBJECTS-PROFILE-01 Task intent on a Task of this section (§2). */
   | Exclude<ReplicaIntent, { intent: "task.create" }>;
+
+/** One Text edit in Unicode scalar positions (§10). */
+export interface TextEdit {
+  readonly index: number;
+  readonly deleteCount: number;
+  readonly insert: string;
+}
 
 /** What a batch knows while it is checked, intent by intent. */
 interface BatchState {
@@ -553,6 +598,123 @@ export class SectionReplica {
       };
     }
 
+    if (
+      intent.intent === "text.edit" ||
+      intent.intent === "paragraph.split" ||
+      intent.intent === "item.split" ||
+      intent.intent === "node.join"
+    ) {
+      const id = intent.id;
+      const node = (doc.nodes as AMap)[id] as AMap | undefined;
+      if (node === undefined) refuse("UNKNOWN_NODE", `${id} names no node`, id);
+      if (v.nodes.has(id) || collidedSet(v).has(id))
+        refuse("NODE_IN_CONFLICT", `${id} is invalid or collides (§14.2)`, id);
+      const kind = str((node as AMap).kind);
+      if (kind === "task") refuse("INVALID_INTENT", "a task node has no Text (§4.2)", id);
+      const current = String((node as AMap).text ?? "");
+      const path = ["nodes", id, "text"];
+
+      if (intent.intent === "text.edit") {
+        const ranges = rebase(doc, path, intent.base, intent.edits, refuse, id);
+        for (const e of intent.edits) {
+          checkString(e.insert, "inserted text", refuse);
+          budget.text += Array.from(e.insert).length + e.deleteCount;
+        }
+        affected.add(id);
+        return (d) => {
+          // From the end, so earlier positions stay valid.
+          for (const r of [...ranges].reverse())
+            A.splice(d as never, path, r.from, r.to - r.from, r.insert);
+        };
+      }
+
+      if (intent.intent === "node.join") {
+        const second = intent.second;
+        const other = (doc.nodes as AMap)[second] as AMap | undefined;
+        if (other === undefined) refuse("UNKNOWN_NODE", `${second} names no node`, second);
+        if (v.nodes.has(second) || collidedSet(v).has(second))
+          refuse("NODE_IN_CONFLICT", `${second} is invalid or collides (§14.2)`, second);
+        const otherKind = str((other as AMap).kind);
+        const sameStyle =
+          kind === "paragraph" ||
+          values(node as AMap, "list_style").join() === values(other as AMap, "list_style").join();
+        if (otherKind !== kind || (kind !== "paragraph" && kind !== "item") || !sameStyle)
+          refuse(
+            "INVALID_INTENT",
+            "only two paragraphs, or two items of one list style, join (§10)",
+            id,
+          );
+        const kids = (n: AMap) => ((n.children as unknown[] | undefined) ?? []).length;
+        if (kids(node as AMap) > 0 || kids(other as AMap) > 0)
+          refuse("INVALID_INTENT", "a node with children does not join (§10)", id);
+        if (!adjacent(doc, v, id, second))
+          refuse(
+            "INVALID_INTENT",
+            `${second} is not the visible sibling right after ${id} (§10)`,
+            second,
+          );
+        const separator = intent.separator ?? "\n";
+        checkString(separator, "the separator", refuse);
+        const appended = separator + String((other as AMap).text ?? "");
+        const at = current.length;
+        budget.text += Array.from(appended).length;
+        affected.add(id);
+        affected.add(second);
+        return (d) => {
+          A.splice(d as never, path, at, 0, appended);
+          // §9, §10: the second node is deleted with a fresh write; its Text stays.
+          const o = (d.nodes as AMap)[second] as AMap;
+          if (str(o.lifecycle) === "deleted") o.lifecycle = S("active");
+          o.lifecycle = S("deleted");
+        };
+      }
+
+      // split: a deletion of the suffix and a new node after this one.
+      if (intent.intent.slice(0, intent.intent.indexOf(".")) !== kind)
+        refuse("INVALID_INTENT", `${intent.intent} on a ${kind} node (§10)`, id);
+      if (
+        values(node as AMap, "placement").length !== 1 ||
+        new Set(values(node as AMap, "lifecycle")).size !== 1
+      )
+        refuse("NODE_IN_CONFLICT", `${id} has unresolved structure (§10)`, id);
+      const cut = rebase(
+        doc,
+        path,
+        intent.base,
+        [{ index: intent.at, deleteCount: 0, insert: "" }],
+        refuse,
+        id,
+      )[0] as { from: number };
+      const suffix = current.slice(cut.from);
+      const placement = (doc.placements as AMap)[str((node as AMap).placement) as string] as AMap;
+      const parent = str(placement.parent_id) as string;
+      const create = this.#prepare(
+        doc,
+        state,
+        {
+          intent: kind === "item" ? "item.create" : "paragraph.create",
+          id: intent.newId,
+          parent,
+          after: id,
+          text: suffix,
+          createdBy: intent.createdBy,
+          ...(kind === "item"
+            ? { listStyle: (str((node as AMap).list_style) ?? "bullet") as ListStyle }
+            : {}),
+          ...(intent.placementId === undefined ? {} : { placementId: intent.placementId }),
+        },
+        i,
+        affected,
+        budget,
+      );
+      budget.text += Array.from(suffix).length;
+      affected.add(id);
+      return (d) => {
+        A.splice(d as never, path, cut.from, current.length - cut.from, "");
+        create(d);
+      };
+    }
+
     if (intent.intent === "node.delete" || intent.intent === "node.restore") {
       const id = intent.id;
       const node = (doc.nodes as AMap)[id] as AMap | undefined;
@@ -644,6 +806,79 @@ export class SectionReplica {
 
 /** §3: a lone surrogate code point is not valid Unicode. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * §10: the Text edits at `base` as UTF-16 ranges of the current Text.
+ * Each position is the current place of the character it stood before at
+ * `base` (an Automerge cursor taken at the base heads); a deleted range
+ * must still hold exactly the text it held then.
+ */
+function rebase(
+  doc: Doc,
+  path: string[],
+  base: string,
+  edits: readonly TextEdit[],
+  refuse: (c: SectionIntentCode, m: string, node?: string) => never,
+  node: string,
+): { from: number; to: number; insert: string }[] {
+  const heads = base === "" ? [] : base.split(",");
+  let view: Doc;
+  try {
+    if (!heads.every((h) => /^[0-9a-f]{64}$/.test(h)) || !A.hasHeads(doc, heads)) throw new Error();
+    view = A.view(doc, heads);
+  } catch {
+    return refuse("STALE_BASE", `the base revision is not in this document (§10)`, node);
+  }
+  const before = String(
+    ((view.nodes as AMap | undefined)?.[path[1] as string] as AMap | undefined)?.text ?? "",
+  );
+  const scalars = Array.from(before);
+  const utf16 = (scalar: number) => scalars.slice(0, scalar).join("").length;
+  const now = String(((doc.nodes as AMap)[path[1] as string] as AMap).text ?? "");
+  let last = 0;
+  return edits.map((e) => {
+    if (
+      !Number.isInteger(e.index) ||
+      !Number.isInteger(e.deleteCount) ||
+      e.index < last ||
+      e.deleteCount < 0 ||
+      e.index + e.deleteCount > scalars.length
+    )
+      refuse(
+        "INVALID_INTENT",
+        "Text edits are sorted, do not overlap and stay within the base Text (§10)",
+        node,
+      );
+    last = e.index + e.deleteCount;
+    const position = (scalar: number) => {
+      try {
+        return A.getCursorPosition(doc, path, A.getCursor(view, path, utf16(scalar)));
+      } catch {
+        return refuse("STALE_BASE", "a Text position cannot be rebased (§10)", node);
+      }
+    };
+    const from = position(e.index);
+    const to = e.deleteCount === 0 ? from : position(e.index + e.deleteCount);
+    const removed = scalars.slice(e.index, e.index + e.deleteCount).join("");
+    if (now.slice(from, to) !== removed)
+      refuse("STALE_BASE", "the deleted Text changed since the base revision (§10)", node);
+    return { from, to, insert: e.insert };
+  });
+}
+
+/** §10: whether `second` is the visible sibling right after `first`, both unblocked. */
+function adjacent(doc: Doc, v: SectionValidation, first: string, second: string): boolean {
+  const entries = deriveTree(doc, v).tree;
+  const i = entries.findIndex((e) => e.id === first);
+  if (i < 0) return false;
+  const { parent, depth } = entries[i] as { parent: string; depth: number };
+  for (let k = i + 1; k < entries.length; k++) {
+    const e = entries[k] as { id: string; parent: string; depth: number };
+    if (e.depth < depth) return false;
+    if (e.parent === parent) return e.id === second;
+  }
+  return false;
+}
 
 function checkString(
   text: unknown,

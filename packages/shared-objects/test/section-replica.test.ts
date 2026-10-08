@@ -684,3 +684,170 @@ describe("SectionReplica: lifecycle (§9)", () => {
     );
   });
 });
+
+describe("SectionReplica: Text, split and join (§10)", () => {
+  const text = (r: SectionReplica, n: string) => view(r).nodes[n]?.text;
+  const edit = (
+    r: SectionReplica,
+    n: string,
+    index: number,
+    deleteCount: number,
+    insert: string,
+  ): SectionIntent => ({
+    intent: "text.edit",
+    id: n,
+    base: r.revision(),
+    edits: [{ index, deleteCount, insert }],
+  });
+
+  it("edits Text in Unicode scalar positions, emoji and Cyrillic included", () => {
+    const r = built();
+    r.commit([edit(r, P, 0, 14, "А😀Б")]);
+    r.commit([edit(r, P, 2, 0, "!")]);
+    expect(text(r, P)).toBe("А😀!Б");
+    r.commit([
+      {
+        intent: "text.edit",
+        id: P,
+        base: r.revision(),
+        edits: [
+          { index: 0, deleteCount: 1, insert: "Я" },
+          { index: 3, deleteCount: 0, insert: "?" },
+        ],
+      },
+    ]);
+    expect(text(r, P)).toBe("Я😀!?Б");
+  });
+
+  it("rebases an edit from an older base onto concurrent changes", () => {
+    const r = built();
+    const base = r.revision();
+    r.commit([edit(r, P, 0, 0, "New ")]);
+    // Written against the base, after "Draft": lands after "Draft" in the current Text.
+    r.commit([
+      { intent: "text.edit", id: P, base, edits: [{ index: 5, deleteCount: 0, insert: "ed" }] },
+    ]);
+    expect(text(r, P)).toBe("New Drafted contract");
+  });
+
+  it("refuses STALE_BASE when the deleted range changed, or the base is unknown", () => {
+    const r = built();
+    const base = r.revision();
+    r.commit([edit(r, P, 6, 0, "big ")]);
+    const before = r.revision();
+    const stale = refusal(() =>
+      r.commit([
+        { intent: "text.edit", id: P, base, edits: [{ index: 0, deleteCount: 14, insert: "x" }] },
+      ]),
+    );
+    expect([stale.code, stale.nodeId]).toEqual(["STALE_BASE", P]);
+    expect(
+      refusal(() =>
+        r.commit([
+          {
+            intent: "text.edit",
+            id: P,
+            base: "00".repeat(32),
+            edits: [{ index: 0, deleteCount: 0, insert: "x" }],
+          },
+        ]),
+      ).code,
+    ).toBe("STALE_BASE");
+    expect(r.revision()).toBe(before);
+  });
+
+  it("refuses Text edits on a task node and edits out of order", () => {
+    const r = built();
+    expect(refusal(() => r.commit([edit(r, T, 0, 0, "x")])).code).toBe("INVALID_INTENT");
+    expect(
+      refusal(() =>
+        r.commit([
+          {
+            intent: "text.edit",
+            id: P,
+            base: r.revision(),
+            edits: [
+              { index: 5, deleteCount: 0, insert: "a" },
+              { index: 1, deleteCount: 0, insert: "b" },
+            ],
+          },
+        ]),
+      ).code,
+    ).toBe("INVALID_INTENT");
+  });
+
+  it("splits an item: the prefix and its children stay, the suffix gets a new item after it", () => {
+    const r = built();
+    const C = id(40);
+    const N = id(41);
+    r.commit([
+      {
+        intent: "paragraph.create",
+        id: C,
+        parent: X,
+        after: null,
+        text: "child",
+        createdBy: alice,
+      },
+    ]);
+    r.commit([{ intent: "node.set_list_style", id: X, listStyle: "ordered" }]);
+    r.commit([
+      { intent: "item.split", id: X, base: r.revision(), at: 5, newId: N, createdBy: alice },
+    ]);
+    expect(text(r, X)).toBe("Group");
+    expect(text(r, N)).toBe(" X");
+    const t = r.tree().tree.map((e) => e.id);
+    expect(t).toEqual([T, P, X, C, N, Y]);
+    expect(
+      (r.toJSON() as { nodes: Record<string, { list_style?: string }> }).nodes[N]?.list_style,
+    ).toBe("ordered");
+    expect(
+      refusal(() =>
+        r.commit([
+          {
+            intent: "paragraph.split",
+            id: X,
+            base: r.revision(),
+            at: 1,
+            newId: id(42),
+            createdBy: alice,
+          },
+        ]),
+      ).code,
+    ).toBe("INVALID_INTENT");
+  });
+
+  it("joins adjacent childless nodes of one kind, and refuses the rest", () => {
+    const r = built();
+    r.commit([{ intent: "node.join", id: X, second: Y, separator: " / " }]);
+    expect(text(r, X)).toBe("Group X / Group Y");
+    expect(r.tree().hidden).toEqual([Y]);
+    const s = built();
+    expect(refusal(() => s.commit([{ intent: "node.join", id: Y, second: X }])).code).toBe(
+      "INVALID_INTENT",
+    );
+    expect(refusal(() => s.commit([{ intent: "node.join", id: P, second: X }])).code).toBe(
+      "INVALID_INTENT",
+    );
+    s.commit([
+      {
+        intent: "paragraph.create",
+        id: id(43),
+        parent: X,
+        after: null,
+        text: "c",
+        createdBy: alice,
+      },
+    ]);
+    expect(refusal(() => s.commit([{ intent: "node.join", id: X, second: Y }])).code).toBe(
+      "INVALID_INTENT",
+    );
+  });
+
+  it("never turns a Task's scalar fields into Text", () => {
+    const r = built();
+    r.commit([edit(r, P, 0, 0, "x"), { intent: "task.set_title", id: T as never, title: "Title" }]);
+    expect(r.validate().objects.size).toBe(0);
+    expect(r.validate().nodes.size).toBe(0);
+  });
+});
