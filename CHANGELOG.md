@@ -66,6 +66,15 @@ remove or rename any.
   new node right after it; a join appends the second node's text and
   deletes it with its Text history kept. SS06, SS14, SS16, SS17, SS40 and
   SS47 to SS51, written through these intents, reach their reference states.
+- `receiveChanges` on `SectionReplica` (LFCP-02-017): received changes go
+  through the inherited admission (framing, §11.1 expansion, the signer's
+  actor, the sequence check, held changes of a taken actor sequence) and
+  the section rules A1–A5 and §12.1 of SHARED-SECTIONS-PROFILE-01 §14.1,
+  decided from each change's operations against its causal history, before
+  the engine applies any; a refused change is never merged and the changes
+  after it wait. Every case of the corpus, the injected negatives included,
+  is admitted, refused or held as it expects. `SectionAdmissionError`
+  carries the §14.1 diagnostic.
 - Access recovery after a server restore (LFCP-02-106) in `SyncClient`:
   when RESOURCE_OPEN is refused with AUTHORIZATION_FAILED and the
   client's validated chain grants it `data/read`, it re-supplies the
