@@ -92,6 +92,29 @@ export interface CorpusDepthCase {
   }[];
 }
 
+/** Changes given in order to the converged base scenario, with rebuilds (§14.1, POST-001; since mvp-0.1-baseline.9). */
+export interface CorpusCollisionCase {
+  readonly id: string;
+  readonly description: string;
+  readonly base_scenario: string;
+  readonly steps: readonly (
+    | {
+        readonly change_hex: string;
+        readonly hash: string;
+        readonly actor: string;
+        readonly seq: number;
+        readonly expected: "accept" | "held" | "duplicate";
+      }
+    | {
+        readonly exclude: readonly string[];
+        readonly expected: {
+          readonly removed: readonly string[];
+          readonly applied: readonly string[];
+        };
+      }
+  )[];
+}
+
 export interface Corpus {
   readonly automerge_version: string;
   readonly profile: string;
@@ -119,7 +142,8 @@ export interface Corpus {
       readonly save_hex: string;
       readonly expected: "accept" | "reject";
     }[];
-  };
+  } /** Since mvp-0.1-baseline.9. */;
+  readonly collision: { readonly rule: string; readonly cases: readonly CorpusCollisionCase[] };
 }
 
 let cached: Corpus | undefined;

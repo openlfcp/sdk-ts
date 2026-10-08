@@ -20,7 +20,7 @@
 // Behavioral interop only (SHARED-OBJECTS-PROFILE-01 §14, AGENT-OPERATING-
 // GUIDE §13): byte equality of a re-save is checked as informative below.
 
-import { fromHex, principalId, resourceId, toHex } from "@openlfcp/core";
+import { dataUnitId, fromHex, principalId, resourceId, toHex } from "@openlfcp/core";
 import {
   CHANGE_LIMITS,
   checkChange,
@@ -39,7 +39,7 @@ import {
 import { describe, expect, it } from "vitest";
 import type { HandlerContext, VectorCase, VectorSuite } from "../runner.js";
 import { log, openSpec } from "../spec.mjs";
-import { CORPUS_PATH, corpusScenario, readCorpus } from "./corpus.js";
+import { CORPUS_PATH, type CorpusCollisionCase, corpusScenario, readCorpus } from "./corpus.js";
 import { runScenario } from "./scenarios.js";
 
 const spec = openSpec();
@@ -301,6 +301,47 @@ describe(`Automerge reference corpus depth bound at ${spec.lock.tag}`, () => {
             diagnostic: "INVALID_AUTOMERGE_BYTES",
           }),
         );
+    });
+  }
+
+  // §14.1 (POST-001): through the Data Profile handler the applier uses.
+  // Each step's change is one LFCP-accepted unit (a synthetic unit ID per
+  // change hash); an exclude step is the G-EP7/G-DP5 rebuild without them.
+  for (const x of corpus.collision.cases as readonly CorpusCollisionCase[]) {
+    it(`${x.id}: ${x.description}`, () => {
+      const base = corpusScenario(x.base_scenario);
+      const { replica } = Replica.fromChanges(
+        base.changes.map((c) => fromHex(c.change_hex)),
+        options,
+      );
+      const profile = new SharedObjectsDataProfile(replica);
+      const unitOf = (hash: string) => dataUnitId(fromHex(hash));
+      for (const step of x.steps) {
+        if ("exclude" in step) {
+          const r = profile.exclude(step.exclude.map(unitOf));
+          for (const h of step.expected.removed) expect(profile.replica.hasChange(h)).toBe(false);
+          for (const h of step.expected.applied) expect(profile.replica.hasChange(h)).toBe(true);
+          expect(r.released.map((id) => toHex(id)).sort()).toEqual(
+            [...step.expected.applied].sort(),
+          );
+          expect(profile.heldUnits()).toEqual([]);
+          continue;
+        }
+        const change = checkChange(fromHex(step.change_hex));
+        expect([change.hash, change.seq]).toEqual([step.hash, step.seq]);
+        const before = profile.replica.heads();
+        const known = profile.replica.hasChange(step.hash);
+        const r = profile.apply({ unitId: unitOf(step.hash) }, change);
+        const got =
+          r.held !== undefined
+            ? "held"
+            : known && JSON.stringify(profile.replica.heads()) === JSON.stringify(before)
+              ? "duplicate"
+              : r.merged.some((id) => toHex(id) === step.hash)
+                ? "accept"
+                : `pending (${r.pending})`;
+        expect(got).toBe(step.expected);
+      }
     });
   }
 });

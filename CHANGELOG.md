@@ -26,6 +26,13 @@ remove or rename any.
 
 ### Changed
 
+- `@openlfcp/shared-objects`, behaviour (POST-001, SHARED-OBJECTS-PROFILE-01
+  §14.1): a change whose actor and sequence number another change of the
+  document already has is now **held**, not refused with
+  `ACTOR_EQUIVOCATION`. `SharedObjectsDataProfile` keeps it out of the
+  document, reports it in `applyBatch().held` (and `apply().held`, with the
+  reason), and retries it after every `exclude`: `exclude().released`
+  lists the held units that merged. `heldUnits()` lists the held ones.
 - The SDK implements spec `mvp-0.1-baseline.9` (SPEC-PATCH-09, ADR 0008
   and POST-001); the conformance runner checks its new vectors
   `have_difference` and `data_put_previous` (the server's `previous` rule,

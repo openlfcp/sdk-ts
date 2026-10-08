@@ -29,7 +29,10 @@ import { deriveActorId, PROFILE_ID } from "./values.js";
  *   every buffered change it unblocks merges with it;
  * - one object becoming profile-invalid is a diagnostic, never a refusal:
  *   the other objects stay usable (§77);
- * - exclude (§14.1, G-EP7): rebuilds the replica without given units.
+ * - exclude (§14.1, G-EP7): rebuilds the replica without given units;
+ * - a change whose actor and sequence number another change of the
+ *   document already has is held (§14.1, POST-001): never merged, not
+ *   refused, and retried after every exclude.
  */
 
 /** An accepted unit as the applier passes it (structurally the client's ProfileUnit). */
@@ -50,6 +53,8 @@ export interface SharedObjectsApplyResult {
   readonly objects: readonly string[];
   readonly diagnostics: readonly SharedObjectsDiagnostic[];
   readonly pending?: string;
+  /** Why the unit is held (§14.1): its actor and sequence number belong to a different change. */
+  readonly held?: string;
 }
 
 /** The outcome of applyBatch: per unit merged, pending or rejected, and the objects once. */
@@ -58,7 +63,9 @@ export interface SharedObjectsBatchResult {
   readonly merged: readonly DataUnitId[];
   /** Units buffered for Automerge dependencies (the batch's and earlier ones still waiting). */
   readonly pending: readonly DataUnitId[];
-  /** Units whose change was refused (ACTOR_EQUIVOCATION, INVALID_AUTOMERGE_BYTES, …). */
+  /** Units held because a different change has their actor and sequence number (§14.1), all of them. */
+  readonly held: readonly DataUnitId[];
+  /** Units whose change was refused (INVALID_AUTOMERGE_BYTES, …). */
   readonly rejected: readonly {
     readonly unitId: DataUnitId;
     readonly code: string;
@@ -71,6 +78,8 @@ export interface SharedObjectsBatchResult {
 export interface SharedObjectsExcludeResult {
   readonly objects: readonly string[];
   readonly pending: readonly DataUnitId[];
+  /** Held units that merged after the rebuild (§14.1): their actor and sequence number were free again. */
+  readonly released: readonly DataUnitId[];
 }
 
 /** A persisted handler state (structurally the storage ProfileCheckpoint). */
@@ -108,6 +117,8 @@ export class SharedObjectsDataProfile {
   readonly #merged = new Map<string, { unitId: DataUnitId; hash: string }>();
   /** LFCP-accepted units waiting for Automerge dependencies, by unit ID hex. */
   readonly #pending = new Map<string, Buffered>();
+  /** LFCP-accepted units whose actor and sequence number a different change has (§14.1), by unit ID hex. */
+  readonly #held = new Map<string, Buffered>();
   readonly #listeners = new Set<(change: ObjectChange) => void>();
 
   constructor(replica: SharedObjectsReplica) {
@@ -246,13 +257,19 @@ export class SharedObjectsDataProfile {
     this.#replica = before.emptied();
     this.#merged.clear();
     this.#pending.clear();
+    this.#held.clear();
     this.#emit(rebuildChanges(before, this.#replica));
   }
 
-  /** Whether this handler holds the unit's change (merged, recorded or buffered). */
+  /** Whether this handler holds the unit's change (merged, recorded, buffered or held). */
   has(unitId: DataUnitId): boolean {
     const key = toHex(unitId);
-    return this.#merged.has(key) || this.#pending.has(key);
+    return this.#merged.has(key) || this.#pending.has(key) || this.#held.has(key);
+  }
+
+  /** The units held because a different change has their actor and sequence number (§14.1). */
+  heldUnits(): DataUnitId[] {
+    return [...this.#held.values()].map((b) => b.unitId);
   }
 
   /** The units waiting for Automerge dependencies. */
@@ -288,6 +305,13 @@ export class SharedObjectsDataProfile {
     const r = this.#applyBatch([{ unit, value: change }]);
     const own = r.refused.get(key);
     if (own !== undefined) throw own;
+    if (this.#held.has(key))
+      return Object.freeze({
+        merged: r.result.merged,
+        objects: r.result.objects,
+        diagnostics: r.result.diagnostics,
+        held: `held: a different change has actor ${change.actor} sequence ${change.seq} (§14.1)`,
+      });
     const self = r.result.merged.some((id) => toHex(id) === key);
     if (!self)
       return Object.freeze({
@@ -320,10 +344,16 @@ export class SharedObjectsDataProfile {
 
   #applyBatch(
     units: readonly { readonly unit: SharedObjectsUnit; readonly value: CheckedChange }[],
+    retryHeld = false,
   ): { result: SharedObjectsBatchResult; refused: Map<string, LfcpError>; missing: string[] } {
     const byHash = new Map<string, DataUnitId[]>();
     const offer = (unitId: DataUnitId, change: CheckedChange) =>
       byHash.set(change.hash, [...(byHash.get(change.hash) ?? []), unitId]);
+    // §14.1: after a rebuild, held changes are offered again with the rest.
+    if (retryHeld) {
+      for (const [key, b] of this.#held) this.#pending.set(key, b);
+      this.#held.clear();
+    }
     for (const b of this.#pending.values()) offer(b.unitId, b.change);
     for (const { unit, value } of units) {
       this.#pending.set(toHex(unit.unitId), { unitId: unit.unitId, change: value });
@@ -342,6 +372,11 @@ export class SharedObjectsDataProfile {
     for (const { change, error } of r.refused)
       for (const unitId of byHash.get(change.hash) ?? []) {
         this.#pending.delete(toHex(unitId));
+        // §14.1 (POST-001): another change has its actor and sequence number: held, not refused.
+        if (error.code === "ACTOR_EQUIVOCATION") {
+          this.#held.set(toHex(unitId), { unitId, change });
+          continue;
+        }
         rejected.push({ unitId, code: error.code, message: error.message });
         refused.set(toHex(unitId), error);
       }
@@ -354,6 +389,7 @@ export class SharedObjectsDataProfile {
       result: Object.freeze({
         merged: Object.freeze(merged),
         pending: Object.freeze([...this.#pending.values()].map((b) => b.unitId)),
+        held: Object.freeze(this.heldUnits()),
         rejected: Object.freeze(rejected),
         objects: Object.freeze(objects),
         diagnostics: Object.freeze(this.#diagnostics(objects)),
@@ -397,13 +433,14 @@ export class SharedObjectsDataProfile {
     for (const id of unitIds) {
       const key = toHex(id);
       this.#pending.delete(key);
+      this.#held.delete(key);
       const m = this.#merged.get(key);
       if (m !== undefined) {
         hashes.push(m.hash);
         this.#merged.delete(key);
       }
     }
-    if (hashes.length === 0) return Object.freeze({ objects: [], pending: [] });
+    if (hashes.length === 0) return Object.freeze({ objects: [], pending: [], released: [] });
     const before = this.#replica;
     const { replica, unapplied } = before.rebuildWithout(hashes);
     this.#replica = replica;
@@ -417,7 +454,20 @@ export class SharedObjectsDataProfile {
     }
     const changes = rebuildChanges(before, replica);
     this.#emit(changes);
-    return Object.freeze({ objects: changes.map((c) => c.objectId), pending });
+    // §14.1: the rebuild may have freed held changes' actor sequences.
+    const held = new Set(this.#held.keys());
+    const retried = held.size > 0 ? this.#applyBatch([], true) : null;
+    const released = (retried?.result.merged ?? []).filter((id) => held.has(toHex(id)));
+    const objects = [
+      ...new Set([...changes.map((c) => c.objectId), ...(retried?.result.objects ?? [])]),
+    ].sort();
+    return Object.freeze({
+      objects,
+      pending: pending.filter(
+        (id) => !(retried?.result.merged ?? []).some((m) => toHex(m) === toHex(id)),
+      ),
+      released: Object.freeze(released),
+    });
   }
 }
 

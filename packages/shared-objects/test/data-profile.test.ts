@@ -132,7 +132,7 @@ describe("SharedObjectsDataProfile", () => {
       [ID_A, "rebuild"],
       [ID_B, "rebuild"],
     ]);
-    expect(profile.exclude([unit(2).unitId])).toEqual({ objects: [], pending: [] });
+    expect(profile.exclude([unit(2).unitId])).toEqual({ objects: [], pending: [], released: [] });
     expect(profile.dataProfile).toBe(PROFILE_ID);
   });
 

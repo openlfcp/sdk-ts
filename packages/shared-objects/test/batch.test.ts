@@ -138,10 +138,13 @@ describe("SharedObjectsDataProfile.applyBatch", () => {
     expect(second.pending).toEqual([]);
     expect(second.objects).toEqual([ID]);
     expect(second.diagnostics).toEqual([]);
-    // A taken sequence rejects that unit only.
+    // A taken sequence holds that unit only (§14.1, POST-001): not merged, not refused.
     const twin = withSeq(changes[2]?.change as Uint8Array, 2);
     const third = profile.applyBatch([{ unit: { unitId: unit(99) }, value: checkChange(twin) }]);
-    expect(third.rejected.map((r) => r.code)).toEqual(["ACTOR_EQUIVOCATION"]);
-    expect(profile.has(unit(99))).toBe(false);
+    expect(third.rejected).toEqual([]);
+    expect(third.merged).toEqual([]);
+    expect(third.held).toEqual([unit(99)]);
+    expect(profile.has(unit(99))).toBe(true);
+    expect(profile.replica.hasChange(checkChange(twin).hash)).toBe(false);
   });
 });
