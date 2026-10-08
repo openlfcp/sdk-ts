@@ -117,6 +117,14 @@ function spyApply(side: Side): string[] {
 const count = (list: readonly string[], id: Uint8Array) =>
   list.filter((x) => x === toHex(id)).length;
 
+/** The Data Unit IDs `tap` has seen sent so far. */
+const sentUnits = (tap: WireTap): ReadonlySet<string> =>
+  new Set(tap.messages("DATA_PUT", "out").flatMap((f) => unitsIn(f)));
+
+/** Whether an ACK frame names a unit not in `before`: the ACK of a later put. */
+const acksNew = (f: Frame, before: ReadonlySet<string>): boolean =>
+  f.message?.type === "ACK" && (f.message.body.objectIds ?? []).some((o) => !before.has(toHex(o)));
+
 /** Data Unit IDs carried by a frame (DATA_PUT, DATA_BATCH). */
 const unitsIn = (f: Frame): string[] =>
   f.message?.type === "DATA_PUT" || f.message?.type === "DATA_BATCH"
@@ -190,6 +198,9 @@ async function pair(url: string): Promise<Pair> {
   await A.write(A.profile.replica.apply(created.intent) as LocalChange);
   const task = created.task.id as ObjectId;
   await waitFor("B has the Task", () => B.profile.replica.task(task)?.task?.title === "base");
+  // The Task's unit may be applied by B before A has its ACK: a test that
+  // then cuts or drops "the next ACK" would hit this one, not its own.
+  await waitFor("A's queue drains", () => A.queueEmpty());
   return {
     R,
     dek,
@@ -241,12 +252,14 @@ describe("LFCP-057: network chaos (live)", () => {
       const p = await pair(url);
       try {
         let cut = false;
+        const sentBefore = sentUnits(p.tapA);
         p.tapA.rule((f) => {
           if (
             !cut &&
             f.direction === "in" &&
             f.message?.type === "ACK" &&
-            f.message.body.requestType === MESSAGE_TYPE.DATA_PUT
+            f.message.body.requestType === MESSAGE_TYPE.DATA_PUT &&
+            acksNew(f, sentBefore)
           ) {
             cut = true;
             return { kind: "cut" };
@@ -260,8 +273,16 @@ describe("LFCP-057: network chaos (live)", () => {
           .messages("DATA_PUT", "out")
           .filter((f) => unitsIn(f).includes(toHex(id)));
         expect(puts.length).toBeGreaterThanOrEqual(2);
+        // The edit's bytes in every put: a retry may batch it with other
+        // queued units (§88), never regenerate it.
         const sent = puts.map((f) =>
-          f.message?.type === "DATA_PUT" ? toHex(f.message.body.objects[0] as Uint8Array) : "",
+          f.message?.type === "DATA_PUT"
+            ? toHex(
+                f.message.body.objects.find(
+                  (b) => toHex(parseDataUnit(b).signed.id) === toHex(id),
+                ) as Uint8Array,
+              )
+            : "",
         );
         expect(new Set(sent).size).toBe(1); // the exact same bytes, never regenerated
         expect(new Set(puts.map((f) => f.connection)).size).toBeGreaterThanOrEqual(2);
@@ -431,12 +452,14 @@ describe("LFCP-057: network chaos (live)", () => {
       const p = await pair(url);
       try {
         let dropped = false;
+        const sentBefore = sentUnits(p.tapA);
         p.tapA.rule((f) => {
           if (
             !dropped &&
             f.direction === "in" &&
             f.message?.type === "ACK" &&
-            f.message.body.requestType === MESSAGE_TYPE.DATA_PUT
+            f.message.body.requestType === MESSAGE_TYPE.DATA_PUT &&
+            acksNew(f, sentBefore)
           ) {
             dropped = true;
             return { kind: "drop" };
