@@ -100,6 +100,12 @@ export type DataUnitStatus =
   | "equivocation"
   /** No DEK, DEK mismatch, AEAD failure or profile decode failure. */
   | "local-failure"
+  /**
+   * LFCP-accepted; a different change has its profile actor and sequence
+   * number (SHARED-OBJECTS-PROFILE-01 §14.1, POST-001). Retried after every
+   * rebuild that removes changes; still a holding (Have, relay).
+   */
+  | "profile-held"
   /** LFCP-accepted, refused when merging. */
   | "profile-rejected"
   /** The Resource's profile is not implemented here. */

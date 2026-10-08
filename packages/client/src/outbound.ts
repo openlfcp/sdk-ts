@@ -712,7 +712,14 @@ export async function resourceSyncState(
   // Every LFCP-accepted unit is held here, whatever its profile status: a
   // crash between accepting and recording the merge leaves it "seen" or
   // "held" until replayStored applies it.
-  for (const status of ["merged", "profile-pending", "profile-rejected", "seen", "held"] as const)
+  for (const status of [
+    "merged",
+    "profile-pending",
+    "profile-held",
+    "profile-rejected",
+    "seen",
+    "held",
+  ] as const)
     for (const u of await storage.dataUnits.withStatus(resource, status))
       if (u.accepted) have = addSequence(have, u.actor, u.actorSeq);
   const items = await storage.outbound.list(resource);

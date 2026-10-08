@@ -332,6 +332,67 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
     expect(profile.replica.objectIds()).toEqual([]);
   });
 
+  it("POST-001. a change whose actor sequence is taken is held, kept and released by the rebuild", async () => {
+    const { chain, initUnit, createUnit, owner, alice } = await resource();
+    const { applier, profile, storage } = receiver(chain);
+    const view = chain.view();
+    // Bob builds c on Alice's X (her sequence 1).
+    const bob = new Writer(
+      chain,
+      BOB,
+      SharedObjectsReplica.fromChanges(alice.replica.changes(), {
+        resource: chain.resource,
+        principal: BOB.descriptor.principalId,
+      }).replica,
+    );
+    const c = await bob.send(
+      bob.replica.apply(setTitle(taskOf(bob.replica), "Bob's title").intent) as LocalChange,
+    );
+    // Bob learned that X is one of an equivocating pair, rebuilt without it
+    // and re-issued his work: Automerge sequence 1 again, LFCP sequence 2.
+    const rebuilt = SharedObjectsReplica.fromChanges(owner.replica.changes(), {
+      resource: chain.resource,
+      principal: BOB.descriptor.principalId,
+    }).replica;
+    const c2 = await bob.send(
+      rebuilt.apply(
+        createTask({ id: TASK_B, title: "Re-issued", createdBy: BOB.descriptor.principalId })
+          .intent,
+      ) as LocalChange,
+    );
+    for (const u of [initUnit, createUnit, c])
+      expect((await applier.receive(view, u.bytes)).kind).toBe("applied");
+    // The receiver does not know of the equivocation yet: c2 is held, not refused.
+    const held = await applier.receive(view, c2.bytes);
+    expect(held).toMatchObject({ kind: "profile-held", seq: 2n });
+    expect(await storage.dataUnits.get(c2.unitId)).toMatchObject({
+      status: "profile-held",
+      accepted: true,
+    });
+    expect(profile.replica.task(TASK_B)).toBeUndefined();
+    // Alice's other unit at her sequence 1 arrives: the rebuild without X
+    // drops c (it builds on X) and frees Bob's sequence 1 for c2.
+    const twin = new Writer(
+      chain,
+      ALICE,
+      SharedObjectsReplica.fromChanges(owner.replica.changes(), alice.options()).replica,
+    );
+    const forged = await twin.send(
+      twin.replica.apply(
+        createTask({ id: TASK_A, title: "Other", createdBy: ALICE.descriptor.principalId }).intent,
+      ) as LocalChange,
+    );
+    const r = await applier.receive(view, forged.bytes);
+    expect(r.kind).toBe("equivocation");
+    if (r.kind !== "equivocation") return;
+    expect(r.pending.map(toHex)).toEqual([toHex(c.unitId)]);
+    expect(r.released.map((x) => [x.kind, "unitId" in x ? toHex(x.unitId) : ""])).toEqual([
+      ["applied", toHex(c2.unitId)],
+    ]);
+    expect(await storage.dataUnits.get(c2.unitId)).toMatchObject({ status: "merged" });
+    expect(taskOf(profile.replica, TASK_B).title).toBe("Re-issued");
+  });
+
   it("5, 6, 8. invalid signature, missing data/write and AEAD failure never reach the profile", async () => {
     const { chain, initUnit, alice } = await resource();
     const { applier, counts } = receiver(chain);

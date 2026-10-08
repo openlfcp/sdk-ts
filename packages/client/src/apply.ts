@@ -98,6 +98,12 @@ export interface ProfileApplyResult {
   readonly diagnostics: readonly ProfileDiagnostic[];
   /** Why the unit is buffered by the profile when it did not merge now. */
   readonly pending?: string;
+  /**
+   * Why the profile holds the unit (SHARED-OBJECTS-PROFILE-01 §14.1): a
+   * different change has its actor and sequence number. Never merged until
+   * a rebuild frees them.
+   */
+  readonly held?: string;
 }
 
 /** What a handler's applyBatch reports: per unit merged, pending or rejected, and the objects once. */
@@ -106,6 +112,8 @@ export interface ProfileBatchResult {
   readonly merged: readonly DataUnitId[];
   /** Units buffered by the profile (the batch's, and earlier ones still waiting). */
   readonly pending: readonly DataUnitId[];
+  /** Units the profile holds (§14.1): a different change has their actor and sequence number. */
+  readonly held?: readonly DataUnitId[];
   /** Units the profile refused, with the code and message apply would have thrown. */
   readonly rejected: readonly {
     readonly unitId: DataUnitId;
@@ -121,6 +129,8 @@ export interface ProfileExcludeResult {
   readonly objects: readonly string[];
   /** Merged units that now wait for an excluded unit's content (profile-pending). */
   readonly pending: readonly DataUnitId[];
+  /** Held units (§14.1) that merged after the rebuild freed their actor sequence. */
+  readonly released?: readonly DataUnitId[];
 }
 
 /** The application side of one Data Profile. Implemented by profile packages. */
@@ -209,6 +219,13 @@ export type ApplyOutcome =
     })
   /** Accepted by LFCP; the profile buffers it until the content it builds on arrives. */
   | (Applied & { readonly kind: "profile-pending"; readonly detail: string })
+  /**
+   * Accepted by LFCP and kept (a holding: advertised and relayed); the
+   * profile holds it because a different change has its actor and sequence
+   * number (SHARED-OBJECTS-PROFILE-01 §14.1, POST-001). It is retried after
+   * every rebuild that removes changes, and reported as applied then.
+   */
+  | (Applied & { readonly kind: "profile-held"; readonly detail: string })
   /** Accepted by LFCP, refused by the profile when merging: never merged. */
   | {
       readonly kind: "profile-rejected";
@@ -299,7 +316,10 @@ const unreachableCodec = (dataProfile: string): DataProfileCodec<never> => ({
   },
 });
 
-const LFCP_ACCEPTED: readonly DataUnitStatus[] = ["merged", "profile-pending"];
+const LFCP_ACCEPTED: readonly DataUnitStatus[] = ["merged", "profile-pending", "profile-held"];
+
+const HELD =
+  "held: a different change has its actor and sequence number (SHARED-OBJECTS-PROFILE-01 §14.1)";
 
 const CRASHED =
   "this unit crashed the profile engine twice, applied alone; it is not applied again on this device (local only)";
@@ -568,6 +588,7 @@ export class DataUnitApplier {
       return out;
     }
     const merged = new Set(batch.merged.map((id) => toHex(id)));
+    const heldNow = new Set((batch.held ?? []).map((id) => toHex(id)));
     const rejected = new Map(batch.rejected.map((x) => [toHex(x.unitId), x]));
     const inBatch = new Set(staged.map(({ r }) => toHex(r.unitId)));
     const unblocked = batch.merged.filter((id) => !inBatch.has(toHex(id)));
@@ -597,7 +618,11 @@ export class DataUnitApplier {
             merged: [...(now ? [r.unitId] : []), ...(k === 0 ? unblocked : [])],
             objects: k === last ? batch.objects : [],
             diagnostics: k === last ? batch.diagnostics : [],
-            ...(now ? {} : { pending: "buffered by the profile" }),
+            ...(now
+              ? {}
+              : heldNow.has(key)
+                ? { held: HELD }
+                : { pending: "buffered by the profile" }),
           },
           false,
         ),
@@ -659,15 +684,23 @@ export class DataUnitApplier {
     const dataProfile = handler.dataProfile;
     const mergedNow = result.merged.some((id) => bytesEqual(id, r.unitId));
     const alsoMerged = result.merged.filter((id) => !bytesEqual(id, r.unitId));
+    const held = !mergedNow && result.held !== undefined;
     await this.#write([
       mergedNow
         ? { op: "set-data-unit-status", unitId: r.unitId, status: "merged" }
-        : {
-            op: "set-data-unit-status",
-            unitId: r.unitId,
-            status: "profile-pending",
-            detail: result.pending ?? "buffered by the profile",
-          },
+        : held
+          ? {
+              op: "set-data-unit-status",
+              unitId: r.unitId,
+              status: "profile-held",
+              detail: result.held ?? null,
+            }
+          : {
+              op: "set-data-unit-status",
+              unitId: r.unitId,
+              status: "profile-pending",
+              detail: result.pending ?? "buffered by the profile",
+            },
       ...alsoMerged.map(
         (unitId): StorageWrite => ({ op: "set-data-unit-status", unitId, status: "merged" }),
       ),
@@ -701,6 +734,8 @@ export class DataUnitApplier {
       alsoMerged: Object.freeze(alsoMerged),
       released: Object.freeze(released),
     };
+    if (held)
+      return Object.freeze({ ...base, kind: "profile-held", detail: result.held as string });
     return Object.freeze(
       mergedNow
         ? {
@@ -747,9 +782,13 @@ export class DataUnitApplier {
           detail: "builds on an equivocating unit",
         }),
       ),
+      ...this.#freedWrites(result),
     ]);
     // The actor's latest accepted unit may now be lower: held units can link (G-DP1-GAP).
-    const released = merged.length > 0 ? await this.#retryHeld(view, [r.actor]) : [];
+    const released = [
+      ...(merged.length > 0 ? await this.#retryHeld(view, [r.actor]) : []),
+      ...(await this.#freed(handler, result)),
+    ];
     return Object.freeze({
       ...r,
       excluded: Object.freeze(merged),
@@ -794,6 +833,7 @@ export class DataUnitApplier {
     const stored = [
       ...(await this.#storage.dataUnits.withStatus(resource, "merged")),
       ...(await this.#storage.dataUnits.withStatus(resource, "profile-pending")),
+      ...(await this.#storage.dataUnits.withStatus(resource, "profile-held")),
       ...(await this.#storage.dataUnits.withStatus(resource, "seen")),
       ...(await this.#storage.dataUnits.withStatus(resource, "held")),
     ]
@@ -801,6 +841,7 @@ export class DataUnitApplier {
       .sort((a, b) => (a.actorSeq < b.actorSeq ? -1 : a.actorSeq > b.actorSeq ? 1 : 0));
     const merged: DataUnitId[] = [];
     const pendingNow: DataUnitId[] = [];
+    const heldNow: DataUnitId[] = [];
     // Suspects of an earlier crash replay alone, each under its own record.
     const suspect = (u: { unitId: DataUnitId }) =>
       this.#guard.suspicion(resource, unitItem(u.unitId)) > 0;
@@ -810,11 +851,23 @@ export class DataUnitApplier {
         await this.#guard.run(
           resource,
           group.map((u) => unitItem(u.unitId)),
-          () => this.#replayGroup(handler, group, { merged, pendingNow, replayed, skipped }),
+          () =>
+            this.#replayGroup(handler, group, { merged, pendingNow, heldNow, replayed, skipped }),
         );
+    const isHeld = (id: DataUnitId) => heldNow.some((h) => bytesEqual(h, id));
     await this.#write([
-      ...pendingNow
+      ...heldNow
         .filter((id) => !merged.some((m) => bytesEqual(m, id)))
+        .map(
+          (unitId): StorageWrite => ({
+            op: "set-data-unit-status",
+            unitId,
+            status: "profile-held",
+            detail: HELD,
+          }),
+        ),
+      ...pendingNow
+        .filter((id) => !merged.some((m) => bytesEqual(m, id)) && !isHeld(id))
         .map(
           (unitId): StorageWrite => ({
             op: "set-data-unit-status",
@@ -840,11 +893,12 @@ export class DataUnitApplier {
     acc: {
       readonly merged: DataUnitId[];
       readonly pendingNow: DataUnitId[];
+      readonly heldNow: DataUnitId[];
       readonly replayed: DataUnitId[];
       readonly skipped: { unitId: DataUnitId; reason: string }[];
     },
   ): Promise<void> {
-    const { merged, pendingNow, replayed, skipped } = acc;
+    const { merged, pendingNow, heldNow, replayed, skipped } = acc;
     const decoded: { readonly unit: ProfileUnit; readonly value: unknown }[] = [];
     for (const u of group) {
       const dek = await this.#options.dek(u.dataEpoch);
@@ -879,6 +933,7 @@ export class DataUnitApplier {
       const batch = handler.applyBatch(decoded);
       const refused = new Map(batch.rejected.map((x) => [toHex(x.unitId), x]));
       merged.push(...batch.merged);
+      heldNow.push(...(batch.held ?? []));
       for (const { unit } of decoded) {
         const no = refused.get(toHex(unit.unitId));
         if (no !== undefined) {
@@ -893,6 +948,7 @@ export class DataUnitApplier {
         try {
           const r = handler.apply(unit, value);
           merged.push(...r.merged);
+          if (r.held !== undefined) heldNow.push(unit.unitId);
           if (!r.merged.some((id) => bytesEqual(id, unit.unitId))) pendingNow.push(unit.unitId);
           replayed.push(unit.unitId);
         } catch (e) {
@@ -1048,6 +1104,41 @@ export class DataUnitApplier {
     return [...byHex.values()];
   }
 
+  /** Status writes for the held units (§14.1) a rebuild merged. */
+  #freedWrites(result: ProfileExcludeResult): StorageWrite[] {
+    return (result.released ?? []).map(
+      (unitId): StorageWrite => ({ op: "set-data-unit-status", unitId, status: "merged" }),
+    );
+  }
+
+  /** The held units (§14.1) a rebuild merged, reported as applied. */
+  async #freed(
+    handler: DataProfileHandler<unknown>,
+    result: ProfileExcludeResult,
+  ): Promise<ApplyOutcome[]> {
+    const out: ApplyOutcome[] = [];
+    for (const unitId of result.released ?? []) {
+      const u = await this.#storage.dataUnits.get(unitId);
+      if (u === undefined) continue;
+      out.push(
+        Object.freeze({
+          kind: "applied",
+          unitId,
+          dataProfile: handler.dataProfile,
+          actor: u.actor,
+          seq: u.actorSeq,
+          epoch: u.dataEpoch,
+          haveEligible: false as const,
+          alsoMerged: Object.freeze([]),
+          released: Object.freeze([]),
+          objects: Object.freeze([]),
+          diagnostics: Object.freeze([]),
+        }),
+      );
+    }
+    return out;
+  }
+
   /**
    * §26.2 (G-DP1-GAP): after units of `actors` stopped being accepted, a
    * held unit may now name the actor's latest accepted unit. Every held
@@ -1094,6 +1185,7 @@ export class DataUnitApplier {
     const candidates = [
       ...(await this.#storage.dataUnits.withStatus(resource, "merged")),
       ...(await this.#storage.dataUnits.withStatus(resource, "profile-pending")),
+      ...(await this.#storage.dataUnits.withStatus(resource, "profile-held")),
     ].filter((u) => u.accepted);
     const excluded: ExcludedUnit[] = [];
     for (const u of candidates) {
@@ -1124,9 +1216,13 @@ export class DataUnitApplier {
           detail: "builds on an excluded unit",
         }),
       ),
+      ...this.#freedWrites(result),
     ]);
     const actors = await this.#actorsOf(excluded.map((e) => e.unitId));
-    const released = await this.#retryHeld(view, actors);
+    const released = [
+      ...(await this.#retryHeld(view, actors)),
+      ...(await this.#freed(handler, result)),
+    ];
     return Object.freeze({
       snapshotDropped,
       excluded: Object.freeze(excluded),

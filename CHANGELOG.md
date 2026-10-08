@@ -8,6 +8,16 @@ remove or rename any.
 
 ### Added
 
+- `@openlfcp/client` and `@openlfcp/storage`, POST-001 (SHARED-OBJECTS-PROFILE-01
+  §14.1): a unit whose change another change's actor and sequence number
+  already has is reported as the new `ApplyOutcome` `"profile-held"`
+  (with `actor`, `seq`, `epoch` and `detail`) and stored with the new
+  status `"profile-held"`. It stays LFCP-accepted: it is in the Have Vector
+  and is relayed. After every rebuild that removes changes (an
+  equivocation, a Key Epoch cutoff) it is retried, and a released unit is
+  reported as `"applied"` in that event's `released`. A restart replays
+  it. Profile handlers report held units in `ProfileBatchResult.held`,
+  `ProfileApplyResult.held` and `ProfileExcludeResult.released`.
 - `@openlfcp/wire`: the §62 code `UNKNOWN_PREVIOUS` (23), a server's
   refusal of a Data Unit whose `previous` it does not store (§51.1), and
   `haveDifference(local, remote)`, both directions of anti-entropy: what a
