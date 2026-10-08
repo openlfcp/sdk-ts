@@ -1,0 +1,136 @@
+# Publishes the eight @openlfcp/* packages to npm with Trusted Publishing
+# (OIDC): no npm token, no one-time code. See .github:
+# docs/release/npm-publish-checklist.md, "Trusted publishing", and
+# docs/release/npm-trusted-publishing-setup.md for the one-time setup.
+#
+# - A pushed tag vX.Y.Z publishes version X.Y.Z, after an approval in the
+#   GitHub environment npm-publish. A prerelease (X.Y.Z-rc.N) goes to the
+#   dist-tag next, a final version to latest.
+# - workflow_dispatch runs the same path as a dry run (npm publish
+#   --dry-run) on the chosen branch: nothing is published and no approval
+#   is asked. A real publish only ever comes from a tag.
+#
+# The "build" job builds, checks and packs from a fresh checkout; the
+# "publish" job publishes exactly those tarballs, in dependency order, and
+# skips a version the registry already has, so a run that failed midway can
+# be run again. Then the registry is checked as a user would see it.
+
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: build, check and pack, then npm publish --dry-run (a real publish needs a tag)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # npm 11.5.1 or later is needed for Trusted Publishing (OIDC).
+  NPM_VERSION: "11.20.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      dist-tag: ${{ steps.version.outputs.dist-tag }}
+    steps:
+      - name: Refuse a real publish without a tag
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == false
+        run: |
+          echo "::error::a real publish runs only from a pushed vX.Y.Z tag; use dry_run for a dispatch"
+          exit 1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: npm install --global "npm@${NPM_VERSION}"
+      - id: version
+        name: Every package has one version, the tag's
+        run: |
+          version=$(jq -er .version packages/core/package.json)
+          for p in packages/*/package.json; do
+            v=$(jq -er .version "$p")
+            if [ "$v" != "$version" ]; then echo "::error::$p is $v, core is $version"; exit 1; fi
+          done
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, packages $version"; exit 1
+          fi
+          case "$version" in *-*) tag=next ;; *) tag=latest ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dist-tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version $version, dist-tag $tag"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      # Builds a clean copy, packs it, checks every tarball, installs and
+      # imports them, and checks that this checkout packs the same files.
+      - run: pnpm release:check
+      - name: Pack each package (workspace ranges become ^version)
+        run: |
+          mkdir -p "$RUNNER_TEMP/tarballs"
+          for p in core crypto storage wire storage-node storage-idb shared-objects client; do
+            (cd "packages/$p" && pnpm pack --pack-destination "$RUNNER_TEMP/tarballs")
+          done
+          ls -l "$RUNNER_TEMP/tarballs"
+      - name: npm publish --dry-run of each tarball
+        run: |
+          for p in core crypto storage wire storage-node storage-idb shared-objects client; do
+            npm publish "$RUNNER_TEMP/tarballs/openlfcp-$p-${{ steps.version.outputs.version }}.tgz" \
+              --dry-run --tag "${{ steps.version.outputs.dist-tag }}" --access public
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tarballs
+          path: ${{ runner.temp }}/tarballs/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    # The owner approves the release here (required reviewer).
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install --global "npm@${NPM_VERSION}"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tarballs
+          path: ${{ runner.temp }}/tarballs
+      - name: Publish in dependency order (provenance through OIDC)
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          DIST_TAG: ${{ needs.build.outputs.dist-tag }}
+        run: |
+          for p in core crypto storage wire storage-node storage-idb shared-objects client; do
+            if npm view "@openlfcp/$p@$VERSION" version >/dev/null 2>&1; then
+              echo "@openlfcp/$p@$VERSION is already published: skipped"
+              continue
+            fi
+            npm publish "$RUNNER_TEMP/tarballs/openlfcp-$p-$VERSION.tgz" --tag "$DIST_TAG" --access public
+          done
+      - name: The registry as a user sees it
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          DIST_TAG: ${{ needs.build.outputs.dist-tag }}
+        run: node scripts/registry-check.mjs "$VERSION" "$DIST_TAG" --wait-ms 600000
