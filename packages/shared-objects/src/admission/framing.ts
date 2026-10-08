@@ -69,7 +69,7 @@ export function checkChange(bytes: Uint8Array): CheckedChange {
   }
   if (toHex(bytes.subarray(4, 8)) !== decoded.hash.slice(0, 8))
     reject("the Automerge change checksum does not match its hash (§11)");
-  return Object.freeze({
+  const checked: CheckedChange = Object.freeze({
     bytes: Uint8Array.from(bytes),
     hash: decoded.hash,
     actor: decoded.actor,
@@ -77,6 +77,16 @@ export function checkChange(bytes: Uint8Array): CheckedChange {
     deps: Object.freeze([...decoded.deps]),
     otherActors: expansion.otherActors,
   });
+  DECODED.set(checked, decoded);
+  return checked;
+}
+
+/** The decoded form checkChange made, kept for the change's lifetime (decoding is not cheap). */
+const DECODED = new WeakMap<CheckedChange, A.DecodedChange>();
+
+/** The decoded change, reusing the decode of checkChange when there was one. */
+export function decodedOf(change: CheckedChange): A.DecodedChange {
+  return DECODED.get(change) ?? A.decodeChange(change.bytes);
 }
 
 /**
