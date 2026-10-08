@@ -388,6 +388,8 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     await bob.sync.idle();
     expect(bob.sync.resourceState(chain.R)).toBe("LIVE");
     expect(await dekResolver(bob.storage, bob.secrets, chain.R)(dataEpoch(0n))).toBeDefined();
+    // §86: the package is kept with the Resource, to re-supply a server that lost it (§68.1).
+    expect((await bob.storage.keyPackages.list(chain.R)).map((k) => k.bytes)).toEqual([kp.bytes]);
   });
 
   it("issues a data round again when its DATA_GET reply is lost on a live connection (§70)", async () => {

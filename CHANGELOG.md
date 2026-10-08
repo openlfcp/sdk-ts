@@ -36,6 +36,9 @@ remove or rename any.
 
 ### Changed
 
+- `@openlfcp/client`, behaviour (LFCP-WIRE-01 §86, baseline.9): a Key
+  Package the client opened is now stored (`keyPackages`), like the ones it
+  sends, for as long as it keeps the Resource.
 - `@openlfcp/shared-objects`, behaviour (POST-001, SHARED-OBJECTS-PROFILE-01
   §14.1): a change whose actor and sequence number another change of the
   document already has is now **held**, not refused with

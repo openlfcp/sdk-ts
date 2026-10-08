@@ -5,12 +5,19 @@ import {
   type DataUnitId,
   dataEpoch,
   type Hash32,
+  hash32,
   LfcpError,
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
 import { type AgreementKeyPair, exportSecretKeyBytes, sha256 } from "@openlfcp/crypto";
-import { dekSecretRef, type EpochRow, type LfcpStorage, type SecretStore } from "@openlfcp/storage";
+import {
+  dekSecretRef,
+  type EpochRow,
+  type LfcpStorage,
+  type SecretStore,
+  type StorageWrite,
+} from "@openlfcp/storage";
 import {
   type ActorRange,
   type AnyMessage,
@@ -34,6 +41,7 @@ import {
   normalizeLiveHaves,
   parseControlRecord,
   parseDataUnit,
+  parseKeyPackage,
   planControlSync,
   type ReadySession,
   receiveKeyPackage,
@@ -1069,14 +1077,31 @@ export class SyncClient {
         );
         continue;
       }
-      // Secret first, then the row that references it (LFCP-034).
+      // Secret first, then the row that references it (LFCP-034). The
+      // package itself is kept while we keep the Resource (§86), to
+      // re-supply a server that lost it (§68.1).
       const ref = dekSecretRef(R, r.epoch);
       await this.#o.secrets.put(ref, exportSecretKeyBytes(r.dek));
+      const parsed = parseKeyPackage(bytes);
+      const writes: StorageWrite[] = [
+        {
+          op: "put-key-package",
+          row: {
+            packageId: hash32(parsed.signed.id),
+            resourceId: R,
+            dataEpoch: parsed.payload.dataEpoch,
+            recipient: parsed.payload.recipient,
+            sender: parsed.payload.sender,
+            bytes: parsed.signed.bytes,
+          },
+        },
+      ];
       const row = (await this.#o.storage.control.epochs(R)).find((e) => e.epoch === r.epoch);
       if (row !== undefined) {
         const next: EpochRow = { ...row, dekRef: ref };
-        await this.#o.storage.commit([{ op: "put-epoch", resourceId: R, epoch: next }]);
+        writes.push({ op: "put-epoch", resourceId: R, epoch: next });
       }
+      await this.#o.storage.commit(writes);
     }
     const missing = await this.#epochsWithoutDek(ctx);
     const current = view.state.epoch.epoch;
