@@ -35,6 +35,13 @@ remove or rename any.
   Objects Task intents on section Tasks. A refused batch writes nothing and
   throws `SectionIntentError` with a typed `code` and the intent's index.
   Authoring SS01 with the corpus identities reaches its reference state.
+- `node.move` and `node.set_list_style` on `SectionReplica` (LFCP-02-013):
+  a move writes a fresh immutable placement into the destination list
+  after the visible predecessor and points the node's register at it; the
+  node, its Task and its subtree keep their identity, and the old slot
+  stays as an anchor. A move under itself or a descendant, or after itself,
+  is refused. SS09 (repeated moves) and SS02 (concurrent inserts, merged)
+  reach their reference states.
 
 ## 0.1.3 — 2026-10-08
 

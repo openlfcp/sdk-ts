@@ -60,8 +60,10 @@ export type SectionIntentCode =
   | "ID_IN_USE"
   /** The parent is missing, invalid, deleted, in conflict or cannot hold content (§4.2, §6). */
   | "INVALID_PARENT"
-  /** `after` is not a visible child of the parent (§6). */
+  /** `after` is not a visible child of the parent, or is the moved node (§6). */
   | "INVALID_PREDECESSOR"
+  /** The node is invalid, collides, or has concurrent placements: resolve it first (§7, §8). */
+  | "NODE_IN_CONFLICT"
   /** A value outside its domain: an ID, a list style, a timestamp, a string (§3, §4). */
   | "INVALID_INTENT"
   /** The batch is over an authoring budget of §16.2. */
@@ -123,6 +125,10 @@ export type SectionIntent =
       /** item.create only. */
       readonly listStyle?: ListStyle;
     } & Position)
+  /** §5, §6: a fresh placement under `parent`; the node keeps its identity and subtree. */
+  | ({ readonly intent: "node.move"; readonly id: string } & Position)
+  /** §4.2: ordered or bullet list membership, on task and item nodes. */
+  | { readonly intent: "node.set_list_style"; readonly id: string; readonly listStyle: ListStyle }
   /** A SHARED-OBJECTS-PROFILE-01 Task intent on a Task of this section (§2). */
   | Exclude<ReplicaIntent, { intent: "task.create" }>;
 
@@ -482,6 +488,57 @@ export class SectionReplica {
       };
     }
 
+    if (intent.intent === "node.move" || intent.intent === "node.set_list_style") {
+      const id = intent.id;
+      const node = (doc.nodes as AMap)[id] as AMap | undefined;
+      if (node === undefined) refuse("INVALID_INTENT", `${id} names no node`, id);
+      if (v.nodes.has(id) || v.collided.includes(id))
+        refuse("NODE_IN_CONFLICT", `${id} is invalid or collides (§14.2)`, id);
+      const kind = str((node as AMap).kind);
+      affected.add(id);
+      if (intent.intent === "node.set_list_style") {
+        if (!isListStyle(intent.listStyle) || (kind !== "task" && kind !== "item"))
+          refuse(
+            "INVALID_INTENT",
+            "list_style is bullet or ordered, on task and item nodes only (§4.2)",
+            id,
+          );
+        const style = intent.listStyle;
+        return (d) => {
+          const n = (d.nodes as AMap)[id] as AMap;
+          // §58 (G-SC4): an unchanged value is deleted first so the intent writes.
+          if (str(n.list_style) === style) delete n.list_style;
+          n.list_style = S(style);
+        };
+      }
+      if (values(node as AMap, "placement").length !== 1)
+        refuse("NODE_IN_CONFLICT", `${id} has concurrent placements: resolve them (§7, §8)`, id);
+      const placementId = intent.placementId ?? generateObjectId();
+      if (!isObjectId(placementId))
+        refuse("INVALID_INTENT", "the PlacementId is not a canonical UUIDv7 (§3)", id);
+      if (idInUse(doc, sectionId, placementId))
+        refuse("ID_IN_USE", `the PlacementId ${placementId} is already used (§3)`, id);
+      const index = insertionIndex(doc, v, sectionId, intent.parent, intent.after, refuse, id);
+      const createdBy = principalRef(this.#principal);
+      const parent = intent.parent;
+      return (d) => {
+        (d.placements as AMap)[placementId] = {
+          id: S(placementId),
+          node_id: S(id),
+          parent_id: S(parent),
+          created_by: S(createdBy),
+        };
+        const lane = (
+          parent === sectionId
+            ? (d.section as AMap).children
+            : ((d.nodes as AMap)[parent] as AMap).children
+        ) as unknown[];
+        lane.splice(index, 0, S(placementId));
+        // §5: the node's register selects the new slot; the old one stays as an anchor.
+        ((d.nodes as AMap)[id] as AMap).placement = S(placementId);
+      };
+    }
+
     // A SOP Task intent on a Task of this section (§2).
     const prepared = prepareTaskIntent(
       doc,
@@ -537,6 +594,7 @@ function insertionIndex(
   parent: string,
   after: string | null,
   refuse: (c: SectionIntentCode, m: string, node?: string) => never,
+  moving?: string,
 ): number {
   const nodes = doc.nodes as AMap;
   const placements = doc.placements as AMap;
@@ -569,6 +627,12 @@ function insertionIndex(
     const seen = new Set<string>();
     let p = parent;
     while (p !== sectionId) {
+      if (p === moving)
+        refuse(
+          "INVALID_PARENT",
+          `${moving} cannot move under itself or its descendant (§6)`,
+          moving,
+        );
       if (seen.has(p)) refuse("INVALID_PARENT", `the parent ${parent} is in a cycle (§7)`, parent);
       seen.add(p);
       const e = eligible(p);
@@ -580,6 +644,7 @@ function insertionIndex(
     parent === sectionId ? (doc.section as AMap).children : (nodes[parent] as AMap).children
   ) as unknown[];
   if (after === null) return 0;
+  if (after === moving) refuse("INVALID_PREDECESSOR", `${after} cannot follow itself (§6)`, after);
   const e = eligible(after);
   if ("why" in e || e.parent !== parent)
     refuse("INVALID_PREDECESSOR", `${after} is not a visible child of ${parent} (§6)`, after);

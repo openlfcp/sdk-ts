@@ -7,7 +7,10 @@
 //   (identical bytes are not required: SHARED-SECTIONS-TEST-VECTORS-01 §5);
 // - SS03 (the Task half) and SS11: Task field intents on a section Task
 //   reach the expected Task and leave the child paragraph untouched;
-// - SS18: an unknown node extension survives a Task edit by this writer.
+// - SS18: an unknown node extension survives a Task edit by this writer;
+// - SS09: three moves of one Task reach the reference state, historical
+//   slots included; SS02: two writers' concurrent inserts after one Task
+//   merge to the reference state, sibling order included.
 
 import { fromHex, principalId, resourceId, toHex } from "@openlfcp/core";
 import { createTask } from "@openlfcp/shared-objects";
@@ -40,7 +43,8 @@ interface Suite {
 }
 type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
 interface State {
-  section: { title: string; created_by: string };
+  section: { title: string; created_by: string; children: string[] };
+  placements: Record<string, { node_id: string; parent_id: string }>;
   nodes: Record<string, { placement: string; text?: string; extensions: Record<string, Json> }>;
   objects: Record<string, { title: string; created_by: string }>;
 }
@@ -164,5 +168,76 @@ describe("authoring the shared sections corpus (LFCP-02-012)", () => {
     r.commit([{ intent: "task.set_title", id: ids.task as never, title: "Edited" }]);
     expect((r.toJSON() as unknown as State).nodes[para]?.extensions).toEqual(before);
     expect(r.validate().nodes.size).toBe(0);
+  });
+
+  it("SS09: repeated moves keep one identity and every historical slot", () => {
+    const ref = reference("SS09").toJSON() as unknown as State;
+    const task = ids.task as string;
+    const first = (reference("SS01").toJSON() as unknown as State).nodes[task]?.placement;
+    const slotUnder = (parent: string) =>
+      Object.entries(ref.placements).find(
+        ([pid, p]) => p.node_id === task && p.parent_id === parent && pid !== first,
+      )?.[0] as string;
+    const r = authorSS01();
+    r.commit([
+      {
+        intent: "node.move",
+        id: task,
+        parent: ids.x as string,
+        after: null,
+        placementId: slotUnder(ids.x as string),
+      },
+    ]);
+    r.commit([
+      {
+        intent: "node.move",
+        id: task,
+        parent: ids.y as string,
+        after: null,
+        placementId: slotUnder(ids.y as string),
+      },
+    ]);
+    r.commit([
+      {
+        intent: "node.move",
+        id: task,
+        parent: ids.section as string,
+        after: ids.y as string,
+        placementId: slotUnder(ids.section as string),
+      },
+    ]);
+    expect(canonical(r.toJSON() as Json)).toEqual(canonical(ref as unknown as Json));
+  });
+
+  it("SS02: concurrent inserts after one Task merge to the reference order", () => {
+    const ref = reference("SS02").toJSON() as unknown as State;
+    const task = ids.task as string;
+    const insert = (who: "A" | "B", node: string) => {
+      const r = SectionReplica.fromSave(
+        authorSS01().save(),
+        { resource, principal: principal(who) },
+        "local-state",
+      );
+      r.commit([
+        {
+          intent: "paragraph.create",
+          id: node,
+          parent: ids.section as string,
+          after: task,
+          text: ref.nodes[node]?.text as string,
+          createdBy: principal(who),
+          placementId: ref.nodes[node]?.placement as string,
+        },
+      ]);
+      return r.changes().at(-1) as Uint8Array;
+    };
+    const base = authorSS01().changes();
+    const a = insert("A", ids.a as string);
+    const b = insert("B", ids.b as string);
+    const merged = SectionReplica.fromChanges([...base, b, a], A_);
+    expect(merged.unapplied).toEqual([]);
+    const got = merged.replica.toJSON() as unknown as State;
+    expect(got.section.children).toEqual(ref.section.children);
+    expect(canonical(got as unknown as Json)).toEqual(canonical(ref as unknown as Json));
   });
 });

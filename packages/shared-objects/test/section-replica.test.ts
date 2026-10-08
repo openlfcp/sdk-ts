@@ -371,3 +371,139 @@ describe("SectionReplica: refusals before commit (SDK-SECTIONS-INTEGRATION-01 §
     expect([e.code, e.intentIndex]).toEqual(["OVER_BUDGET", AUTHORING_BUDGET.createdNodes]);
   });
 });
+
+describe("SectionReplica: moves (§5, §6)", () => {
+  /** Every PlacementId of every children list, in order: lists are insert-only. */
+  const lanes = (r: SectionReplica) => {
+    const s = view(r);
+    return [s.section.children, ...Object.values(s.nodes).map((n) => n.children)].flat();
+  };
+  const isSubsequence = (before: string[], after: string[]) => {
+    let i = 0;
+    for (const x of after) if (x === before[i]) i++;
+    return i === before.length;
+  };
+
+  it("moves a subtree with a fresh slot; the node, its Task and its children keep their identity", () => {
+    const r = built();
+    const before = view(r);
+    const oldSlot = before.nodes[T]?.placement as string;
+    const oldLanes = lanes(r);
+    const c = r.commit([{ intent: "node.move", id: T, parent: X, after: null }]);
+    expect(c?.affectedNodeIds).toEqual([T]);
+    const after = view(r);
+    expect(after.nodes[T]?.placement).not.toBe(oldSlot);
+    expect(after.placements[after.nodes[T]?.placement as string]).toMatchObject({
+      node_id: T,
+      parent_id: X,
+    });
+    // The old slot stays in the section's list and in placements, unchanged.
+    expect(after.section.children).toContain(oldSlot);
+    expect(after.placements[oldSlot]).toEqual(before.placements[oldSlot]);
+    expect(isSubsequence(oldLanes, lanes(r))).toBe(true);
+    expect(after.nodes[T]?.children).toEqual(before.nodes[T]?.children);
+    expect(after.objects[T]).toEqual(before.objects[T]);
+    expect(r.validate().nodes.size).toBe(0);
+  });
+
+  it("reorders among siblings and keeps every historical slot (SS09's shape)", () => {
+    const r = built();
+    r.commit([{ intent: "node.move", id: T, parent: X, after: null }]);
+    r.commit([{ intent: "node.move", id: T, parent: Y, after: null }]);
+    r.commit([{ intent: "node.move", id: T, parent: SECTION, after: Y }]);
+    const s = view(r);
+    expect(Object.keys(s.placements)).toHaveLength(7);
+    // The section's list holds T's first slot and its last one; only the
+    // selected one names T as current.
+    const selected = s.nodes[T]?.placement as string;
+    expect(s.section.children.at(-1)).toBe(selected);
+    expect(order(r, s.section.children)).toEqual([T, X, Y, T]);
+  });
+
+  it("refuses a move under itself, under a descendant, or after itself", () => {
+    const r = built();
+    const before = r.revision();
+    expect(
+      refusal(() => r.commit([{ intent: "node.move", id: T, parent: T, after: null }])).code,
+    ).toBe("INVALID_PARENT");
+    const U = id(20);
+    r.commit([{ intent: "item.create", id: U, parent: T, after: P, text: "u", createdBy: alice }]);
+    expect(
+      refusal(() => r.commit([{ intent: "node.move", id: T, parent: U, after: null }])).code,
+    ).toBe("INVALID_PARENT");
+    expect(
+      refusal(() => r.commit([{ intent: "node.move", id: X, parent: SECTION, after: X }])).code,
+    ).toBe("INVALID_PREDECESSOR");
+    expect(r.revision()).not.toBe(before);
+    expect(
+      refusal(() => r.commit([{ intent: "node.move", id: id(99), parent: SECTION, after: null }]))
+        .code,
+    ).toBe("INVALID_INTENT");
+  });
+
+  it("moves a node created earlier in the same batch", () => {
+    const r = built();
+    const U = id(21);
+    r.commit([
+      { intent: "item.create", id: U, parent: SECTION, after: null, text: "u", createdBy: alice },
+      { intent: "node.move", id: U, parent: X, after: null },
+    ]);
+    const s = view(r);
+    expect(s.placements[s.nodes[U]?.placement as string]?.parent_id).toBe(X);
+    expect(r.changes()).toHaveLength(2);
+  });
+
+  it("sets the list style of task and item nodes only (§4.2)", () => {
+    const r = built();
+    r.commit([
+      { intent: "node.set_list_style", id: X, listStyle: "ordered" },
+      { intent: "node.set_list_style", id: T, listStyle: "ordered" },
+    ]);
+    expect(
+      (r.toJSON() as { nodes: Record<string, { list_style: string }> }).nodes[X]?.list_style,
+    ).toBe("ordered");
+    expect(
+      refusal(() => r.commit([{ intent: "node.set_list_style", id: P, listStyle: "ordered" }]))
+        .code,
+    ).toBe("INVALID_INTENT");
+  });
+
+  it("converges on one sibling order for concurrent inserts, in any merge order (§6)", () => {
+    const base = built();
+    const a = SectionReplica.fromSave(base.save(), { resource, principal: alice }, "local-state");
+    const b = SectionReplica.fromSave(base.save(), { resource, principal: bob }, "local-state");
+    a.commit([
+      {
+        intent: "paragraph.create",
+        id: id(30),
+        parent: SECTION,
+        after: T,
+        text: "A",
+        createdBy: alice,
+      },
+    ]);
+    b.commit([
+      {
+        intent: "paragraph.create",
+        id: id(31),
+        parent: SECTION,
+        after: T,
+        text: "B",
+        createdBy: bob,
+      },
+    ]);
+    const ab = SectionReplica.fromChanges([...a.changes(), ...b.changes()], {
+      resource,
+      principal: alice,
+    });
+    const ba = SectionReplica.fromChanges([...b.changes().reverse(), ...a.changes()], {
+      resource,
+      principal: bob,
+    });
+    expect(ab.unapplied).toEqual([]);
+    const orderOf = (r: SectionReplica) => order(r, view(r).section.children);
+    expect(orderOf(ab.replica)).toEqual(orderOf(ba.replica));
+    expect(orderOf(ab.replica)).toEqual(expect.arrayContaining([T, id(30), id(31), X, Y]));
+    expect(ab.replica.validate().nodes.size).toBe(0);
+  });
+});
