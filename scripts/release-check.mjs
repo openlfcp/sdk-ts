@@ -44,17 +44,10 @@ import { checkoutPackProblems, packJsonFiles } from "./pack-files.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const keep = process.argv.includes("--keep");
-/** Publish order: each package after everything it depends on. */
-export const PUBLISH_ORDER = [
-  "core",
-  "crypto",
-  "storage",
-  "wire",
-  "storage-node",
-  "storage-idb",
-  "shared-objects",
-  "client",
-];
+
+import { PUBLISH_ORDER } from "./packages.mjs";
+
+export { PUBLISH_ORDER };
 
 /** Every package is released at @openlfcp/core's version. */
 const VERSION = JSON.parse(
