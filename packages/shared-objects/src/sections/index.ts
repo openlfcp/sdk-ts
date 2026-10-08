@@ -30,6 +30,8 @@ export {
   type SectionRefusal,
   SectionReplica,
   type SectionReplicaOptions,
+  type SectionSnapshot,
+  type SectionSnapshotNode,
   type SectionUnit,
   type TextEdit,
 } from "./replica.js";

@@ -267,6 +267,41 @@ export interface SectionReceiveResult {
   readonly refused: readonly SectionRefusal[];
 }
 
+/** One node of a snapshot (SectionReplica.snapshot). */
+export interface SectionSnapshotNode {
+  readonly kind: string;
+  /** The section ID or the parent node of the selected placement; undefined when it has none. */
+  readonly parent: string | undefined;
+  /** Paragraph, item and raw nodes: the Text, with LF line breaks. */
+  readonly text?: string;
+  readonly listStyle?: ListStyle;
+  /** Task nodes: the Task's ID (the node's own). */
+  readonly taskId?: string;
+  /** Deleted itself (a Task node: its Task); delete projected lines only for this. */
+  readonly deleted: boolean;
+  /** Deleted itself or under a deleted ancestor: not shown. */
+  readonly hidden: boolean;
+}
+
+/** One synchronous read of a section on one revision (SectionReplica.snapshot). */
+export interface SectionSnapshot {
+  /** The document heads, sorted, as one string: a receipt's modelRevision, text.edit's base. */
+  readonly revision: string;
+  readonly classification: SectionTree["classification"];
+  readonly title: { readonly value: string | undefined; readonly conflicts: readonly string[] };
+  /** Every node but colliding ones, by ID. */
+  readonly nodes: Readonly<Record<string, SectionSnapshotNode>>;
+  /** The visible nodes in projection order (preorder), with parent and depth. */
+  readonly order: SectionTree["tree"];
+  readonly problems: {
+    readonly recovery: SectionTree["recovery"];
+    readonly invalid: SectionTree["invalid"];
+    readonly collisions: SectionTree["collisions"];
+    readonly retainedConcurrentEdits: SectionTree["retainedConcurrentEdits"];
+    readonly scalarConflicts: SectionTree["scalarConflicts"];
+  };
+}
+
 export interface SectionReplicaOptions {
   readonly resource: ResourceId;
   readonly principal: PrincipalId;
@@ -425,6 +460,58 @@ export class SectionReplica {
       }
     }
     return this.#seqs;
+  }
+
+  /**
+   * Everything an editor projects, in one synchronous read of one revision:
+   * the title (and its concurrent values), each node, the visible order,
+   * and the problems to show. `revision` is the modelRevision of a commit
+   * receipt and the `base` of text.edit.
+   */
+  snapshot(): SectionSnapshot {
+    const tree = deriveTree(this.#doc);
+    const root = this.#doc as AMap;
+    const section = (root.section ?? {}) as AMap;
+    const nodes = (root.nodes ?? {}) as AMap;
+    const objects = (root.objects ?? {}) as AMap;
+    const placements = (root.placements ?? {}) as AMap;
+    const hidden = new Set(tree.hidden);
+    const titles = values(section, "title").map(str);
+    const out: Record<string, SectionSnapshotNode> = {};
+    for (const id of Object.keys(nodes).sort()) {
+      if (tree.collisions.includes(id)) continue;
+      const n = nodes[id] as AMap;
+      const kind = str(n.kind) ?? "";
+      const owner = (kind === "task" ? objects[id] : n) as AMap | undefined;
+      const placement = placements[str(n.placement) ?? ""] as AMap | undefined;
+      const text = n.text;
+      out[id] = Object.freeze({
+        kind,
+        parent: str(placement?.parent_id),
+        ...(kind !== "task" && text !== undefined ? { text: String(text) } : {}),
+        ...(n.list_style !== undefined ? { listStyle: str(n.list_style) as ListStyle } : {}),
+        ...(kind === "task" ? { taskId: id } : {}),
+        deleted: str(owner?.lifecycle) === "deleted",
+        hidden: hidden.has(id),
+      });
+    }
+    return Object.freeze({
+      revision: revisionOf(this.#doc),
+      classification: tree.classification,
+      title: Object.freeze({
+        value: str(section.title),
+        conflicts: Object.freeze(titles.length > 1 ? titles.map((t) => t ?? "").sort() : []),
+      }),
+      nodes: Object.freeze(out),
+      order: tree.tree,
+      problems: Object.freeze({
+        recovery: tree.recovery,
+        invalid: tree.invalid,
+        collisions: tree.collisions,
+        retainedConcurrentEdits: tree.retainedConcurrentEdits,
+        scalarConflicts: tree.scalarConflicts,
+      }),
+    });
   }
 
   /** §3, §4, §14.2. */

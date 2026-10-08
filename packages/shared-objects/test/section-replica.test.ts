@@ -851,3 +851,50 @@ describe("SectionReplica: Text, split and join (§10)", () => {
     expect(r.validate().nodes.size).toBe(0);
   });
 });
+
+describe("SectionReplica: snapshot", () => {
+  it("reads the title, nodes, order and problems on one revision", () => {
+    const r = built();
+    r.commit([{ intent: "node.delete", id: T }]);
+    const s = r.snapshot();
+    expect(s.revision).toBe(r.revision());
+    expect(s.classification).toBe("VALID");
+    expect(s.title).toEqual({ value: "Joint launch", conflicts: [] });
+    expect(s.nodes[T]).toEqual({
+      kind: "task",
+      parent: SECTION,
+      listStyle: "bullet",
+      taskId: T,
+      deleted: true,
+      hidden: true,
+    });
+    expect(s.nodes[P]).toEqual({
+      kind: "paragraph",
+      parent: T,
+      text: "Draft contract",
+      deleted: false,
+      hidden: true,
+    });
+    expect(s.nodes[X]).toMatchObject({
+      kind: "item",
+      text: "Group X",
+      deleted: false,
+      hidden: false,
+    });
+    expect(s.order.map((e) => e.id)).toEqual([X, Y]);
+    expect(s.problems.recovery).toEqual([]);
+  });
+
+  it("shows a concurrent title as a conflict", () => {
+    const base = built();
+    const a = SectionReplica.fromSave(base.save(), { resource, principal: alice }, "local-state");
+    const b = SectionReplica.fromSave(base.save(), { resource, principal: bob }, "local-state");
+    a.commit([{ intent: "section.set_title", title: "A" }]);
+    b.commit([{ intent: "section.set_title", title: "B" }]);
+    const m = SectionReplica.fromChanges([...a.changes(), ...b.changes()], {
+      resource,
+      principal: alice,
+    }).replica;
+    expect(m.snapshot().title.conflicts).toEqual(["A", "B"]);
+  });
+});
