@@ -399,6 +399,33 @@ function conflictValueProblems(object: AMap, key: string): ProfileProblem[] {
   return out;
 }
 
+/**
+ * §74.1 problems of one object as stored at `/objects/<id>` of `doc`: its
+ * logical values, every collaborative Text in it (§30) and every concurrent
+ * value of its scalar registers (§45), one diagnostic per field. Shared by
+ * every profile whose Tasks are SOP Tasks (SHARED-SECTIONS-PROFILE-01 §2).
+ */
+export function storedObjectProblems(
+  doc: A.Doc<unknown>,
+  stored: AMap,
+  id: string,
+): ProfileProblem[] {
+  const at = `/objects/${pointerToken(id)}`;
+  const all = [
+    ...objectProblems(plain(stored), id).filter((p) => p.pointer.startsWith(at)),
+    ...textProblems(doc as Doc, stored, id),
+    ...conflictValueProblems(stored, id),
+  ];
+  // §74.1: one diagnostic per field, the first in table order over every value.
+  return firstPerField(
+    all.filter(
+      (p, i) =>
+        all.findIndex((q) => q.pointer === p.pointer && q.diagnostic === p.diagnostic) === i,
+    ),
+    at,
+  );
+}
+
 /** One intent's writes on one object, in order. */
 type Write =
   | { readonly op: "put"; readonly field: string; readonly value: Json }
@@ -908,20 +935,7 @@ export class SharedObjectsReplica {
   }
 
   #objectProblems(id: string, stored: AMap): ProfileProblem[] {
-    const at = `/objects/${pointerToken(id)}`;
-    const all = [
-      ...objectProblems(plain(stored), id).filter((p) => p.pointer.startsWith(at)),
-      ...textProblems(this.#doc, stored, id),
-      ...conflictValueProblems(stored, id),
-    ];
-    // §74.1: one diagnostic per field, the first in table order over every value.
-    return firstPerField(
-      all.filter(
-        (p, i) =>
-          all.findIndex((q) => q.pointer === p.pointer && q.diagnostic === p.diagnostic) === i,
-      ),
-      at,
-    );
+    return storedObjectProblems(this.#doc, stored, id);
   }
 
   /** §99: the Task under `id` with conflict metadata, or undefined if there is no object or it is not a Task. */
