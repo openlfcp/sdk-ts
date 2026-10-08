@@ -24,6 +24,17 @@ at `mvp-0.1-baseline.9`, not every deferred WIRE-01 feature. It does not
 claim full LFCP-WIRE-01 conformance. This is the MVP 0.1 release
 (`0.1.3`, npm dist-tag `latest`). Until 1.0, minor versions may change APIs.
 
+## Shared sections (Working Draft)
+
+`@openlfcp/shared-objects/sections` implements part of
+SHARED-SECTIONS-PROFILE-01 (`org.openlfcp.shared-sections.v1`, Working
+Draft 0.3, not in any implementation baseline): profile dispatch by a
+Resource's Genesis profile (`profileModel`), the section actor binding
+(`deriveSectionActorId`) and schema validation of a section document
+(`validateSection`, `SectionDocument`). Section intents, the effective
+tree and the section admission rules are not there yet. It may change
+without notice until the profile is in a baseline.
+
 ## Automerge and WebAssembly
 
 The package depends on `@automerge/automerge` **3.5.0**, pinned exactly,

@@ -15,6 +15,16 @@ remove or rename any.
   (`deriveDomainActorId`, `checkChangeActor`) and the sequence admission
   with held changes (`admitBatch`, `admitChange`). The Shared Objects
   profile now runs on it; its behaviour and exports are unchanged.
+- `@openlfcp/shared-objects/sections` (LFCP-02-011), Working Draft:
+  SHARED-SECTIONS-PROFILE-01 dispatch by a Resource's Genesis profile
+  (`profileModel`, `taskRefModel`; an unknown profile is
+  `PROFILE_UNSUPPORTED` and nothing is read or written), the section actor
+  binding (`deriveSectionActorId`), and schema validation of a section
+  document (`validateSection`, `SectionDocument`): canonical IDs, the
+  root and section maps, scalar strings versus Text, references, and one
+  §14.2 diagnostic per invalid node, placement or Task. Checked against
+  every case of SHARED-SECTIONS-TEST-VECTORS-01 at the development pin in
+  `spec-sections.lock`.
 
 ## 0.1.3 — 2026-10-08
 

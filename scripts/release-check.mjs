@@ -83,6 +83,7 @@ import { SqliteLfcpStorage } from "@openlfcp/storage-node";
 import { IdbLfcpStorage } from "@openlfcp/storage-idb";
 import { createTask, initializeAutomerge, SharedObjectsReplica } from "@openlfcp/shared-objects";
 import { admitBatch, deriveDomainActorId } from "@openlfcp/shared-objects/admission";
+import { profileModel, SECTIONS_PROFILE_ID } from "@openlfcp/shared-objects/sections";
 import { SyncClient, OutboundQueue } from "@openlfcp/client";
 
 const ok = (cond, what) => { if (!cond) throw new Error("smoke: " + what); console.log("ok " + what); };
@@ -112,6 +113,7 @@ replica.apply(task.intent);
 ok(replica.task(task.task.id)?.task?.title === "Release check", "Shared Objects Task through Automerge");
 ok(typeof SyncClient === "function" && typeof OutboundQueue === "function", "client loads");
 ok(typeof admitBatch === "function" && deriveDomainActorId("D", R, descriptor.principalId).length === 32, "the shared admission module loads (@openlfcp/shared-objects/admission)");
+ok(profileModel(SECTIONS_PROFILE_ID).kind === "shared-sections", "the section profile loads (@openlfcp/shared-objects/sections)");
 `;
 
 const work = mkdtempSync(join(tmpdir(), "openlfcp-release-check-"));

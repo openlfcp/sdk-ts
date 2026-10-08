@@ -35,6 +35,10 @@
     "./admission": {
       "types": "./dist/admission/index.d.ts",
       "import": "./dist/admission/index.js"
+    },
+    "./sections": {
+      "types": "./dist/sections/index.d.ts",
+      "import": "./dist/sections/index.js"
     }
   },
   "files": [
