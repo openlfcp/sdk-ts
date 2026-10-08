@@ -119,7 +119,9 @@ describe("shared sections corpus", () => {
         expect(actors.has(ch.actor), `${c.id} ${ch.change_hash}`).toBe(true);
         expect(checkChangeActor(checkChange(bytes(ch)), ch.actor).hash).toBe(ch.change_hash);
       }
-  });
+    // Every change of every case is decoded, SS55's and SS56's 64 large ones
+    // included: several seconds on a CI runner.
+  }, 30_000);
 
   for (const c of suite.cases)
     it(`${c.id}: schema validation matches the corpus`, () => {
