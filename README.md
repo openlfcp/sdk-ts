@@ -131,7 +131,7 @@ The official vectors belong to `openlfcp/spec` and are never copied into
 sdk-ts. `spec.lock` pins the spec version the SDK implements:
 
 ```json
-{ "tag": "mvp-0.1-baseline.9", "commit": "f42533c47f58fc980afd4e06f1366891592f7691" }
+{ "tag": "mvp-0.2-baseline.1", "commit": "96e21d62b97aa0241a4399e47e5c9cc168a3bd81" }
 ```
 
 `conformance/spec.mjs` reads spec files with `git show <commit>:<path>`
@@ -140,13 +140,10 @@ from the sdk-ts root). It first checks that the tag still resolves to the
 locked commit and fails loudly if not. Moving to a new baseline means
 changing `spec.lock` deliberately.
 
-Until the first MVP 0.2 baseline is tagged, `spec-sections.lock` pins the
-shared sections corpus (SHARED-SECTIONS-PROFILE-01, MARKDOWN-SECTIONS-01 and
-`test-vectors/shared-sections-01`) to a spec commit, with the status
-`dev-pin-pre-baseline` and no tag. `openSpecSections` checks only that the
-commit exists in the checkout and reads only those files; sdk-rs pins the
-same commit. When the baseline is tagged, `spec.lock` moves to it and
-`spec-sections.lock` is removed.
+`mvp-0.2-baseline.1` holds `mvp-0.1-baseline.9` unchanged, which the
+Wire and Shared Objects packages implement, and adds the Working Draft
+shared sections corpus that `@openlfcp/shared-objects/sections` is checked
+against.
 
 ```sh
 pnpm build

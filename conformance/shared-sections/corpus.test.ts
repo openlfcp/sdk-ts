@@ -1,6 +1,6 @@
 // The shared sections reference corpus (SHARED-SECTIONS-TEST-VECTORS-01,
 // Working Draft) through the sdk-ts section schema (LFCP-02-011), read at
-// the development pin in spec-sections.lock. For every case:
+// the spec baseline pinned in spec.lock. For every case:
 //
 // - the reference snapshot loads (within the SOP §13.1 floor, or is refused
 //   when the case says it is past it), and replaying the case's changes without
@@ -21,7 +21,7 @@ import {
   SectionDocument,
 } from "@openlfcp/shared-objects/sections";
 import { describe, expect, it } from "vitest";
-import { openSpecSections } from "../spec.mjs";
+import { openSpec } from "../spec.mjs";
 
 const CORPUS = "test-vectors/shared-sections-01/SHARED-SECTIONS-TEST-VECTORS-01.json";
 
@@ -67,7 +67,7 @@ interface Suite {
   readonly cases: readonly Case[];
 }
 
-const suite = openSpecSections().readJson(CORPUS) as Suite;
+const suite = openSpec().readJson(CORPUS) as Suite;
 const bytes = (b: Bytes) => Uint8Array.from(atob(b.base64), (c) => c.charCodeAt(0));
 const load = (c: Case) => SectionDocument.fromSave(bytes(c.reference_snapshot));
 const heldHash = (h: string | { readonly change: string }) =>
@@ -84,7 +84,7 @@ function admitted(c: Case): Change[] {
   );
 }
 
-describe("shared sections corpus (dev pin, pre-baseline)", () => {
+describe("shared sections corpus", () => {
   it("is the profile this module implements, on the pinned engine", () => {
     expect(suite.profile).toBe(SECTIONS_PROFILE_ID);
     expect(suite.cases.length).toBeGreaterThanOrEqual(41);
