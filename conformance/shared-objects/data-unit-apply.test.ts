@@ -540,6 +540,40 @@ describe("LFCP-033: applying Data Units to the Shared Objects profile", () => {
     expect(await applier.receive(view, createUnit.bytes)).toMatchObject({ kind: "applied" });
   });
 
+  it("SS42: a refusal for the wrong signer never blocks the change itself, in a batch or after a merge", async () => {
+    // CHANGE_ACTOR_MISMATCH belongs to the pair (change, signer), never to
+    // the change: a forwarded copy refused first must not keep its author's
+    // own unit out, whatever the order and on the catch-up path.
+    const { chain, initUnit, createUnit, alice } = await resource();
+    const aliceCodec = alice.profile.codecFor({
+      resourceId: chain.resource,
+      actor: ALICE.descriptor.principalId,
+    });
+    const stolen = await new Writer(chain, BOB).send(
+      checkChange(alice.replica.changes()[1] as Uint8Array),
+      { codec: aliceCodec },
+    );
+    const view = chain.view();
+
+    const batch = receiver(chain);
+    const outcomes = await batch.applier.receiveBatch(view, [
+      initUnit.bytes,
+      stolen.bytes,
+      createUnit.bytes,
+    ]);
+    expect(kinds(outcomes)).toEqual(["applied", "local-failure", "applied"]);
+    expect(taskOf(batch.profile.replica).title).toBe("Prepare API contract");
+
+    const after = receiver(chain);
+    await after.applier.receive(view, initUnit.bytes);
+    expect(await after.applier.receive(view, createUnit.bytes)).toMatchObject({ kind: "applied" });
+    expect(await after.applier.receive(view, stolen.bytes)).toMatchObject({
+      kind: "local-failure",
+      reason: "PROFILE_REJECTED",
+    });
+    expect(taskOf(after.profile.replica).title).toBe("Prepare API contract");
+  });
+
   it("holds a unit whose actor chain has a gap and merges it when the gap closes (G-DP1)", async () => {
     const { chain, initUnit, createUnit, alice } = await resource();
     const second = await alice.send(
