@@ -8,8 +8,9 @@ import {
 } from "@openlfcp/core";
 
 /**
- * Client secret material (LFCP-034): Principal private keys, Resource DEKs
- * and invitation secrets live only in a SecretStore. Public storage rows
+ * Client secret material (LFCP-034): Principal private keys, Resource DEKs,
+ * invitation secrets and local state keys (LFCP-02-098) live only in a
+ * SecretStore. Public storage rows
  * hold a SecretRef, a name that reveals nothing about the value.
  *
  * A SecretStore cannot be enumerated: there is no list operation, so no
@@ -27,7 +28,8 @@ export type SecretKind =
   | "principal-signing-key"
   | "principal-agreement-key"
   | "resource-dek"
-  | "invitation-secret";
+  | "invitation-secret"
+  | "local-state-key";
 
 /** The name of a secret: "lfcp-secret:<kind>:<id>". It never contains secret material. */
 export type SecretRef = string & { readonly __secretRef: true };
@@ -37,6 +39,7 @@ const KINDS = new Set<string>([
   "principal-agreement-key",
   "resource-dek",
   "invitation-secret",
+  "local-state-key",
 ]);
 const ID = /^[A-Za-z0-9._-]{1,200}$/;
 

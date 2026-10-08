@@ -1,6 +1,18 @@
 /** Name of this package. */
 export const PACKAGE = "@openlfcp/storage";
 
+export {
+  LOCAL_STATE_SCHEME,
+  type LocalStateCipher,
+  type LocalStateEvent,
+  LocalStateKeyring,
+  type LocalStateMeta,
+  localStateAad,
+  localStateKeyRef,
+  type OpenedLocal,
+  type ResealRow,
+  reseal,
+} from "./local-state.js";
 export { InMemoryLfcpStorage } from "./memory.js";
 export {
   dekSecretRef,
