@@ -100,6 +100,12 @@ export interface SectionValidation {
    * not usable.
    */
   readonly collisions: readonly string[];
+  /**
+   * §14.2: the nodes whose own ID, Task ID or selected PlacementId
+   * collides, sorted. They are not validated and not projected, and no
+   * value is chosen; their descendants are blocked (§7).
+   */
+  readonly collided: readonly string[];
 }
 
 /** A backend value: [datatype, value, opId] for a scalar, [datatype, objId] for an object. */
@@ -438,12 +444,23 @@ export function validateSection(doc: A.Doc<unknown>): SectionValidation {
     if (p !== undefined) placements.set(k, p);
   }
 
+  // §14.2: a node whose own ID (a Task node's is its Task ID) or selected
+  // PlacementId collides is not validated.
+  const collided = new Set(
+    nodeKeys.filter((k) => {
+      if (collisions.has(k)) return true;
+      const node = nodesObj === undefined ? undefined : r.map(nodesObj, k);
+      const selected = node === undefined ? [] : r.all(node, "placement");
+      return selected.length === 1 && collisions.has(selected[0]?.[1] as string);
+    }),
+  );
+
   // §4.2: nodes, then their references.
   const nodes = new Map<string, SectionProblem>();
   const placementOf = (id: string) =>
     placementsObj === undefined ? undefined : r.map(placementsObj, id);
   for (const k of nodeKeys) {
-    if (nodesObj === undefined || collisions.has(k)) continue;
+    if (nodesObj === undefined || collided.has(k)) continue;
     const at = ref("/nodes", k);
     const obj = r.map(nodesObj, k);
     const out: SectionProblem[] = [];
@@ -543,7 +560,7 @@ export function validateSection(doc: A.Doc<unknown>): SectionValidation {
       if (kind === "task") {
         const task = objectsObj === undefined ? undefined : r.map(objectsObj, k);
         const taskProblems = objects.get(k);
-        if (task === undefined || collisions.has(k) || r.str(task, "type") !== "task")
+        if (task === undefined || r.str(task, "type") !== "task")
           out.push(
             problem("INVALID_REFERENCE", ref(at, "task_id"), "task_id names no Task (§4.2)"),
           );
@@ -568,7 +585,7 @@ export function validateSection(doc: A.Doc<unknown>): SectionValidation {
       if (selected.length === 1) {
         const pid = selected[0]?.[1] as string;
         const placement = placementOf(pid);
-        if (placement === undefined || collisions.has(pid) || placements.has(pid))
+        if (placement === undefined || placements.has(pid))
           out.push(
             problem(
               "INVALID_REFERENCE",
@@ -582,7 +599,8 @@ export function validateSection(doc: A.Doc<unknown>): SectionValidation {
           );
         else {
           const parent = r.str(placement, "parent_id") as string;
-          if (parent !== sectionId) {
+          // Under a collided parent the node is blocked (§7), not invalid.
+          if (parent !== sectionId && !collided.has(parent)) {
             const parentKind = kinds.get(parent);
             if (parentKind === undefined || !PARENT_KINDS.has(parentKind))
               out.push(
@@ -609,5 +627,6 @@ export function validateSection(doc: A.Doc<unknown>): SectionValidation {
     placements,
     objects,
     collisions: Object.freeze([...collisions].sort()),
+    collided: Object.freeze([...collided].sort()),
   });
 }

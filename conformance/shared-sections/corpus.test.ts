@@ -42,6 +42,7 @@ interface Case {
   readonly after_merge: readonly Change[];
   readonly expected: {
     readonly classification: string;
+    readonly collisions?: readonly string[];
     readonly invalid: readonly { readonly id: string; readonly diagnostic: string }[];
     readonly refused: readonly { readonly change: string; readonly diagnostic: string }[];
     readonly held: readonly (string | { readonly change: string })[];
@@ -116,7 +117,8 @@ describe("shared sections corpus (dev pin, pre-baseline)", () => {
       const v = doc.validate();
       expect(doc.save()).toEqual(before);
       expect(v.problems).toEqual([]);
-      expect(v.collisions).toEqual([]);
+      // §14.2: collisions are reported apart; a collided node is not validated.
+      expect(v.collisions).toEqual(c.expected.collisions ?? []);
       expect(v.state).toBe(c.expected.classification === "IMPORTING" ? "importing" : "ready");
       expect(v.placements.size).toBe(0);
       expect(v.objects.size).toBe(0);

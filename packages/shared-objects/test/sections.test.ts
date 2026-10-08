@@ -329,7 +329,63 @@ describe("section schema (§3, §4, §14.2)", () => {
       };
     });
     expect(validateSection(doc).collisions).toEqual([PARA]);
+    expect(validateSection(doc).collided).toEqual([PARA]);
     expect(validateSection(section()).collisions).toEqual([]);
+  });
+
+  it("a node whose own, Task or selected placement ID collides is not validated (§14.2)", () => {
+    const base = section();
+    const bob = toHex(deriveSectionActorId(resource, principalId(new Uint8Array(32).fill(2))));
+    const item = id(30);
+    const shared = id(31);
+    const write = (doc: A.Doc<Doc>, who: string | undefined, text: string) =>
+      A.change(who === undefined ? A.clone(doc) : A.clone(doc, { actor: who }), (d) => {
+        d.nodes[item] = {
+          id: S(item),
+          kind: S("item"),
+          created_by: S(ALICE),
+          lifecycle: S("active"),
+          placement: S(shared),
+          children: [],
+          extensions: {},
+          text,
+        };
+        d.placements[shared] = {
+          id: S(shared),
+          node_id: S(item),
+          parent_id: S(SECTION),
+          created_by: S(ALICE),
+        };
+        d.section.children.push(S(shared));
+      });
+    const v = validateSection(A.merge(write(base, undefined, "a"), write(base, bob, "b")));
+    expect(v.collisions).toEqual([item, shared].sort());
+    expect(v.collided).toEqual([item]);
+    expect([v.state, v.nodes.size, v.placements.size]).toEqual(["ready", 0, 0]);
+
+    // Both writers create the Task map anew: two concurrent maps under one ID.
+    const recreate = (title: string) => (d: Doc) => {
+      d.objects[TASK] = {
+        id: S(TASK),
+        type: S("task"),
+        created_by: S(ALICE),
+        lifecycle: S("active"),
+        title: S(title),
+        status: S("todo"),
+        priority: S("normal"),
+        tags: {},
+        assignees: {},
+        extensions: {},
+      };
+    };
+    const task = A.merge(
+      A.change(A.clone(base), recreate("A")),
+      A.change(A.clone(base, { actor: bob }), recreate("B")),
+    );
+    const t = validateSection(task);
+    expect(t.collisions).toEqual([TASK]);
+    expect(t.collided).toEqual([TASK]);
+    expect(t.nodes.has(TASK)).toBe(false);
   });
 
   it("section-level problems leave nothing usable", () => {
