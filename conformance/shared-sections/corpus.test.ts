@@ -8,7 +8,9 @@
 // - schema validation never changes the document, and reports exactly the
 //   invalid nodes the corpus expects (§14.2), with no section-level problem,
 //   in the state the classification implies (IMPORTING, §12.1);
-// - Task strings are scalar strings and paragraph/item bodies are Text.
+// - Task strings are scalar strings and paragraph/item bodies are Text;
+// - the effective tree, hidden nodes, recovery facts and classification
+//   are the corpus's (LFCP-02-014).
 //
 // SS01 and SS18 are checked in detail. The effective tree, structural
 // facts and admission are later tasks (LFCP-02-013..017).
@@ -49,6 +51,9 @@ interface Case {
     readonly invalid: readonly { readonly id: string; readonly diagnostic: string }[];
     readonly refused: readonly { readonly change: string; readonly diagnostic: string }[];
     readonly held: readonly (string | { readonly change: string })[];
+    readonly tree: readonly { id: string; parent: string; depth: number; kind: string }[];
+    readonly hidden: readonly string[];
+    readonly recovery: readonly { id: string; code: string }[];
     readonly texts: Readonly<Record<string, string>>;
     readonly tasks: Readonly<Record<string, Record<string, unknown>>>;
   };
@@ -144,6 +149,16 @@ describe("shared sections corpus", () => {
           .sort((a, b) => a.id.localeCompare(b.id)),
       ).toEqual(c.expected.invalid);
       expect(replayed.validate()).toEqual(v);
+
+      // §7, §9, §14.3: the effective tree and the structural facts (LFCP-02-014).
+      const t = doc.tree();
+      expect(t.classification).toBe(c.expected.classification);
+      expect(t.tree).toEqual(c.expected.tree);
+      expect(t.hidden).toEqual(c.expected.hidden);
+      expect(t.recovery).toEqual(c.expected.recovery);
+      expect(t.invalid).toEqual(c.expected.invalid);
+      expect(t.collisions).toEqual(c.expected.collisions ?? []);
+      expect(replayed.tree().tree).toEqual(t.tree);
     });
 
   it("SS01: Task fields are scalars in objects, the paragraph is node Text (§2, §4.2)", () => {

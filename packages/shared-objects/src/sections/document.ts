@@ -10,6 +10,7 @@ import {
 import { ProfileInvalidError } from "../profile-invalid.js";
 import type { Json } from "../validate.js";
 import { type SectionValidation, validateSection } from "./schema.js";
+import { deriveTree, type SectionTree } from "./tree.js";
 
 /**
  * A loaded SHARED-SECTIONS-PROFILE-01 document, read-only: what a Resource
@@ -93,6 +94,11 @@ export class SectionDocument {
   /** §3, §4, §14.2: the schema validation of the current state. */
   validate(): SectionValidation {
     return validateSection(this.#doc);
+  }
+
+  /** §7, §9, §14.3: the effective tree, hidden nodes and structural facts. */
+  tree(): SectionTree {
+    return deriveTree(this.#doc);
   }
 
   /**

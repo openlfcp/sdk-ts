@@ -30,6 +30,12 @@ export {
   validateSection,
 } from "./schema.js";
 export {
+  deriveTree,
+  type SectionTree,
+  type StructuralFact,
+  type TreeEntry,
+} from "./tree.js";
+export {
   deriveSectionActorId,
   LIST_STYLES,
   type ListStyle,

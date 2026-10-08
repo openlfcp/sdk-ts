@@ -10,7 +10,10 @@
 // - SS18: an unknown node extension survives a Task edit by this writer;
 // - SS09: three moves of one Task reach the reference state, historical
 //   slots included; SS02: two writers' concurrent inserts after one Task
-//   merge to the reference state, sibling order included.
+//   merge to the reference state, sibling order included;
+// - SS15 and SS26: C's explicit resolution of a placement conflict and of a
+//   parent cycle, authored on the merged branches, reaches the reference
+//   state and a VALID tree.
 
 import { fromHex, principalId, resourceId, toHex } from "@openlfcp/core";
 import { createTask } from "@openlfcp/shared-objects";
@@ -25,6 +28,8 @@ interface Bytes {
 }
 interface Case {
   readonly id: string;
+  readonly base_changes: readonly Bytes[];
+  readonly branches: { readonly A: readonly Bytes[]; readonly B: readonly Bytes[] };
   readonly expected: {
     readonly texts: Readonly<Record<string, string>>;
     readonly tasks: Readonly<Record<string, Record<string, unknown>>>;
@@ -240,4 +245,39 @@ describe("authoring the shared sections corpus (LFCP-02-012)", () => {
     expect(got.section.children).toEqual(ref.section.children);
     expect(canonical(got as unknown as Json)).toEqual(canonical(ref as unknown as Json));
   });
+
+  for (const [id, mover, parent, after] of [
+    ["SS15", "task", "section", null],
+    ["SS26", "x", "section", "task"],
+  ] as const)
+    it(`${id}: C's explicit resolution reaches the reference state`, () => {
+      const c = kase(id);
+      const ref = reference(id).toJSON() as unknown as State;
+      const node = ids[mover] as string;
+      const target = ids[parent] as string;
+      // C's fresh slot: the reference placement of the node under the target that no branch wrote.
+      const merged = SectionReplica.fromChanges(
+        [...c.base_changes, ...c.branches.A, ...c.branches.B].map(bytes),
+        { resource, principal: principal("C") },
+      );
+      expect(merged.unapplied).toEqual([]);
+      expect(merged.replica.tree().classification).toBe("STRUCTURAL_ATTENTION");
+      const known = new Set(Object.keys((merged.replica.toJSON() as unknown as State).placements));
+      const slot = Object.entries(ref.placements).find(
+        ([pid, p]) => p.node_id === node && p.parent_id === target && !known.has(pid),
+      )?.[0] as string;
+      const move = {
+        id: node,
+        parent: target,
+        after: after === null ? null : (ids[after] as string),
+        placementId: slot,
+      };
+      merged.replica.commit([
+        id === "SS15"
+          ? { intent: "node.resolve_placement", ...move }
+          : { intent: "structure.resolve", moves: [move] },
+      ]);
+      expect(merged.replica.tree().classification).toBe("VALID");
+      expect(canonical(merged.replica.toJSON() as Json)).toEqual(canonical(ref as unknown as Json));
+    });
 });

@@ -20,6 +20,7 @@ import type { Task } from "../task.js";
 import type { Json } from "../validate.js";
 import { frameProfilePayload, isUtcTimestamp, principalRef } from "../values.js";
 import { type SectionValidation, validateSection } from "./schema.js";
+import { deriveTree, type SectionTree } from "./tree.js";
 import {
   deriveSectionActorId,
   LIST_STYLES,
@@ -48,7 +49,7 @@ import {
  * to 016; batches over the §16.2 budgets are refused until 016 splits them.
  */
 
-/** Why a batch was refused before anything was written. */
+/** Why a batch was refused before anything was written (SDK-SECTIONS-INTEGRATION-01 §3.6). */
 export type SectionIntentCode =
   /** The document is not a valid section (§14.2 section-level problems). */
   | "SECTION_INVALID"
@@ -64,6 +65,8 @@ export type SectionIntentCode =
   | "INVALID_PREDECESSOR"
   /** The node is invalid, collides, or has concurrent placements: resolve it first (§7, §8). */
   | "NODE_IN_CONFLICT"
+  /** The intent names a node the section does not have. */
+  | "UNKNOWN_NODE"
   /** A value outside its domain: an ID, a list style, a timestamp, a string (§3, §4). */
   | "INVALID_INTENT"
   /** The batch is over an authoring budget of §16.2. */
@@ -127,10 +130,43 @@ export type SectionIntent =
     } & Position)
   /** §5, §6: a fresh placement under `parent`; the node keeps its identity and subtree. */
   | ({ readonly intent: "node.move"; readonly id: string } & Position)
+  /**
+   * §8: a fresh placement written to a node's register, superseding every
+   * placement observed at this causal point, conflicted or not.
+   */
+  | ({ readonly intent: "node.resolve_placement"; readonly id: string } & Position)
+  /**
+   * §8: relocates several nodes atomically, as for a parent cycle; each
+   * move is checked against the moves before it, so the result is acyclic.
+   */
+  | {
+      readonly intent: "structure.resolve";
+      readonly moves: readonly ({ readonly id: string } & Position)[];
+    }
   /** §4.2: ordered or bullet list membership, on task and item nodes. */
   | { readonly intent: "node.set_list_style"; readonly id: string; readonly listStyle: ListStyle }
   /** A SHARED-OBJECTS-PROFILE-01 Task intent on a Task of this section (§2). */
   | Exclude<ReplicaIntent, { intent: "task.create" }>;
+
+/** What a batch knows while it is checked, intent by intent. */
+interface BatchState {
+  /** The validation of the document before the batch (or since section.create, mark_ready). */
+  v?: SectionValidation | undefined;
+  /** Nodes whose ancestor chain to the section is verified eligible in this batch. */
+  readonly chainOk: Set<string>;
+}
+
+/** Intents after which every verified ancestor chain still holds. */
+const KEEPS_CHAINS: ReadonlySet<string> = new Set([
+  "section.create",
+  "section.set_title",
+  "section.mark_ready",
+  "task.create_in_section",
+  "paragraph.create",
+  "item.create",
+  "raw.create",
+  "node.set_list_style",
+]);
 
 /** §16.2: what one change may carry. */
 export const AUTHORING_BUDGET = Object.freeze({ textOperations: 8192, createdNodes: 256 });
@@ -235,6 +271,11 @@ export class SectionReplica {
     return validateSection(this.#doc);
   }
 
+  /** §7, §9, §14.3: the effective tree, hidden nodes and structural facts. */
+  tree(): SectionTree {
+    return deriveTree(this.#doc);
+  }
+
   /** The document heads, sorted, as one string. */
   revision(): string {
     return revisionOf(this.#doc);
@@ -270,8 +311,14 @@ export class SectionReplica {
     // The validation of the document before the batch: nodes the batch
     // creates are valid by construction, so it is computed again only when
     // the batch changes the section itself (create, ready).
-    const state: { v?: SectionValidation | undefined } = {};
-    intents.forEach((intent, i) => {
+    const state: BatchState = { chainOk: new Set() };
+    // structure.resolve is its moves, each one checked after the ones before it.
+    const steps = intents.flatMap((intent, i): [SectionIntent, number][] =>
+      intent.intent === "structure.resolve"
+        ? intent.moves.map((m) => [{ intent: "node.resolve_placement", ...m }, i])
+        : [[intent, i]],
+    );
+    steps.forEach(([intent, i]) => {
       const write = this.#prepare(scratch, state, intent, i, affected, budget);
       if (
         budget.text > AUTHORING_BUDGET.textOperations ||
@@ -286,6 +333,8 @@ export class SectionReplica {
       writes.push(write);
       if (intent.intent === "section.create" || intent.intent === "section.mark_ready")
         state.v = undefined;
+      // Only creations keep every verified ancestor chain as it was.
+      if (!KEEPS_CHAINS.has(intent.intent)) state.chainOk.clear();
     });
 
     const message = intents.map((x) => x.intent).join(",");
@@ -323,7 +372,7 @@ export class SectionReplica {
    */
   #prepare(
     doc: Doc,
-    state: { v?: SectionValidation | undefined },
+    state: BatchState,
     intent: SectionIntent,
     i: number,
     affected: Set<string>,
@@ -423,7 +472,16 @@ export class SectionReplica {
           "list_style is bullet or ordered, on task and item nodes only (§4.2)",
           id,
         );
-      const index = insertionIndex(doc, v, sectionId, intent.parent, intent.after, refuse);
+      const index = insertionIndex(
+        doc,
+        v,
+        sectionId,
+        intent.parent,
+        intent.after,
+        refuse,
+        undefined,
+        state.chainOk,
+      );
 
       let createdBy: string;
       let node: AMap;
@@ -469,6 +527,7 @@ export class SectionReplica {
       }
       budget.nodes += 1;
       affected.add(id);
+      if (intent.parent === sectionId || state.chainOk.has(intent.parent)) state.chainOk.add(id);
       const parent = intent.parent;
       return (d) => {
         taskWrite?.(d.objects as AMap);
@@ -488,11 +547,15 @@ export class SectionReplica {
       };
     }
 
-    if (intent.intent === "node.move" || intent.intent === "node.set_list_style") {
+    if (
+      intent.intent === "node.move" ||
+      intent.intent === "node.resolve_placement" ||
+      intent.intent === "node.set_list_style"
+    ) {
       const id = intent.id;
       const node = (doc.nodes as AMap)[id] as AMap | undefined;
-      if (node === undefined) refuse("INVALID_INTENT", `${id} names no node`, id);
-      if (v.nodes.has(id) || v.collided.includes(id))
+      if (node === undefined) refuse("UNKNOWN_NODE", `${id} names no node`, id);
+      if (v.nodes.has(id) || collidedSet(v).has(id))
         refuse("NODE_IN_CONFLICT", `${id} is invalid or collides (§14.2)`, id);
       const kind = str((node as AMap).kind);
       affected.add(id);
@@ -511,8 +574,12 @@ export class SectionReplica {
           n.list_style = S(style);
         };
       }
-      if (values(node as AMap, "placement").length !== 1)
-        refuse("NODE_IN_CONFLICT", `${id} has concurrent placements: resolve them (§7, §8)`, id);
+      if (intent.intent === "node.move" && values(node as AMap, "placement").length !== 1)
+        refuse(
+          "NODE_IN_CONFLICT",
+          `${id} has concurrent placements: use node.resolve_placement (§7, §8)`,
+          id,
+        );
       const placementId = intent.placementId ?? generateObjectId();
       if (!isObjectId(placementId))
         refuse("INVALID_INTENT", "the PlacementId is not a canonical UUIDv7 (§3)", id);
@@ -570,6 +637,17 @@ function checkCreatedAt(
     refuse("INVALID_INTENT", "created_at is not an RFC 3339 UTC timestamp (§3)");
 }
 
+const collidedSets = new WeakMap<SectionValidation, ReadonlySet<string>>();
+/** The collided nodes of a validation as a set, built once per validation. */
+function collidedSet(v: SectionValidation): ReadonlySet<string> {
+  let set = collidedSets.get(v);
+  if (set === undefined) {
+    set = new Set(v.collided);
+    collidedSets.set(v, set);
+  }
+  return set;
+}
+
 /** §3: whether `id` already names the section, a node, a placement or an object. */
 function idInUse(doc: Doc, sectionId: string, id: string): boolean {
   return (
@@ -595,6 +673,8 @@ function insertionIndex(
   after: string | null,
   refuse: (c: SectionIntentCode, m: string, node?: string) => never,
   moving?: string,
+  /** Nodes whose ancestor chain this batch already verified; unused for a move. */
+  chainOk?: Set<string>,
 ): number {
   const nodes = doc.nodes as AMap;
   const placements = doc.placements as AMap;
@@ -603,7 +683,7 @@ function insertionIndex(
   const eligible = (id: string): { parent: string } | { why: string } => {
     const node = nodes[id] as AMap | undefined;
     if (node === undefined) return { why: "names no node" };
-    if (v.nodes.has(id) || v.collided.includes(id)) return { why: "is invalid (§14.2)" };
+    if (v.nodes.has(id) || collidedSet(v).has(id)) return { why: "is invalid (§14.2)" };
     const kind = str(node.kind);
     const owner = kind === "task" ? (objects[id] as AMap) : node;
     const life = values(owner, "lifecycle").map(str);
@@ -627,6 +707,7 @@ function insertionIndex(
     const seen = new Set<string>();
     let p = parent;
     while (p !== sectionId) {
+      if (moving === undefined && chainOk?.has(p)) break;
       if (p === moving)
         refuse(
           "INVALID_PARENT",
@@ -639,6 +720,7 @@ function insertionIndex(
       if ("why" in e) refuse("INVALID_PARENT", `the parent's ancestor ${p} ${e.why}`, parent);
       p = (e as { parent: string }).parent;
     }
+    if (moving === undefined) for (const n of seen) chainOk?.add(n);
   }
   const lane = (
     parent === sectionId ? (doc.section as AMap).children : (nodes[parent] as AMap).children

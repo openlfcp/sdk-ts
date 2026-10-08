@@ -438,7 +438,7 @@ describe("SectionReplica: moves (§5, §6)", () => {
     expect(
       refusal(() => r.commit([{ intent: "node.move", id: id(99), parent: SECTION, after: null }]))
         .code,
-    ).toBe("INVALID_INTENT");
+    ).toBe("UNKNOWN_NODE");
   });
 
   it("moves a node created earlier in the same batch", () => {
@@ -505,5 +505,121 @@ describe("SectionReplica: moves (§5, §6)", () => {
     expect(orderOf(ab.replica)).toEqual(orderOf(ba.replica));
     expect(orderOf(ab.replica)).toEqual(expect.arrayContaining([T, id(30), id(31), X, Y]));
     expect(ab.replica.validate().nodes.size).toBe(0);
+  });
+});
+
+describe("SectionReplica: tree and resolution (§7, §8)", () => {
+  /** Two writers move T to different parents concurrently (SS04's shape). */
+  function conflicted(): SectionReplica {
+    const base = built();
+    const a = SectionReplica.fromSave(base.save(), { resource, principal: alice }, "local-state");
+    const b = SectionReplica.fromSave(base.save(), { resource, principal: bob }, "local-state");
+    a.commit([{ intent: "node.move", id: T, parent: X, after: null }]);
+    b.commit([{ intent: "node.move", id: T, parent: Y, after: null }]);
+    return SectionReplica.fromChanges([...a.changes(), ...b.changes()], {
+      resource,
+      principal: alice,
+    }).replica;
+  }
+
+  it("reports a placement conflict with its candidates and blocks the subtree", () => {
+    const r = conflicted();
+    const t = r.tree();
+    expect(t.classification).toBe("STRUCTURAL_ATTENTION");
+    expect(t.recovery).toEqual(
+      [
+        { id: T, code: "PLACEMENT_CONFLICT" },
+        { id: P, code: "BLOCKED_PARENT" },
+      ].sort((x, y) => (x.id < y.id ? -1 : 1)),
+    );
+    expect(
+      t.candidates
+        .get(T)
+        ?.map((c) => c.parent)
+        .sort(),
+    ).toEqual([X, Y].sort());
+    expect(t.tree.map((e) => e.id)).toEqual([X, Y]);
+    expect(
+      refusal(() => r.commit([{ intent: "node.move", id: T, parent: SECTION, after: null }])).code,
+    ).toBe("NODE_IN_CONFLICT");
+    r.commit([{ intent: "node.resolve_placement", id: T, parent: SECTION, after: null }]);
+    expect(r.tree().classification).toBe("VALID");
+    expect(r.tree().tree.map((e) => e.id)).toEqual([T, P, X, Y]);
+  });
+
+  // 1,000 levels: far beyond any real section, deep enough to break a recursive walk.
+  it("derives a deep chain without recursion", () => {
+    const r = built();
+    let parent = X;
+    for (let batch = 0; batch < 4; batch++) {
+      const intents: SectionIntent[] = [];
+      for (let k = 0; k < 250; k++) {
+        const n = id(10_000 + batch * 250 + k);
+        intents.push({
+          intent: "item.create",
+          id: n,
+          parent,
+          after: null,
+          text: "",
+          createdBy: alice,
+        });
+        parent = n;
+      }
+      r.commit(intents);
+    }
+    const t = r.tree();
+    expect(t.classification).toBe("VALID");
+    expect(t.tree).toHaveLength(4 + 1000);
+    expect(Math.max(...t.tree.map((e) => e.depth))).toBe(1000);
+  }, 30_000);
+
+  it("blocks every member of a long cycle and their descendants, and nothing else", () => {
+    // A cycle no writer makes: built directly, as concurrent moves could.
+    const r = built();
+    const ring = Array.from({ length: 50 }, (_, k) => id(20_000 + k));
+    const intents: SectionIntent[] = [];
+    let after: string | null = Y;
+    for (const n of ring) {
+      intents.push({
+        intent: "item.create",
+        id: n,
+        parent: SECTION,
+        after,
+        text: "",
+        createdBy: alice,
+      });
+      after = n;
+    }
+    r.commit(intents);
+    // Concurrent moves, each valid alone, close the ring: writer k puts ring[k] under ring[k+1].
+    const save = r.save();
+    const branches = ring.map((n, k) => {
+      const w = SectionReplica.fromSave(
+        save,
+        { resource, principal: principalId(new Uint8Array(32).fill(100 + k)) },
+        "local-state",
+      );
+      w.commit([
+        { intent: "node.move", id: n, parent: ring[(k + 1) % ring.length] as string, after: null },
+      ]);
+      return w.changes().at(-1) as Uint8Array;
+    });
+    const merged = SectionReplica.fromChanges([...r.changes(), ...branches], {
+      resource,
+      principal: alice,
+    }).replica;
+    const t = merged.tree();
+    expect(t.classification).toBe("STRUCTURAL_ATTENTION");
+    expect(t.recovery.map((x) => x.code)).toEqual(ring.map(() => "PARENT_CYCLE"));
+    expect(t.tree.map((e) => e.id)).toEqual([T, P, X, Y]);
+    // Resolution: move one member back to the section; the ring unwinds into a chain.
+    merged.commit([
+      {
+        intent: "structure.resolve",
+        moves: [{ id: ring[0] as string, parent: SECTION, after: Y }],
+      },
+    ]);
+    expect(merged.tree().classification).toBe("VALID");
+    expect(merged.tree().tree).toHaveLength(4 + 50);
   });
 });
