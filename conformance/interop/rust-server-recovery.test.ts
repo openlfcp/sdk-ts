@@ -13,7 +13,7 @@
 //    it from its Genesis and re-supplies the Control Records, units and
 //    BOB's Key Package; BOB then joins and converges.
 
-import { type ObjectId, resourceId } from "@openlfcp/core";
+import { type ObjectId, resourceId, toHex } from "@openlfcp/core";
 import { importResourceDEK } from "@openlfcp/crypto";
 import {
   createTask,
@@ -65,6 +65,18 @@ const edit = (side: Side, title: string) =>
   side.write(side.profile.replica.apply(setTitle(task(side), title).intent) as LocalChange);
 const same = (a: Side, b: Side) =>
   JSON.stringify(a.profile.replica.root()) === JSON.stringify(b.profile.replica.root());
+/** A side's errors, refusals, NACKs and re-hosts, one JSON line each. */
+const trace = (side: Side) =>
+  side.events
+    .filter((e) =>
+      ["error", "nack", "rehost", "resource-refused", "resource-state"].includes(e.type),
+    )
+    .map((e) =>
+      JSON.stringify(e, (_, v) =>
+        v instanceof Uint8Array ? toHex(v) : typeof v === "bigint" ? String(v) : v,
+      ),
+    )
+    .join("\n");
 const noProgress = (side: Side) =>
   side.errors().filter((e) => e.type === "error" && e.code === "NO_PROGRESS");
 
@@ -183,7 +195,10 @@ describe("recovery after server data loss ↔ Rust reference server (live, ADR 0
             return bob.client.resourceState(R) === "LIVE";
           },
           30_000,
-        );
+        ).catch((e: Error) => {
+          // What each side saw, for a failure on a slow runner.
+          throw new Error(`${e.message}\nOWNER:\n${trace(owner)}\nBOB:\n${trace(bob)}`);
+        });
         await waitFor("BOB converges", () => same(owner, bob), 30_000);
         expect(task(bob)?.title).toBe("Hosted");
         expect((await bob.storage.control.head(R))?.controlSeq).toBe(1n);

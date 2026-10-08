@@ -229,13 +229,17 @@ describe("access recovery after a restore ↔ Rust reference server (live, LFCP-
         await revokeBob(owner);
         await waitFor("revocation acknowledged", () => owner.queueEmpty(), 30_000);
         // The server stops serving BOB once he is revoked, so he would not
-        // receive it live; store the revocation in his chain as if he had.
+        // receive it live; store the revocation in his chain as if he had,
+        // after his session stopped (a running client may still write it).
+        await bob.stop();
         const full = await loadControlChain(owner.storage, R);
         if (full?.kind !== "linear") throw new Error("no chain");
         const bobHead = await bob.storage.control.head(R);
-        const saved = await saveControlChain(bob.storage, full, bobHead?.head ?? null);
-        expect(saved.ok).toBe(true);
-        await bob.stop();
+        if (bobHead?.controlSeq !== 2n) {
+          const saved = await saveControlChain(bob.storage, full, bobHead?.head ?? null);
+          expect(saved.ok).toBe(true);
+        }
+        expect((await bob.storage.control.head(R))?.controlSeq).toBe(2n);
         const revoked = again(server, bob);
         revoked.start();
         await waitFor("BOB refused", () => revoked.client.resourceRefusal(R) !== null, 30_000);
