@@ -66,6 +66,13 @@ remove or rename any.
   new node right after it; a join appends the second node's text and
   deletes it with its Text history kept. SS06, SS14, SS16, SS17, SS40 and
   SS47 to SS51, written through these intents, reach their reference states.
+- Access recovery after a server restore (LFCP-02-106) in `SyncClient`:
+  when RESOURCE_OPEN is refused with AUTHORIZATION_FAILED and the
+  client's validated chain grants it `data/read`, it re-supplies the
+  Control Records the server lacks with CONTROL_PUT, from the head the
+  server reports, and opens again once; a revoked member sends nothing,
+  and transient refusals are retried at most three times. New event
+  `access-recovery` (`started`, `recovered`, `ended` with a reason).
 
 ## 0.1.3 — 2026-10-08
 

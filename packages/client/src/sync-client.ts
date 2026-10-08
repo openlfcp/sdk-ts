@@ -53,6 +53,14 @@ import {
   validateControlChain,
 } from "@openlfcp/wire";
 import { encode } from "@openlfcp/wire/cbor";
+import {
+  afterAccepted,
+  afterMismatch,
+  RECOVERY_TRANSIENT_ATTEMPTS,
+  RECOVERY_TRANSIENT_CODES,
+  type RecoveryStep,
+  startRecovery,
+} from "./access-recovery.js";
 import type { ApplyOutcome, DataUnitApplier, EpochReconciliation } from "./apply.js";
 import type { ProfileCheckpointer } from "./checkpoint.js";
 import { LfcpConnection, type WebSocketFactory } from "./connection.js";
@@ -231,6 +239,22 @@ export type SyncEvent =
       readonly code?: string;
     }
   /**
+   * RESOURCE_OPEN was refused with AUTHORIZATION_FAILED although this
+   * client's validated chain grants it data/read: the server may have lost
+   * Control Records in a restore (LFCP-02-106). "started": the client
+   * re-supplies its chain with CONTROL_PUT; "recovered": the server opened
+   * the Resource again after it; "ended": no recovery, with the reason (see
+   * RecoveryEnd, or "still-refused" when the server holds our chain and
+   * still refuses), and the refusal stands.
+   */
+  | {
+      readonly type: "access-recovery";
+      readonly resourceId: ResourceId;
+      readonly url: string;
+      readonly outcome: "started" | "recovered" | "ended";
+      readonly reason?: string;
+    }
+  /**
    * The server refused the Resource for good (see ResourceRefusal): it is
    * CLOSED and is not opened again until open() is called for it.
    */
@@ -298,6 +322,8 @@ type Request =
     }
   /** RESOURCE_HOST of a Resource the server lost (§41.1). */
   | { readonly kind: "rehost"; readonly resource: string }
+  /** CONTROL_PUT of record `index` of our chain, re-supplying access (LFCP-02-106). */
+  | { readonly kind: "recover-control"; readonly resource: string; readonly index: number }
   /** Objects the server lacks, uploaded again (§68.1): their answers concern no queued item. */
   | { readonly kind: "offer-control"; readonly resource: string }
   | {
@@ -358,6 +384,16 @@ interface ResourceContext {
   keysOffered: boolean;
   /** Re-hosted since it was last LIVE (§41.1): a second RESOURCE_NOT_HOSTED is final. */
   rehosted: boolean;
+  /**
+   * Access recovery ran in this session (LFCP-02-106): a second
+   * AUTHORIZATION_FAILED on open is final. Reset on LIVE and on a new
+   * connection.
+   */
+  recoveryTried: boolean;
+  /** Transient refusals of the current access recovery. */
+  recoveryAttempts: number;
+  /** A recovery pushed our chain and opened again: the next open answer ends it. */
+  recoveryReopened: boolean;
 }
 
 /**
@@ -537,6 +573,9 @@ export class SyncClient {
         offering: new Set(),
         keysOffered: false,
         rehosted: false,
+        recoveryTried: false,
+        recoveryAttempts: 0,
+        recoveryReopened: false,
       };
       this.#resources.set(key, ctx);
     }
@@ -662,7 +701,12 @@ export class SyncClient {
         for (const u of request.units) ctx?.offering.delete(u.id);
         continue;
       }
-      if (request.kind === "offer-control" || request.kind === "offer-keys") continue;
+      if (
+        request.kind === "offer-control" ||
+        request.kind === "offer-keys" ||
+        request.kind === "recover-control"
+      )
+        continue;
       if ("resource" in request) resend.set(`${request.kind}:${request.resource}`, request);
     }
     for (const request of resend.values()) {
@@ -702,6 +746,8 @@ export class SyncClient {
     if (next === "LIVE") {
       ctx.refusedAttempt = 0;
       ctx.rehosted = false;
+      ctx.recoveryTried = false;
+      ctx.recoveryAttempts = 0;
     }
     this.#emit({ type: "resource-state", resourceId: ctx.binding.resourceId, state: next });
     if (next === "LIVE" && ctx.controlStale) {
@@ -745,6 +791,7 @@ export class SyncClient {
       this.#move(ctx, "CLOSE"); // §65, G-SM1: every Resource closes with the connection
       ctx.view = null;
       ctx.offering.clear();
+      ctx.recoveryTried = false; // a new session may recover again (LFCP-02-106)
     }
     await this.#o.outbound.connectionLost(iso(this.#o.now()));
     if (this.#stopped) return;
@@ -809,6 +856,10 @@ export class SyncClient {
         ctx.remoteHave = normalizeLiveHaves(m.body.haves);
         ctx.offered = m.body.snapshot ?? null;
         await this.#markHosted(ctx.binding.resourceId);
+        if (ctx.recoveryReopened) {
+          ctx.recoveryReopened = false;
+          this.#recoveryEvent(ctx, "recovered");
+        }
         this.#move(ctx, "OPENED");
         // §68.1, §88 step 6: what the server lacks goes first, Control Records before units.
         await this.#offerControl(ctx, m.body.heads);
@@ -864,6 +915,11 @@ export class SyncClient {
         return;
       }
       case "ACK":
+        if (request?.kind === "recover-control") {
+          this.#done(m);
+          await this.#recoveryAccepted(request);
+          return;
+        }
         if (request !== undefined) {
           this.#done(m);
           if (request.kind === "offer-data")
@@ -909,6 +965,18 @@ export class SyncClient {
     if (request.kind === "open" && code === "RESOURCE_NOT_HOSTED") {
       const ctx = this.#resources.get(request.resource);
       if (ctx !== undefined && (await this.#rehost(ctx))) return;
+    }
+    if (request.kind === "open" && code === "AUTHORIZATION_FAILED") {
+      const ctx = this.#resources.get(request.resource);
+      if (ctx?.recoveryReopened) {
+        // The server holds our chain and still refuses: not a loss.
+        ctx.recoveryReopened = false;
+        this.#recoveryEvent(ctx, "ended", "still-refused");
+      } else if (ctx !== undefined && (await this.#recoverAccess(ctx))) return;
+    }
+    if (request.kind === "recover-control") {
+      await this.#recoveryRefused(request, code, m.body.details);
+      return;
     }
     if (request.kind === "rehost") {
       const ctx = this.#resources.get(request.resource);
@@ -1667,6 +1735,103 @@ export class SyncClient {
       createMessage("RESOURCE_HOST", { genesis: genesis.signed.bytes }),
     );
     return true;
+  }
+
+  /**
+   * LFCP-02-106: RESOURCE_OPEN was refused with AUTHORIZATION_FAILED. When
+   * our validated chain grants us data/read, the server may have lost the
+   * records that do (a restore): push our head, and follow the server's
+   * answer (see access-recovery.ts). False when no recovery runs; the
+   * refusal then stands as before.
+   */
+  async #recoverAccess(ctx: ResourceContext): Promise<boolean> {
+    if (ctx.recoveryTried || this.#connection.state !== "READY") return false;
+    const chain = await loadControlChain(this.#o.storage, ctx.binding.resourceId);
+    if (chain?.kind !== "linear") return false;
+    const step = startRecovery(chain.state, chain.records, this.#o.signer.descriptor.principalId);
+    ctx.recoveryTried = true;
+    if (step.kind !== "push") {
+      this.#recoveryEvent(ctx, "ended", step.kind === "final" ? step.reason : undefined);
+      return false;
+    }
+    this.#recoveryEvent(ctx, "started");
+    this.#move(ctx, "CLOSE");
+    await this.#recoveryStep(ctx, step);
+    return true;
+  }
+
+  async #recoveryStep(ctx: ResourceContext, step: RecoveryStep): Promise<void> {
+    const R = ctx.binding.resourceId;
+    if (step.kind === "reopen") {
+      ctx.recoveryReopened = true;
+      if (ctx.wanted) await this.#sendOpen(ctx);
+      return;
+    }
+    if (step.kind === "final") {
+      this.#recoveryEvent(ctx, "ended", step.reason);
+      this.#refuse(ctx, { code: "AUTHORIZATION_FAILED", url: this.#o.url, request: "open" });
+      return;
+    }
+    if (this.#connection.state !== "READY") return; // the next session opens and may recover again
+    const chain = await loadControlChain(this.#o.storage, R);
+    const record = chain?.kind === "linear" ? chain.records[step.index] : undefined;
+    const previous = record?.payload.prevControlId ?? null;
+    if (record === undefined || previous === null) {
+      await this.#recoveryStep(ctx, { kind: "final", reason: "refused" });
+      return;
+    }
+    this.#request(
+      { kind: "recover-control", resource: toHex(R), index: step.index },
+      createMessage("CONTROL_PUT", {
+        resourceId: R,
+        expectedHead: previous,
+        record: record.signed.bytes,
+      }),
+    );
+  }
+
+  async #recoveryAccepted(request: Extract<Request, { kind: "recover-control" }>): Promise<void> {
+    const ctx = this.#resources.get(request.resource);
+    if (ctx === undefined) return;
+    const chain = await loadControlChain(this.#o.storage, ctx.binding.resourceId);
+    if (chain?.kind !== "linear") return;
+    await this.#recoveryStep(ctx, afterAccepted(chain.records, request.index));
+  }
+
+  async #recoveryRefused(
+    request: Extract<Request, { kind: "recover-control" }>,
+    code: string,
+    details: unknown,
+  ): Promise<void> {
+    const ctx = this.#resources.get(request.resource);
+    if (ctx === undefined) return;
+    if (RECOVERY_TRANSIENT_CODES.has(code) && ctx.recoveryAttempts < RECOVERY_TRANSIENT_ATTEMPTS) {
+      // Open again after a backoff; the refused open recovers again.
+      ctx.recoveryAttempts += 1;
+      ctx.recoveryTried = false;
+      this.#retryLater(ctx);
+      return;
+    }
+    const chain = await loadControlChain(this.#o.storage, ctx.binding.resourceId);
+    const step: RecoveryStep =
+      code === "CONTROL_HEAD_MISMATCH" && chain?.kind === "linear"
+        ? afterMismatch(chain.records, details)
+        : { kind: "final", reason: "refused" };
+    await this.#recoveryStep(ctx, step);
+  }
+
+  #recoveryEvent(
+    ctx: ResourceContext,
+    outcome: "started" | "recovered" | "ended",
+    reason?: string,
+  ): void {
+    this.#emit({
+      type: "access-recovery",
+      resourceId: ctx.binding.resourceId,
+      url: this.#o.url,
+      outcome,
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 
   /**

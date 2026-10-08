@@ -929,6 +929,46 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     expect(bob.sync.resourceRefusal(chain.R)).toEqual(refusal);
   });
 
+  it("access recovery after AUTHORIZATION_FAILED tolerates a bounded number of transient refusals (LFCP-02-106)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(209);
+    chain.add({
+      type: "CAPABILITY_GRANT",
+      subject: BOB.signer.descriptor,
+      abilities: [1n, 2n],
+      delegable: [],
+    });
+    const bob = client(BOB, server, clock);
+    await saveControlChain(bob.storage, chain.view(), null);
+    server.onMessage = (m, s) => {
+      if (m.type === "RESOURCE_OPEN") s.reply(m, "NACK", { code: 4n }); // AUTHORIZATION_FAILED
+      if (m.type === "CONTROL_PUT") s.reply(m, "NACK", { code: 17n }); // RATE_LIMITED
+      return [];
+    };
+    bob.sync.open(bob.binding(chain.R));
+    bob.sync.start();
+    await settle(200);
+    await bob.sync.idle();
+    // The grant is pushed, expecting the Genesis.
+    const put = server.of("CONTROL_PUT")[0];
+    expect(toHex(put?.body.expectedHead as Uint8Array)).toBe(toHex(chain.ids[0] as Uint8Array));
+    for (let i = 0; i < 5; i++) {
+      clock.t += 1000;
+      bob.sync.tick(clock.t);
+      await settle(100);
+      await bob.sync.idle();
+    }
+    // One push and three retries after RATE_LIMITED, then the refusal stands.
+    expect(server.of("CONTROL_PUT")).toHaveLength(4);
+    expect(server.of("RESOURCE_OPEN")).toHaveLength(4);
+    expect(bob.sync.resourceRefusal(chain.R)?.code).toBe("AUTHORIZATION_FAILED");
+    const outcomes = bob.events.flatMap((e) =>
+      e.type === "access-recovery" ? [`${e.outcome}${e.reason ? `:${e.reason}` : ""}`] : [],
+    );
+    expect(outcomes.at(-1)).toBe("ended:refused");
+  });
+
   it("a transient refusal of the open is retried with backoff instead of waiting for a reconnect", async () => {
     const server = new FakeServer();
     const clock = { t: 0 };
