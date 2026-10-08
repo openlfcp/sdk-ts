@@ -54,6 +54,7 @@ interface Case {
     readonly tree: readonly { id: string; parent: string; depth: number; kind: string }[];
     readonly hidden: readonly string[];
     readonly recovery: readonly { id: string; code: string }[];
+    readonly retainedConcurrentEdits: readonly string[];
     readonly texts: Readonly<Record<string, string>>;
     readonly tasks: Readonly<Record<string, Record<string, unknown>>>;
   };
@@ -158,6 +159,7 @@ describe("shared sections corpus", () => {
       expect(t.recovery).toEqual(c.expected.recovery);
       expect(t.invalid).toEqual(c.expected.invalid);
       expect(t.collisions).toEqual(c.expected.collisions ?? []);
+      expect(t.retainedConcurrentEdits).toEqual(c.expected.retainedConcurrentEdits);
       expect(replayed.tree().tree).toEqual(t.tree);
     });
 

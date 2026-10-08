@@ -623,3 +623,64 @@ describe("SectionReplica: tree and resolution (§7, §8)", () => {
     expect(merged.tree().tree).toHaveLength(4 + 50);
   });
 });
+
+describe("SectionReplica: lifecycle (§9)", () => {
+  type Life = {
+    nodes: Record<string, { lifecycle: string }>;
+    objects: Record<string, { lifecycle: string }>;
+  };
+  const life = (r: SectionReplica) => r.toJSON() as unknown as Life;
+
+  it("deletes a Task through its Task and hides its subtree without rewriting it", () => {
+    const r = built();
+    r.commit([{ intent: "node.delete", id: T }]);
+    expect(life(r).objects[T]?.lifecycle).toBe("deleted");
+    expect(life(r).nodes[T]?.lifecycle).toBe("active");
+    expect(life(r).nodes[P]?.lifecycle).toBe("active");
+    const t = r.tree();
+    expect(t.hidden).toEqual([T, P].sort());
+    expect(t.tree.map((e) => e.id)).toEqual([X, Y]);
+    expect(t.classification).toBe("VALID");
+  });
+
+  it("deletes a paragraph or item through its own lifecycle", () => {
+    const r = built();
+    r.commit([{ intent: "node.delete", id: X }]);
+    expect(life(r).nodes[X]?.lifecycle).toBe("deleted");
+    expect(r.tree().hidden).toEqual([X]);
+  });
+
+  it("keeps a child hidden while an ancestor is deleted, and shows it on the ancestor's restore", () => {
+    const r = built();
+    r.commit([{ intent: "node.delete", id: T }]);
+    r.commit([{ intent: "node.restore", id: P }]);
+    expect(r.tree().hidden).toEqual([T, P].sort());
+    r.commit([{ intent: "node.restore", id: T }]);
+    expect(r.tree().hidden).toEqual([]);
+    expect(r.tree().tree.map((e) => e.id)).toEqual([T, P, X, Y]);
+  });
+
+  it("writes an explicit restore even when the node is already active", () => {
+    const r = built();
+    const before = r.revision();
+    const c = r.commit([{ intent: "node.restore", id: X }]);
+    expect(c).not.toBeNull();
+    expect(r.revision()).not.toBe(before);
+    expect(life(r).nodes[X]?.lifecycle).toBe("active");
+  });
+
+  it("reading the tree writes nothing", () => {
+    const r = built();
+    r.commit([{ intent: "node.delete", id: T }]);
+    const before = r.revision();
+    r.tree();
+    r.validate();
+    expect(r.revision()).toBe(before);
+  });
+
+  it("refuses an unknown node", () => {
+    expect(refusal(() => built().commit([{ intent: "node.delete", id: id(99) }])).code).toBe(
+      "UNKNOWN_NODE",
+    );
+  });
+});

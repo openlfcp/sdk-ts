@@ -143,6 +143,12 @@ export type SectionIntent =
       readonly intent: "structure.resolve";
       readonly moves: readonly ({ readonly id: string } & Position)[];
     }
+  /**
+   * §9: the lifecycle of a node: a Task node's Task, any other node itself.
+   * Always a fresh causal write, also when the value is already visible;
+   * descendants are not rewritten.
+   */
+  | { readonly intent: "node.delete" | "node.restore"; readonly id: string }
   /** §4.2: ordered or bullet list membership, on task and item nodes. */
   | { readonly intent: "node.set_list_style"; readonly id: string; readonly listStyle: ListStyle }
   /** A SHARED-OBJECTS-PROFILE-01 Task intent on a Task of this section (§2). */
@@ -544,6 +550,25 @@ export class SectionReplica {
             : ((d.nodes as AMap)[parent] as AMap).children
         ) as unknown[];
         lane.splice(index, 0, S(placementId));
+      };
+    }
+
+    if (intent.intent === "node.delete" || intent.intent === "node.restore") {
+      const id = intent.id;
+      const node = (doc.nodes as AMap)[id] as AMap | undefined;
+      if (node === undefined) refuse("UNKNOWN_NODE", `${id} names no node`, id);
+      if (v.nodes.has(id) || collidedSet(v).has(id))
+        refuse("NODE_IN_CONFLICT", `${id} is invalid or collides (§14.2)`, id);
+      const isTask = str((node as AMap).kind) === "task";
+      const value = intent.intent === "node.delete" ? "deleted" : "active";
+      affected.add(id);
+      return (d) => {
+        const owner = (isTask ? (d.objects as AMap)[id] : (d.nodes as AMap)[id]) as AMap;
+        // §9: a same-value assignment would be dropped by the binding, so the
+        // other valid value is written first, in the same change.
+        if (str(owner.lifecycle) === value)
+          owner.lifecycle = S(value === "active" ? "deleted" : "active");
+        owner.lifecycle = S(value);
       };
     }
 

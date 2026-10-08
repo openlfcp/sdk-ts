@@ -53,6 +53,13 @@ export interface SectionTree {
   readonly invalid: readonly { readonly id: string; readonly diagnostic: string }[];
   /** Colliding IDs (§14.2), sorted. */
   readonly collisions: readonly string[];
+  /**
+   * §9, §14.3 EDIT_UNDER_DELETED_ANCESTOR: hidden nodes whose content (the
+   * node created, its Text edited, its Task's title or status set) changed
+   * concurrently with the deletion of the node or an ancestor; sorted. The
+   * edit is retained, not visibly applied: it needs the user's attention.
+   */
+  readonly retainedConcurrentEdits: readonly string[];
   /** Each blocked node's candidate placements and their parents (§7 recovery information). */
   readonly candidates: ReadonlyMap<
     string,
@@ -199,6 +206,9 @@ export function deriveTree(
   const isHidden = chained((id) => deleted.has(id));
   const hidden = new Set(keys.filter((id) => isHidden(id)));
 
+  const retained =
+    hidden.size === 0 ? [] : retainedEdits(doc, hidden, (id) => parents.get(id), sectionId);
+
   const tree: TreeEntry[] = [];
   const projectable = validation.state === "ready" && sectionId !== undefined;
   if (projectable) {
@@ -250,7 +260,111 @@ export function deriveTree(
       [...invalid].map(([id, p]) => ({ id, diagnostic: p.diagnostic })).sort(byId),
     ),
     collisions: validation.collisions,
+    retainedConcurrentEdits: Object.freeze(retained),
     candidates,
     validation,
   });
+}
+
+/**
+ * §9: the hidden nodes with content changes concurrent with a deletion of
+ * the node or of an ancestor, from the change history. A change deletes
+ * when the last lifecycle value it writes to an owner (a Task node's Task,
+ * another node itself) is "deleted"; content is a node's creation, an
+ * operation on its Text, or a Task's title or status. Two changes are
+ * concurrent when neither is in the other's dependencies.
+ */
+function retainedEdits(
+  doc: A.Doc<unknown>,
+  hidden: ReadonlySet<string>,
+  parentOf: (id: string) => string | undefined,
+  sectionId: string | undefined,
+): string[] {
+  const root = doc as AMap;
+  const nodes = (root.nodes ?? {}) as AMap;
+  const objects = (root.objects ?? {}) as AMap;
+  const nodesObj = A.getObjectId(root, "nodes");
+  // Object IDs to the node whose content or lifecycle they hold.
+  const textOf = new Map<string, string>();
+  const ownerOf = new Map<string, string>();
+  const taskOf = new Map<string, string>();
+  for (const id of Object.keys(nodes)) {
+    const n = nodes[id] as AMap;
+    const text = A.getObjectId(n, "text");
+    if (text !== null) textOf.set(text, id);
+    const isTask = str(n.kind) === "task";
+    const task = isTask ? (objects[id] as AMap | undefined) : undefined;
+    const owner = isTask ? (task === undefined ? null : A.getObjectId(task)) : A.getObjectId(n);
+    if (owner !== null) ownerOf.set(owner, id);
+    if (task !== undefined) {
+      const t = A.getObjectId(task);
+      if (t !== null) taskOf.set(t, id);
+    }
+  }
+
+  const deps = new Map<string, readonly string[]>();
+  const deletes: { hash: string; node: string }[] = [];
+  const edits: { hash: string; node: string }[] = [];
+  for (const bytes of A.getAllChanges(doc as A.Doc<AMap>)) {
+    const change = A.decodeChange(bytes);
+    deps.set(change.hash, change.deps);
+    const lastLifecycle = new Map<string, unknown>();
+    const touched = new Set<string>();
+    for (const op of change.ops) {
+      const key = (op as { key?: string }).key;
+      const value = (op as { value?: unknown }).value;
+      if (op.obj === nodesObj && op.action === "makeMap" && key !== undefined && hidden.has(key))
+        touched.add(key);
+      const text = textOf.get(op.obj);
+      if (text !== undefined && hidden.has(text)) touched.add(text);
+      const task = taskOf.get(op.obj);
+      if (task !== undefined && hidden.has(task) && (key === "title" || key === "status"))
+        touched.add(task);
+      const owner = ownerOf.get(op.obj);
+      if (owner !== undefined && key === "lifecycle") lastLifecycle.set(owner, value);
+    }
+    for (const [owner, value] of lastLifecycle)
+      if (value === "deleted") deletes.push({ hash: change.hash, node: owner });
+    for (const node of touched) edits.push({ hash: change.hash, node });
+  }
+  if (deletes.length === 0 || edits.length === 0) return [];
+
+  /** Every change `hash` depends on, transitively, memoized. */
+  const ancestry = new Map<string, ReadonlySet<string>>();
+  const ancestorsOf = (hash: string): ReadonlySet<string> => {
+    const known = ancestry.get(hash);
+    if (known !== undefined) return known;
+    const out = new Set<string>();
+    const todo = [...(deps.get(hash) ?? [])];
+    while (todo.length > 0) {
+      const h = todo.pop() as string;
+      if (out.has(h)) continue;
+      out.add(h);
+      for (const d of deps.get(h) ?? []) if (!out.has(d)) todo.push(d);
+    }
+    ancestry.set(hash, out);
+    return out;
+  };
+  const concurrent = (a: string, b: string) =>
+    a !== b && !ancestorsOf(a).has(b) && !ancestorsOf(b).has(a);
+
+  const deletesOf = new Map<string, string[]>();
+  for (const d of deletes) deletesOf.set(d.node, [...(deletesOf.get(d.node) ?? []), d.hash]);
+  const attention = new Set<string>();
+  for (const edit of edits) {
+    if (attention.has(edit.node)) continue;
+    const seen = new Set<string>();
+    for (
+      let p: string | undefined = edit.node;
+      p !== undefined && p !== sectionId && nodes[p] !== undefined && !seen.has(p);
+      p = parentOf(p)
+    ) {
+      seen.add(p);
+      if ((deletesOf.get(p) ?? []).some((d) => concurrent(d, edit.hash))) {
+        attention.add(edit.node);
+        break;
+      }
+    }
+  }
+  return [...attention].sort();
 }

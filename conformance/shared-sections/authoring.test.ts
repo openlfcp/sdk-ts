@@ -13,7 +13,10 @@
 //   merge to the reference state, sibling order included;
 // - SS15 and SS26: C's explicit resolution of a placement conflict and of a
 //   parent cycle, authored on the merged branches, reaches the reference
-//   state and a VALID tree.
+//   state and a VALID tree;
+// - SS07, SS08, SS24, SS25 and SS27: deletion and restoration written by
+//   this writer on two branches (and C's resolution) reach the reference
+//   state, hidden nodes and retained concurrent edits included.
 
 import { fromHex, principalId, resourceId, toHex } from "@openlfcp/core";
 import { createTask } from "@openlfcp/shared-objects";
@@ -280,4 +283,100 @@ describe("authoring the shared sections corpus (LFCP-02-012)", () => {
       expect(merged.replica.tree().classification).toBe("VALID");
       expect(canonical(merged.replica.toJSON() as Json)).toEqual(canonical(ref as unknown as Json));
     });
+
+  describe("lifecycle (LFCP-02-015)", () => {
+    const task = ids.task as string;
+    const para = ids.para as string;
+    /** A placement of `node` in the reference state of `id` that SS01 does not have. */
+    const newSlot = (id: string, node: string) => {
+      const before = new Set(
+        Object.keys((reference("SS01").toJSON() as unknown as State).placements),
+      );
+      const ref = reference(id).toJSON() as unknown as State;
+      return Object.entries(ref.placements).find(
+        ([pid, p]) => p.node_id === node && !before.has(pid),
+      )?.[0] as string;
+    };
+    const cases: Record<
+      string,
+      { base?: SectionIntent[]; a: SectionIntent[]; b: SectionIntent[]; after?: SectionIntent[] }
+    > = {
+      SS07: {
+        a: [{ intent: "node.delete", id: task }],
+        b: [
+          {
+            intent: "node.move",
+            id: para,
+            parent: ids.section as string,
+            after: ids.y as string,
+            placementId: newSlot("SS07", para),
+          },
+        ],
+      },
+      SS08: { a: [{ intent: "node.delete", id: task }], b: [{ intent: "node.restore", id: task }] },
+      SS24: {
+        a: [{ intent: "node.delete", id: task }],
+        b: [
+          {
+            intent: "paragraph.create",
+            id: ids.extra as string,
+            parent: task,
+            after: para,
+            text: "Retained new child",
+            createdBy: principal("B"),
+            placementId: newSlot("SS24", ids.extra as string),
+          },
+        ],
+      },
+      SS25: {
+        base: [
+          { intent: "node.delete", id: task },
+          { intent: "node.delete", id: para },
+        ],
+        a: [{ intent: "node.restore", id: task }],
+        b: [],
+      },
+      SS27: {
+        a: [{ intent: "node.delete", id: task }],
+        b: [{ intent: "node.restore", id: task }],
+        after: [{ intent: "node.restore", id: task }],
+      },
+    };
+    for (const [id, steps] of Object.entries(cases))
+      it(`${id}: written through the lifecycle intents, reaches the reference state`, () => {
+        const start = authorSS01();
+        if (steps.base) start.commit(steps.base);
+        const branch = (who: "A" | "B", intents: SectionIntent[]) => {
+          const r = SectionReplica.fromSave(
+            start.save(),
+            { resource, principal: principal(who) },
+            "local-state",
+          );
+          if (intents.length > 0) r.commit(intents);
+          return r.changes();
+        };
+        const merged = SectionReplica.fromChanges(
+          [...branch("A", steps.a), ...branch("B", steps.b)],
+          { resource, principal: principal("C") },
+        ).replica;
+        if (steps.after) merged.commit(steps.after);
+        const ref = reference(id);
+        expect(canonical(merged.toJSON() as Json)).toEqual(canonical(ref.toJSON() as Json));
+        const got = merged.tree();
+        const want = ref.tree();
+        expect([
+          got.classification,
+          got.tree,
+          got.hidden,
+          got.recovery,
+          got.retainedConcurrentEdits,
+        ]).toEqual([
+          want.classification,
+          want.tree,
+          want.hidden,
+          want.recovery,
+          want.retainedConcurrentEdits,
+        ]);
+      });
+  });
 });
