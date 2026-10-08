@@ -173,13 +173,25 @@ describe("recovery after server data loss ↔ Rust reference server (live, ADR 0
 
         const bob = bobOf(server.url, R);
         bob.start();
-        await waitFor("BOB LIVE", () => bob.client.resourceState(R) === "LIVE", 30_000);
+        // OWNER re-supplies BOB's grant asynchronously (§68.1): a BOB that opens
+        // before the server committed it is refused (AUTHORIZATION_FAILED, a final
+        // answer), and an application opens it again later, as here.
+        await waitFor(
+          "BOB LIVE",
+          () => {
+            if (bob.client.resourceRefusal(R)?.code === "AUTHORIZATION_FAILED") bob.open();
+            return bob.client.resourceState(R) === "LIVE";
+          },
+          30_000,
+        );
         await waitFor("BOB converges", () => same(owner, bob), 30_000);
         expect(task(bob)?.title).toBe("Hosted");
         expect((await bob.storage.control.head(R))?.controlSeq).toBe(1n);
         expect(owner.events.some((e) => e.type === "resource-refused")).toBe(false);
         expect(noProgress(bob)).toEqual([]);
-        expect(bob.errors()).toEqual([]);
+        expect(
+          bob.errors().filter((e) => e.type === "error" && e.code !== "AUTHORIZATION_FAILED"),
+        ).toEqual([]);
         await owner.stop();
         await bob.stop();
       }),
