@@ -68,6 +68,7 @@ import { EngineGuard, isEngineTrap, snapshotItem } from "./engine-guard.js";
 import type { AckOutcome, NackOutcome, OutboundQueue, StaleOutboundUnit } from "./outbound.js";
 import { resourceSyncState, snapshotFrontier } from "./outbound.js";
 import { createQueuedSnapshot } from "./queue.js";
+import { intentsHash, OperationIdReusedError, type Receipt, receiptOf } from "./receipts.js";
 import {
   type ResourcePhase,
   type ResourcePhaseEvent,
@@ -75,6 +76,7 @@ import {
 } from "./resource-state.js";
 import {
   adoptStoredDeks,
+  commitOperation,
   dekResolver,
   loadControlChain,
   saveControlChain,
@@ -117,6 +119,35 @@ export interface SnapshotBinding<T> {
   current(): T;
 }
 
+/**
+ * SDK-SECTIONS-INTEGRATION-01 §3.1: a batch of intents a Data Profile has
+ * validated and changed on a copy of its state (for Shared Sections:
+ * SharedSectionsDataProfile.commitBinding().stage).
+ */
+export interface StagedOperation<T> {
+  /** The batch's changes in order: one Data Unit each. */
+  readonly values: readonly T[];
+  readonly affectedNodeIds: readonly string[];
+  /** The profile state's revision after the batch. */
+  readonly modelRevision: string;
+  /** Adopts the batch in the profile state, before the commit is stored. */
+  apply(): void;
+  /** Undoes apply(): the commit did not happen, or had happened before. */
+  revert(): void;
+  /** Writes stored with the units: the profile checkpoint that includes them. */
+  writes(units: readonly { readonly unitId: DataUnitId }[]): readonly StorageWrite[];
+  /** Called once the commit is durable, with the units in order. */
+  committed(unitIds: readonly DataUnitId[]): void;
+}
+
+/** How a Resource's Data Profile commits local batches (§3.1). */
+export interface CommitBinding<T> {
+  /** The codec of this client's own units. */
+  readonly codec: DataProfileCodec<T>;
+  /** Validates and changes the batch on a copy; null when it writes nothing. Throws to refuse it. */
+  stage(intents: readonly unknown[]): StagedOperation<T> | null;
+}
+
 /** A Resource to synchronize: its Data Profile applier (and optional checkpoints and Snapshots). */
 export interface ResourceBinding {
   readonly resourceId: ResourceId;
@@ -124,6 +155,8 @@ export interface ResourceBinding {
   readonly checkpointer?: ProfileCheckpointer;
   /** Load an offered Snapshot instead of replaying every unit, and allow publishing. */
   readonly snapshot?: SnapshotBinding<unknown>;
+  /** Commit local batches with receipts (commit, receiptOf). */
+  readonly commit?: CommitBinding<unknown>;
 }
 
 /** When to try connecting again after the `attempt`-th failure (1, 2, …): a delay in ms, or null to stop. */
@@ -1465,6 +1498,87 @@ export class SyncClient {
    * that loads it never skips content the state does not hold. Queued and
    * sent like any object; returns its ID.
    */
+  /**
+   * SDK-SECTIONS-INTEGRATION-01 §3.1: commits a batch of intents on an open
+   * Resource and returns its receipt once the batch is durable: its Data
+   * Units, outbound entries, the profile checkpoint and the receipt are
+   * stored in one transaction, then the batch is sent. An operation that
+   * has a receipt returns it for the same intents and writes nothing, and
+   * throws OperationIdReusedError for different ones (§3.3). Runs between
+   * received units, never during their merge.
+   */
+  commit(
+    resource: ResourceId,
+    intents: readonly unknown[],
+    options: { readonly operationId: string },
+  ): Promise<Receipt> {
+    const ctx = this.#resources.get(toHex(resource));
+    if (ctx === undefined)
+      return Promise.reject(new LfcpError("UNSUPPORTED_VALUE", "the Resource is not open here"));
+    const binding = ctx.binding.commit;
+    if (binding === undefined)
+      return Promise.reject(
+        new LfcpError("UNSUPPORTED_VALUE", "the Resource has no commit binding"),
+      );
+    return new Promise<Receipt>((resolve, reject) =>
+      this.#serial(async () => {
+        try {
+          resolve(await this.#commit(ctx, binding, intents, options.operationId));
+        } catch (e) {
+          reject(e);
+        }
+      }),
+    );
+  }
+
+  async #commit(
+    ctx: ResourceContext,
+    binding: CommitBinding<unknown>,
+    intents: readonly unknown[],
+    operationId: string,
+  ): Promise<Receipt> {
+    const R = ctx.binding.resourceId;
+    const storage = this.#o.storage;
+    // §3.3: a committed operation answers first; its intents may no longer apply.
+    const known = await receiptOf(storage, R, operationId);
+    if (known !== undefined) {
+      if (known.intentsHash !== intentsHash(intents)) throw new OperationIdReusedError(operationId);
+      return known;
+    }
+    const view = ctx.view ?? (await loadControlChain(storage, R));
+    if (view === undefined || view.kind !== "linear")
+      throw new LfcpError("UNSUPPORTED_VALUE", "the Resource's Control Chain is not usable");
+    const dek = await dekResolver(storage, this.#o.secrets, R)(view.state.epoch.epoch);
+    if (dek === undefined) throw new LfcpError("UNSUPPORTED_VALUE", "no DEK for the current epoch");
+    const staged = binding.stage(intents);
+    staged?.apply();
+    try {
+      const { receipt, committed } = await commitOperation(
+        storage,
+        {
+          view,
+          controlHead: view.state.head,
+          actor: this.#o.signer,
+          dek,
+          profile: binding.codec,
+          operationId,
+          intents,
+          values: staged?.values ?? [],
+          affectedNodeIds: staged?.affectedNodeIds ?? [],
+          modelRevision: staged?.modelRevision ?? "",
+        },
+        (units) => staged?.writes(units) ?? [],
+      );
+      if (!committed) staged?.revert();
+      else staged?.committed(receipt.unitIds);
+      await this.#flush(ctx);
+      return receipt;
+    } catch (e) {
+      staged?.revert();
+      throw e;
+    }
+  }
+
   async publishSnapshot(resource: ResourceId): Promise<Hash32> {
     const ctx = this.#resources.get(toHex(resource));
     if (ctx === undefined)

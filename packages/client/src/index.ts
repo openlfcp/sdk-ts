@@ -95,11 +95,13 @@ export {
   saveControlConflict,
 } from "./storage.js";
 export {
+  type CommitBinding,
   defaultReconnect,
   type ReconnectPolicy,
   type ResourceBinding,
   type ResourceRefusal,
   type SnapshotBinding,
+  type StagedOperation,
   SyncClient,
   type SyncClientOptions,
   type SyncEvent,
