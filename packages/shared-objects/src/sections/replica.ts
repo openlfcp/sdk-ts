@@ -302,6 +302,13 @@ export interface SectionSnapshot {
   };
 }
 
+/** A batch validated and changed on a copy (SectionReplica.stage): applied only on request. */
+export interface StagedSectionChange {
+  readonly change: SectionLocalChange;
+  /** Adopts the change; throws if the replica moved on since staging. Idempotent. */
+  apply(): void;
+}
+
 export interface SectionReplicaOptions {
   readonly resource: ResourceId;
   readonly principal: PrincipalId;
@@ -549,6 +556,20 @@ export class SectionReplica {
    * or ProfileError / ObjectIdCollisionError for a Task the SOP refuses.
    */
   commit(intents: readonly SectionIntent[]): SectionLocalChange | null {
+    const staged = this.stage(intents);
+    if (staged === null) return null;
+    staged.apply();
+    return staged.change;
+  }
+
+  /**
+   * Validates `intents` as one batch and prepares their change without
+   * changing this replica: `apply()` adopts it, once the caller has stored
+   * it durably (its Data Unit, outbound entry and checkpoint). A batch that
+   * is never applied leaves the replica as it was. Null when the batch
+   * writes nothing.
+   */
+  stage(intents: readonly SectionIntent[]): StagedSectionChange | null {
     if (intents.length === 0) return null;
     if (A.getActorId(this.#doc) !== this.#actor)
       throw new Error("the document actor is not the §2 actor");
@@ -587,7 +608,9 @@ export class SectionReplica {
 
     const message = intents.map((x) => x.intent).join(",");
     const before = A.getHeads(this.#doc);
-    const next = A.change(this.#doc, { message, time: 0 }, (d) => {
+    // On a clone: A.change outdates the handle it is given, and this
+    // replica keeps its own until apply().
+    const next = A.change(A.clone(this.#doc, { actor: this.#actor }), { message, time: 0 }, (d) => {
       for (const w of writes) w(d);
     });
     if (A.getHeads(next).join() === before.join()) return null;
@@ -602,8 +625,7 @@ export class SectionReplica {
         `the batch is larger than one change may be (SOP §11.1: ${(e as Error).message})`,
       );
     }
-    this.#doc = next;
-    return Object.freeze({
+    const change: SectionLocalChange = Object.freeze({
       intents: Object.freeze(intents.map((x) => x.intent)),
       change: checked.bytes,
       plaintext: frameProfilePayload(checked.bytes),
@@ -611,6 +633,20 @@ export class SectionReplica {
       seq: checked.seq,
       affectedNodeIds: Object.freeze([...affected].sort()),
       modelRevision: revisionOf(next),
+    });
+    const base = revisionOf(this.#doc);
+    let applied = false;
+    return Object.freeze({
+      change,
+      apply: () => {
+        if (applied) return;
+        if (revisionOf(this.#doc) !== base)
+          throw new Error("the replica changed since the batch was staged; stage it again");
+        this.#doc = next;
+        if (this.#seqs !== undefined && checked.seq > (this.#seqs.get(checked.actor) ?? 0))
+          this.#seqs.set(checked.actor, checked.seq);
+        applied = true;
+      },
     });
   }
 

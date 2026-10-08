@@ -898,3 +898,35 @@ describe("SectionReplica: snapshot", () => {
     expect(m.snapshot().title.conflicts).toEqual(["A", "B"]);
   });
 });
+
+describe("SectionReplica: staged batches", () => {
+  it("changes nothing until apply, and keeps the replica usable when never applied", () => {
+    const r = built();
+    const before = r.revision();
+    const staged = r.stage([{ intent: "section.set_title", title: "Staged" }]);
+    expect(staged?.change.modelRevision).not.toBe(before);
+    expect(r.revision()).toBe(before);
+    expect((r.toJSON() as { section: { title: string } }).section.title).toBe("Joint launch");
+    // Dropped: the replica writes on as if it had never been staged.
+    r.commit([{ intent: "section.set_title", title: "Other" }]);
+    expect((r.toJSON() as { section: { title: string } }).section.title).toBe("Other");
+    expect(() => staged?.apply()).toThrow("stage it again");
+  });
+
+  it("adopts the staged change on apply, once", () => {
+    const r = built();
+    const staged = r.stage([{ intent: "section.set_title", title: "Staged" }]);
+    staged?.apply();
+    staged?.apply();
+    expect(r.revision()).toBe(staged?.change.modelRevision);
+    expect(r.changes()).toHaveLength(2);
+  });
+
+  it("does not hold its own changes as taken sequences when it receives them back", () => {
+    const r = built();
+    const c = r.commit([{ intent: "section.set_title", title: "Mine" }]);
+    const out = r.receiveChanges([c?.change as Uint8Array]);
+    expect(out.duplicates).toEqual([c?.hash]);
+    expect(out.refused).toEqual([]);
+  });
+});
