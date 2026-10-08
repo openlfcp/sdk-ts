@@ -307,6 +307,12 @@ export interface StagedSectionChange {
   readonly change: SectionLocalChange;
   /** Adopts the change; throws if the replica moved on since staging. Idempotent. */
   apply(): void;
+  /**
+   * Undoes apply() while nothing came after it: the replica holds the
+   * document it had before (its storage commit failed, or the operation
+   * had committed already). Idempotent.
+   */
+  revert(): void;
 }
 
 export interface SectionReplicaOptions {
@@ -691,6 +697,8 @@ export class SectionReplica {
       modelRevision: revisionOf(next),
     });
     const base = revisionOf(this.#doc);
+    const prior = this.#doc;
+    const priorSeqs = this.#seqs === undefined ? undefined : new Map(this.#seqs);
     let applied = false;
     return Object.freeze({
       change,
@@ -702,6 +710,14 @@ export class SectionReplica {
         if (this.#seqs !== undefined && checked.seq > (this.#seqs.get(checked.actor) ?? 0))
           this.#seqs.set(checked.actor, checked.seq);
         applied = true;
+      },
+      revert: () => {
+        if (!applied) return;
+        if (this.#doc !== next)
+          throw new Error("the replica changed after the batch was applied; it cannot be reverted");
+        this.#doc = prior;
+        this.#seqs = priorSeqs === undefined ? undefined : new Map(priorSeqs);
+        applied = false;
       },
     });
   }

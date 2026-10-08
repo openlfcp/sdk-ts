@@ -913,6 +913,21 @@ describe("SectionReplica: staged batches", () => {
     expect(() => staged?.apply()).toThrow("stage it again");
   });
 
+  it("reverts an applied batch while nothing came after it", () => {
+    const r = built();
+    const before = r.revision();
+    const staged = r.stage([{ intent: "section.set_title", title: "Staged" }]);
+    staged?.apply();
+    staged?.revert();
+    expect(r.revision()).toBe(before);
+    r.commit([{ intent: "section.set_title", title: "After" }]);
+    expect(r.changes()).toHaveLength(2);
+    const again = r.stage([{ intent: "section.set_title", title: "Late" }]);
+    again?.apply();
+    r.commit([{ intent: "section.set_title", title: "Later" }]);
+    expect(() => again?.revert()).toThrow("cannot be reverted");
+  });
+
   it("adopts the staged change on apply, once", () => {
     const r = built();
     const staged = r.stage([{ intent: "section.set_title", title: "Staged" }]);

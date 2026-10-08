@@ -326,16 +326,27 @@ export class SharedSectionsDataProfile {
     this.#emit(changed(before, fingerprints(this.#replica.snapshot())), "rebuild");
   }
 
-  /** The state to persist: the full save, this actor's sequence and each merged unit's change. */
-  checkpoint(): SectionsCheckpoint {
+  /**
+   * The state to persist: the full save, this actor's sequence and each
+   * merged unit's change, with `local`, this client's units committed in
+   * the same transaction as the checkpoint.
+   */
+  checkpoint(
+    local: readonly { readonly unitId: DataUnitId; readonly ref: string }[] = [],
+  ): SectionsCheckpoint {
+    const units = new Map(
+      [...this.#merged.values()].map((m) => [toHex(m.unitId), { unitId: m.unitId, ref: m.hash }]),
+    );
+    // Own units being committed with this checkpoint (recordLocal once committed).
+    for (const u of local) units.set(toHex(u.unitId), { unitId: u.unitId, ref: u.ref });
     return Object.freeze({
       resourceId: this.#replica.resource,
       dataProfile: SECTIONS_PROFILE_ID,
       state: this.#replica.save(),
       actorSeq: this.#replica.actorSeq,
       units: Object.freeze(
-        [...this.#merged.values()]
-          .map((m) => Object.freeze({ unitId: m.unitId, ref: m.hash }))
+        [...units.values()]
+          .map((m) => Object.freeze({ unitId: m.unitId, ref: m.ref }))
           .sort((a, b) => (toHex(a.unitId) < toHex(b.unitId) ? -1 : 1)),
       ),
     });
