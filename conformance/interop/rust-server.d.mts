@@ -15,6 +15,11 @@ export interface RunningRustServer {
   kill(): Promise<void>;
   /** SIGKILLs the server if it runs, then starts it again on the same port, config and state. */
   restart(): Promise<void>;
+  /**
+   * SIGKILLs the server, replaces its state directory with `files` (an
+   * earlier files() copy: a restore from backup) and starts it again.
+   */
+  restore(files: readonly { readonly path: string; readonly bytes: Uint8Array }[]): Promise<void>;
   /** Stops the server and deletes its state directory. */
   stop(): Promise<void>;
 }

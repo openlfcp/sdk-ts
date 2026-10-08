@@ -14,10 +14,18 @@
 // stopping it, the server is killed and its directory removed.
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { ROOT } from "../spec.mjs";
 import { guardChild } from "./reaper.mjs";
 
@@ -165,6 +173,24 @@ export async function startRustServer() {
       await exited(c);
       if (!(await spawnServer()))
         throw new Error(`the Rust server did not restart:\n${log.slice(-2000)}`);
+    },
+    restore: async (files) => {
+      // ADR 0008: the store replaced by an older copy (a restore from backup).
+      const c = child;
+      release();
+      if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
+      await exited(c);
+      const state = join(dir, "state");
+      rmSync(state, { recursive: true, force: true });
+      mkdirSync(state, { recursive: true, mode: 0o700 });
+      for (const f of files) {
+        mkdirSync(dirname(join(state, f.path)), { recursive: true, mode: 0o700 });
+        writeFileSync(join(state, f.path), f.bytes, { mode: 0o600 });
+      }
+      if (!(await spawnServer()))
+        throw new Error(
+          `the Rust server did not start on the restored store:\n${log.slice(-2000)}`,
+        );
     },
     stop: async () => {
       release();
