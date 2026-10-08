@@ -715,6 +715,39 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     );
   });
 
+  it("keeps its own acknowledged record even when the catch-up fetch never answers (LFCP-02-106)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(212);
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    coordinatorOf(server, chain);
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(200);
+    await owner.sync.idle();
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+    // From now on the server commits puts but never answers CONTROL_HAVE:
+    // the window between the ACK and the catch-up stays open.
+    const coordinate = server.onMessage;
+    server.onMessage = (m, s) => (m.type === "CONTROL_HAVE" ? [] : coordinate(m, s));
+    const grant = signControlRecord(
+      { resourceId: chain.R, controlSeq: 1n, prevControlId: chain.ids[0] as ControlRecordId },
+      { type: "CAPABILITY_GRANT", subject: BOB.signer.descriptor, abilities: [1n], delegable: [] },
+      OWNER.signer,
+    );
+    await queueControlRecord(owner.storage, grant.bytes);
+    owner.sync.flush();
+    await settle(300);
+    await owner.sync.idle();
+    expect(chain.records).toHaveLength(2); // committed on the server
+    expect(await owner.storage.outbound.list(chain.R)).toEqual([]);
+    // Acknowledged means in our own chain: a stop now, then a server
+    // restored from an older copy, cannot lose the grant.
+    await owner.sync.stop();
+    expect((await owner.storage.control.head(chain.R))?.controlSeq).toBe(1n);
+  });
+
   it("learns its own record committed during a Control sync once LIVE again (no lost refresh)", async () => {
     const server = new FakeServer();
     const clock = { t: 0 };

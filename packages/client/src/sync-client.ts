@@ -1798,6 +1798,7 @@ export class SyncClient {
   }
 
   async #onAck(m: LfcpMessage<"ACK">): Promise<void> {
+    if (m.body.requestType === MESSAGE_TYPE.CONTROL_PUT) await this.#adoptAcked(m);
     const outcome = await this.#o.outbound.onAck(m, iso(this.#o.now()));
     this.#emit({ type: "ack", outcome });
     // Our own Control Record was committed: catch up, since the server does not push it back to us.
@@ -1805,6 +1806,26 @@ export class SyncClient {
       for (const ctx of this.#resources.values())
         if (ctx.state === "LIVE") this.#refreshControl(ctx);
         else ctx.controlStale = true;
+  }
+
+  /**
+   * An ACK of our CONTROL_PUT (§47) means the server committed the record
+   * on the head it expected: our own previous record. The record joins the
+   * stored chain the way a fetched one does, BEFORE it leaves the queue, so
+   * it is never held by the server alone: a stop between the ACK and the
+   * catch-up fetch, then a server restored from an older copy, would
+   * otherwise lose it (LFCP-02-106). A crash before the dequeue only sends
+   * it again, and a repeated ACK is idempotent. A record that does not
+   * continue the stored chain is left to the catch-up fetch.
+   */
+  async #adoptAcked(m: LfcpMessage<"ACK">): Promise<void> {
+    for (const id of m.body.objectIds ?? []) {
+      const item = await this.#o.storage.outbound.get(id);
+      if (item?.kind !== "control-record") continue;
+      const ctx = this.#ctx(item.resourceId);
+      if (ctx === undefined) continue;
+      await this.#onControlRecords(ctx, [item.bytes], false);
+    }
   }
 
   async #onNack(m: LfcpMessage<"NACK">): Promise<void> {
