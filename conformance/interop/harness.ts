@@ -230,6 +230,15 @@ export class Side {
     return (await this.storage.outbound.list(this.resource)).length === 0;
   }
 
+  /**
+   * The local Control Head is at `seq` and nothing is queued: our Control
+   * Records are in our own stored chain, not only on the server.
+   */
+  async controlSettled(seq: bigint): Promise<boolean> {
+    const head = await this.storage.control.head(this.resource);
+    return head?.controlSeq === seq && (await this.queueEmpty());
+  }
+
   errors(): SyncEvent[] {
     return this.events.filter((e) => e.type === "error");
   }

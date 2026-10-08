@@ -97,6 +97,9 @@ async function joinedAfterBackup(server: RunningRustServer, seed: number) {
   const backup = server.files(); // the grant is not in it
   await grantAndKey(owner, BOB, DEK0);
   await waitFor("grant acknowledged", () => owner.queueEmpty());
+  // Acknowledged means in the owner's own chain: the record never waits on
+  // the catch-up fetch, so a stop right now cannot lose it.
+  expect((await owner.storage.control.head(R))?.controlSeq).toBe(1n);
   const bob = sideOf(server.url, R, BOB);
   bob.start();
   await waitFor("BOB LIVE", () => bob.client.resourceState(R) === "LIVE", 30_000);
@@ -166,7 +169,7 @@ describe("access recovery after a restore ↔ Rust reference server (live, LFCP-
         bob.start();
         await waitFor("OWNER LIVE", () => owner.client.resourceState(R) === "LIVE", 30_000);
         await waitFor("BOB LIVE", () => bob.client.resourceState(R) === "LIVE", 30_000);
-        await waitFor("OWNER queue empty", () => owner.queueEmpty(), 30_000);
+        await waitFor("OWNER settled", () => owner.controlSettled(1n), 30_000);
         // Both hold the same chain: Genesis and the grant, no fork.
         expect((await bob.storage.control.head(R))?.controlSeq).toBe(1n);
         expect((await owner.storage.control.head(R))?.controlSeq).toBe(1n);
@@ -185,7 +188,7 @@ describe("access recovery after a restore ↔ Rust reference server (live, LFCP-
         await server.restore(backup);
         owner.start();
         await waitFor("OWNER LIVE", () => owner.client.resourceState(R) === "LIVE", 30_000);
-        await waitFor("OWNER queue empty", () => owner.queueEmpty(), 30_000);
+        await waitFor("OWNER settled", () => owner.controlSettled(1n), 30_000);
         // The owner's CONTROL_PUT is asynchronous (§68.1): wait until BOB's
         // open is not refused any more, without recovery.
         await waitFor(
@@ -227,7 +230,7 @@ describe("access recovery after a restore ↔ Rust reference server (live, LFCP-
         await waitFor("OWNER LIVE", () => owner.client.resourceState(R) === "LIVE", 30_000);
         await waitFor("BOB LIVE", () => bob.client.resourceState(R) === "LIVE", 30_000);
         await revokeBob(owner);
-        await waitFor("revocation acknowledged", () => owner.queueEmpty(), 30_000);
+        await waitFor("revocation acknowledged", () => owner.controlSettled(2n), 30_000);
         // The server stops serving BOB once he is revoked, so he would not
         // receive it live; store the revocation in his chain as if he had,
         // after his session stopped (a running client may still write it).
@@ -260,7 +263,7 @@ describe("access recovery after a restore ↔ Rust reference server (live, LFCP-
         owner.start();
         await waitFor("OWNER LIVE", () => owner.client.resourceState(R) === "LIVE", 30_000);
         await revokeBob(owner);
-        await waitFor("revocation acknowledged", () => owner.queueEmpty(), 30_000);
+        await waitFor("revocation acknowledged", () => owner.controlSettled(2n), 30_000);
         // BOB returns with his chain, which still grants him.
         const bob = again(server, joined);
         bob.start();
