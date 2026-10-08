@@ -69,6 +69,13 @@ export {
   queueSnapshot,
 } from "./queue.js";
 export {
+  intentsHash,
+  OperationIdReusedError,
+  type Receipt,
+  receiptOf,
+  releaseReceipt,
+} from "./receipts.js";
+export {
   type ResourcePhase,
   type ResourcePhaseEvent,
   resourcePhaseTransition,
@@ -76,6 +83,8 @@ export {
 export { type CreatedSnapshot, type CreateSnapshotOptions, createSnapshot } from "./snapshot.js";
 export {
   adoptStoredDeks,
+  type CommitOperationOptions,
+  commitOperation,
   createQueuedDataUnit,
   dataUnitRow,
   dekResolver,

@@ -29,6 +29,13 @@ import {
   validateControlChain,
 } from "@openlfcp/wire";
 import { type CreateDataUnitOptions, type CreatedDataUnit, createDataUnit } from "./data-unit.js";
+import {
+  intentsHash,
+  OperationIdReusedError,
+  type Receipt,
+  receiptOf,
+  receiptWrite,
+} from "./receipts.js";
 
 /**
  * The client code on top of the storage interfaces (LFCP-034), so that a
@@ -407,4 +414,103 @@ async function createQueuedDataUnitNow<T>(
   ]);
   if (!result.ok) throw new Error(`the local unit was not stored: ${result.reason}`);
   return created;
+}
+
+/**
+ * SDK-SECTIONS-INTEGRATION-01 §3.1 (LFCP-02-025): commits one operation, a
+ * batch of a profile's changes, as Data Units with their outbound entries,
+ * the caller's writes (`also`: its profile checkpoint) and the receipt, in
+ * ONE storage transaction: after a crash either all of it exists or none.
+ * The units chain their previous units in order (§26.2).
+ *
+ * Idempotent per (Resource, operationId) (§3.3): an operation that already
+ * has a receipt for the same intents returns it and writes nothing; for
+ * different intents it throws OperationIdReusedError. The caller stages
+ * its changes first and adopts them only once this resolves.
+ */
+export interface CommitOperationOptions<T>
+  extends Omit<CreateDataUnitOptions<T>, "sequences" | "previousUnitId" | "value"> {
+  readonly operationId: string;
+  /** The batch's intents, as the caller submitted them (their canonical form is hashed, §3.3). */
+  readonly intents: readonly unknown[];
+  /** The batch's changes in order; each becomes one Data Unit. */
+  readonly values: readonly T[];
+  readonly affectedNodeIds: readonly string[];
+  /** The document's heads after the batch, sorted, as one string. */
+  readonly modelRevision: string;
+  /** Called for each sealed unit before the commit (e.g. the profile's recordLocal). */
+  readonly onCreated?: (created: CreatedDataUnit, value: T, index: number) => void;
+}
+
+export async function commitOperation<T>(
+  storage: Pick<LfcpStorage, "actorSequences" | "commit" | "dataUnits" | "localMarks">,
+  options: CommitOperationOptions<T>,
+  also:
+    | readonly StorageWrite[]
+    | ((units: readonly CreatedDataUnit[]) => readonly StorageWrite[]) = [],
+): Promise<{ readonly receipt: Receipt; readonly committed: boolean }> {
+  const resource = options.view.state.resourceId;
+  const actor = options.actor.descriptor.principalId;
+  return serialized(storage, `${toHex(resource)}:${toHex(actor)}`, async () => {
+    const hash = intentsHash(options.intents);
+    const existing = await receiptOf(storage, resource, options.operationId);
+    if (existing !== undefined) {
+      if (existing.intentsHash !== hash) throw new OperationIdReusedError(options.operationId);
+      return { receipt: existing, committed: false };
+    }
+    const { onCreated, operationId, intents, values, affectedNodeIds, modelRevision, ...create } =
+      options;
+    void intents;
+    const first = await latestAcceptedOwnUnit(storage, resource, actor);
+    const created: CreatedDataUnit[] = [];
+    let previous = first;
+    for (const [i, value] of values.entries()) {
+      const unit = await createDataUnit({
+        ...create,
+        value,
+        previousUnitId: previous,
+        sequences: storage.actorSequences,
+      });
+      onCreated?.(unit, value, i);
+      created.push(unit);
+      previous = unit.unitId;
+    }
+    const receipt: Receipt = Object.freeze({
+      operationId,
+      unitIds: Object.freeze(created.map((u) => u.unitId)),
+      affectedNodeIds: Object.freeze([...affectedNodeIds]),
+      modelRevision,
+      intentsHash: hash,
+      durable: true,
+    });
+    const writes: StorageWrite[] = [
+      { op: "expect-previous-unit", resourceId: resource, actor, previous: first },
+    ];
+    for (const unit of created) {
+      const row = dataUnitRow(unit.bytes);
+      writes.push(
+        { op: "put-data-unit", unit: row, status: "merged", detail: "local", accepted: true },
+        {
+          op: "enqueue",
+          item: {
+            itemId: hash32(unit.unitId),
+            resourceId: row.resourceId,
+            kind: "data-unit",
+            bytes: unit.bytes,
+            attempts: 0,
+            lastAttempt: null,
+            nextAttempt: null,
+            blocked: null,
+          },
+        },
+      );
+    }
+    writes.push(
+      receiptWrite(resource, receipt),
+      ...(typeof also === "function" ? also(created) : also),
+    );
+    const result = await storage.commit(writes);
+    if (!result.ok) throw new Error(`the operation was not stored: ${result.reason}`);
+    return { receipt, committed: true };
+  });
 }
