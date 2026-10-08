@@ -8,8 +8,14 @@ export interface SpecLock {
 
 export type Git = (dir: string, args: readonly string[]) => Uint8Array;
 
-export interface Spec {
-  readonly lock: SpecLock;
+export interface SpecSectionsLock {
+  readonly repository: string;
+  readonly commit: string;
+  readonly status: "dev-pin-pre-baseline";
+}
+
+export interface Spec<L = SpecLock> {
+  readonly lock: L;
   readonly dir: string;
   /** The entry names of a directory at the locked commit, sorted. */
   list(dir: string): string[];
@@ -26,6 +32,14 @@ export function openSpec(options?: {
   readonly specDir?: string;
   readonly git?: Git;
 }): Spec;
+export const DEV_PIN_STATUS: "dev-pin-pre-baseline";
+export const SECTIONS_PATHS: readonly string[];
+export function parseSpecSectionsLock(text: string, where?: string): SpecSectionsLock;
+export function openSpecSections(options?: {
+  readonly lock?: SpecSectionsLock;
+  readonly specDir?: string;
+  readonly git?: Git;
+}): Spec<SpecSectionsLock>;
 export function log(line: string): void;
 export function writeSummary(name: string, summary: unknown): string;
 export function readRepoText(path: string): string;

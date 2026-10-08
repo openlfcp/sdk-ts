@@ -140,6 +140,14 @@ from the sdk-ts root). It first checks that the tag still resolves to the
 locked commit and fails loudly if not. Moving to a new baseline means
 changing `spec.lock` deliberately.
 
+Until the first MVP 0.2 baseline is tagged, `spec-sections.lock` pins the
+shared sections corpus (SHARED-SECTIONS-PROFILE-01, MARKDOWN-SECTIONS-01 and
+`test-vectors/shared-sections-01`) to a spec commit, with the status
+`dev-pin-pre-baseline` and no tag. `openSpecSections` checks only that the
+commit exists in the checkout and reads only those files; sdk-rs pins the
+same commit. When the baseline is tagged, `spec.lock` moves to it and
+`spec-sections.lock` is removed.
+
 ```sh
 pnpm build
 pnpm test:conformance   # only the conformance run and its self-tests

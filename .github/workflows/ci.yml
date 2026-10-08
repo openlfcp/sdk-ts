@@ -23,7 +23,8 @@ jobs:
       - id: spec-lock
         run: echo "tag=$(jq -er .tag spec.lock)" >> "$GITHUB_OUTPUT"
       # Full history with tags, so the runner can check that the tag still
-      # resolves to the commit in spec.lock.
+      # resolves to the commit in spec.lock, and can read the later commit
+      # spec-sections.lock pins (a development pin, no tag).
       - uses: actions/checkout@v4
         with:
           repository: openlfcp/spec
