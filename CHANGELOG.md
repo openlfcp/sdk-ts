@@ -58,6 +58,14 @@ remove or rename any.
   reports `retainedConcurrentEdits` (EDIT_UNDER_DELETED_ANCESTOR) from the
   change history. SS07, SS08, SS24, SS25 and SS27, written through these
   intents, reach their reference states.
+- `text.edit`, `paragraph.split`, `item.split` and `node.join` on
+  `SectionReplica` (LFCP-02-016): edits of a node's existing Text in
+  Unicode scalar positions against a base `modelRevision`, rebased onto the
+  current Text through Automerge cursors (`STALE_BASE` when a deleted range
+  changed); a split keeps the prefix in the node and gives the suffix to a
+  new node right after it; a join appends the second node's text and
+  deletes it with its Text history kept. SS06, SS14, SS16, SS17, SS40 and
+  SS47 to SS51, written through these intents, reach their reference states.
 
 ## 0.1.3 — 2026-10-08
 
