@@ -32,3 +32,12 @@ export {
   SigningKeyPair,
   verifyEd25519,
 } from "./keys.js";
+export {
+  exportLocalStateKey,
+  isSealedLocal,
+  LocalStateKey,
+  localEnvelopeGeneration,
+  localStateCipher,
+  openLocal,
+  sealLocal,
+} from "./local-state.js";
