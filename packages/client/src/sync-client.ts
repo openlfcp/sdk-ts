@@ -17,6 +17,7 @@ import {
   type LfcpStorage,
   type SecretStore,
   type StorageWrite,
+  type StoredDataUnit,
 } from "@openlfcp/storage";
 import {
   type ActorRange,
@@ -33,6 +34,7 @@ import {
   ERROR_CODE,
   type HaveVector,
   hasSequence,
+  haveDifference,
   type LfcpMessage,
   type LiveActorHave,
   localControlOf,
@@ -215,6 +217,20 @@ export type SyncEvent =
       readonly message: string;
     }
   /**
+   * The server answered RESOURCE_OPEN with RESOURCE_NOT_HOSTED although it
+   * hosted the Resource before (it lost it, e.g. restored from an older
+   * store): the client hosted it again from its Genesis (§41.1), or the
+   * server refused that ("refused", with the §62 code; the Resource is then
+   * refused for good, see resource-refused).
+   */
+  | {
+      readonly type: "rehost";
+      readonly resourceId: ResourceId;
+      readonly url: string;
+      readonly outcome: "hosted" | "refused";
+      readonly code?: string;
+    }
+  /**
    * The server refused the Resource for good (see ResourceRefusal): it is
    * CLOSED and is not opened again until open() is called for it.
    */
@@ -276,9 +292,20 @@ type Request =
   | { readonly kind: "snapshot"; readonly resource: string }
   | {
       readonly kind: "host";
+      readonly genesis: Uint8Array;
       readonly resolve: (durability: bigint) => void;
       readonly reject: (error: Error) => void;
-    };
+    }
+  /** RESOURCE_HOST of a Resource the server lost (§41.1). */
+  | { readonly kind: "rehost"; readonly resource: string }
+  /** Objects the server lacks, uploaded again (§68.1): their answers concern no queued item. */
+  | { readonly kind: "offer-control"; readonly resource: string }
+  | {
+      readonly kind: "offer-data";
+      readonly resource: string;
+      readonly units: readonly { readonly id: string; readonly bytes: Uint8Array }[];
+    }
+  | { readonly kind: "offer-keys"; readonly resource: string };
 
 interface ResourceContext {
   readonly binding: ResourceBinding;
@@ -325,7 +352,33 @@ interface ResourceContext {
   refusedAttempt: number;
   /** When to open again after a transient refusal (caller's clock), or null. */
   reopenAt: number | null;
+  /** Units offered to the server and not yet answered (§68.1), by unit ID hex. */
+  offering: Set<string>;
+  /** Key Packages were offered again since the Resource was opened (§68.1). */
+  keysOffered: boolean;
+  /** Re-hosted since it was last LIVE (§41.1): a second RESOURCE_NOT_HOSTED is final. */
+  rehosted: boolean;
 }
+
+/**
+ * Data Unit statuses whose units this client has accepted and may offer to
+ * a server that lacks them (§68.1): never a unit held for its `previous`
+ * link, a quarantined or equivocating one, or one that failed locally.
+ */
+const OFFERABLE = [
+  "merged",
+  "profile-pending",
+  "profile-held",
+  "profile-rejected",
+  "profile-unsupported",
+  "seen",
+] as const;
+
+/** At most this many objects per offered DATA_PUT or KEY_PACKAGE_PUT. */
+const OFFER_BATCH = 64;
+
+/** The local mark that a route hosted (or opened) a Resource for this client (§41.1). */
+const hostedMark = (resource: Uint8Array, url: string) => `hosted-route:${toHex(resource)}:${url}`;
 
 const SUBSCRIBE_DATA_AND_CONTROL = 0b11n;
 const iso = (ms: number): string => new Date(ms).toISOString();
@@ -353,6 +406,8 @@ export class SyncClient {
   #trapped = false;
   #attempt = 0;
   #reconnectAt: number | null = null;
+  /** READY's maximum message size, for offered batches (§31). */
+  #maxMessageBytes = 8 * 1024 * 1024;
   /** Serializes message handling: each message is handled after the previous one finished. */
   #queue: Promise<void> = Promise.resolve();
 
@@ -479,6 +534,9 @@ export class SyncClient {
         refusal: null,
         refusedAttempt: 0,
         reopenAt: null,
+        offering: new Set(),
+        keysOffered: false,
+        rehosted: false,
       };
       this.#resources.set(key, ctx);
     }
@@ -510,7 +568,7 @@ export class SyncClient {
     return new Promise((resolve, reject) => {
       try {
         this.#request(
-          { kind: "host", resolve, reject },
+          { kind: "host", genesis, resolve, reject },
           createMessage("RESOURCE_HOST", {
             genesis,
             ...(credential === undefined ? {} : { credential }),
@@ -598,6 +656,13 @@ export class SyncClient {
         request.reject(new Error("RESOURCE_HOST got no answer within the request timeout"));
         continue;
       }
+      if (request.kind === "offer-data") {
+        // Offered again on the next DATA_HAVE (§68.1).
+        const ctx = this.#resources.get(request.resource);
+        for (const u of request.units) ctx?.offering.delete(u.id);
+        continue;
+      }
+      if (request.kind === "offer-control" || request.kind === "offer-keys") continue;
       if ("resource" in request) resend.set(`${request.kind}:${request.resource}`, request);
     }
     for (const request of resend.values()) {
@@ -606,6 +671,9 @@ export class SyncClient {
       if (ctx === undefined) continue;
       if (request.kind === "open" && ctx.state === "OPENING") {
         this.#move(ctx, "CLOSE");
+        this.#serial(() => this.#sendOpen(ctx));
+      } else if (request.kind === "rehost" && ctx.state === "CLOSED") {
+        ctx.rehosted = false; // a lost answer: open again, which re-hosts again if needed
         this.#serial(() => this.#sendOpen(ctx));
       } else if (request.kind === "control" && ctx.state === "CONTROL_SYNC") {
         this.#serial(() => this.#controlRound(ctx, ctx.lastHeads));
@@ -631,7 +699,10 @@ export class SyncClient {
     const next = resourcePhaseTransition(ctx.state, event);
     if (next === undefined) return false;
     ctx.state = next;
-    if (next === "LIVE") ctx.refusedAttempt = 0;
+    if (next === "LIVE") {
+      ctx.refusedAttempt = 0;
+      ctx.rehosted = false;
+    }
     this.#emit({ type: "resource-state", resourceId: ctx.binding.resourceId, state: next });
     if (next === "LIVE" && ctx.controlStale) {
       ctx.controlStale = false;
@@ -655,6 +726,7 @@ export class SyncClient {
 
   async #onReady(ready: ReadySession): Promise<void> {
     this.#attempt = 0;
+    this.#maxMessageBytes = Number(ready.maxMessageBytes);
     this.#o.outbound.session({
       durability: ready.durability,
       maxMessageBytes: ready.maxMessageBytes,
@@ -672,6 +744,7 @@ export class SyncClient {
     for (const ctx of this.#resources.values()) {
       this.#move(ctx, "CLOSE"); // §65, G-SM1: every Resource closes with the connection
       ctx.view = null;
+      ctx.offering.clear();
     }
     await this.#o.outbound.connectionLost(iso(this.#o.now()));
     if (this.#stopped) return;
@@ -691,6 +764,7 @@ export class SyncClient {
     ctx.controlTarget = null;
     ctx.early = [];
     ctx.reopenAt = null;
+    ctx.keysOffered = false;
     this.#request(
       { kind: "open", resource: toHex(R) },
       createMessage("RESOURCE_OPEN", {
@@ -713,7 +787,19 @@ export class SyncClient {
       case "RESOURCE_HOSTED":
         if (request?.kind === "host") {
           this.#requests.delete(toHex(m.correlationId as Uint8Array));
+          await this.#markHosted(parseControlRecord(request.genesis).payload.resourceId);
           request.resolve(m.body.durability);
+        } else if (request?.kind === "rehost") {
+          this.#requests.delete(toHex(m.correlationId as Uint8Array));
+          const ctx = this.#resources.get(request.resource);
+          if (ctx === undefined) return;
+          this.#emit({
+            type: "rehost",
+            resourceId: ctx.binding.resourceId,
+            url: this.#o.url,
+            outcome: "hosted",
+          });
+          if (ctx.wanted) await this.#sendOpen(ctx);
         }
         return;
       case "RESOURCE_OPENED": {
@@ -722,7 +808,11 @@ export class SyncClient {
         this.#done(m);
         ctx.remoteHave = normalizeLiveHaves(m.body.haves);
         ctx.offered = m.body.snapshot ?? null;
+        await this.#markHosted(ctx.binding.resourceId);
         this.#move(ctx, "OPENED");
+        // §68.1, §88 step 6: what the server lacks goes first, Control Records before units.
+        await this.#offerControl(ctx, m.body.heads);
+        await this.#offerData(ctx);
         await this.#controlRound(ctx, m.body.heads);
         return;
       }
@@ -769,12 +859,16 @@ export class SyncClient {
         this.#done(m);
         if (ctx === undefined) return;
         ctx.remoteHave = normalizeLiveHaves(m.body.haves);
+        await this.#offerData(ctx); // §68.1: both directions
         if (ctx.state === "LIVE") await this.#dataRound(ctx);
         return;
       }
       case "ACK":
         if (request !== undefined) {
           this.#done(m);
+          if (request.kind === "offer-data")
+            for (const u of request.units)
+              this.#resources.get(request.resource)?.offering.delete(u.id);
           return;
         }
         await this.#onAck(m);
@@ -782,7 +876,7 @@ export class SyncClient {
       case "NACK":
         if (request !== undefined) {
           this.#done(m);
-          this.#onRequestNack(request, m);
+          await this.#onRequestNack(request, m);
           return;
         }
         await this.#onNack(m);
@@ -801,9 +895,45 @@ export class SyncClient {
       this.#requests.delete(toHex(m.correlationId));
   }
 
-  #onRequestNack(request: Request, m: LfcpMessage<"NACK">): void {
+  async #onRequestNack(request: Request, m: LfcpMessage<"NACK">): Promise<void> {
     // The §62 name (e.g. AUTHORIZATION_FAILED), so applications can explain it; unknown codes keep their number.
     const code = NACK_NAME.get(m.body.code) ?? `NACK ${m.body.code}`;
+    if (
+      request.kind === "offer-control" ||
+      request.kind === "offer-data" ||
+      request.kind === "offer-keys"
+    ) {
+      this.#onOfferNack(request, code, m.body.diagnostic);
+      return;
+    }
+    if (request.kind === "open" && code === "RESOURCE_NOT_HOSTED") {
+      const ctx = this.#resources.get(request.resource);
+      if (ctx !== undefined && (await this.#rehost(ctx))) return;
+    }
+    if (request.kind === "rehost") {
+      const ctx = this.#resources.get(request.resource);
+      if (ctx === undefined) return;
+      this.#emit({
+        type: "rehost",
+        resourceId: ctx.binding.resourceId,
+        url: this.#o.url,
+        outcome: "refused",
+        code,
+      });
+      this.#error(
+        code,
+        `re-hosting refused${m.body.diagnostic ? `: ${m.body.diagnostic}` : ""}`,
+        ctx.binding.resourceId,
+      );
+      // §41.1: stop re-hosting on this route and tell the user; never retried by itself.
+      this.#refuse(ctx, {
+        code,
+        url: this.#o.url,
+        request: "rehost",
+        ...(m.body.diagnostic === undefined ? {} : { diagnostic: m.body.diagnostic }),
+      });
+      return;
+    }
     if (request.kind === "host") {
       request.reject(
         new Error(
@@ -875,6 +1005,7 @@ export class SyncClient {
     const chain = await loadControlChain(this.#o.storage, ctx.binding.resourceId);
     const local = chain?.kind === "linear" ? localControlOf(chain) : null;
     const plan = planControlSync(local, heads);
+    if (plan.kind === "peer-behind") await this.#offerControl(ctx, heads); // §68.1
     if (plan.kind === "in-sync" || plan.kind === "peer-behind" || plan.kind === "peer-empty")
       return;
     this.#move(ctx, "CONTROL_RECORD");
@@ -1495,6 +1626,208 @@ export class SyncClient {
     if (outcome.kind === "needs-control-sync")
       for (const ctx of this.#resources.values())
         if (ctx.state === "LIVE") this.#refreshControl(ctx);
+    // §51.1: the server lost what our unit names. Its DATA_HAVE answer
+    // starts the offer (§68.1), which releases the held items.
+    if (outcome.kind === "needs-offer") {
+      const ctx = this.#ctx(outcome.resourceId);
+      if (ctx !== undefined && (ctx.state === "LIVE" || ctx.state === "DATA_SYNC"))
+        this.#sendHave(ctx, this.#o.now());
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Offering what the server lacks (§68.1) and re-hosting (§41.1)
+
+  async #markHosted(resource: ResourceId): Promise<void> {
+    const key = hostedMark(resource, this.#o.url);
+    if ((await this.#o.storage.localMarks.get(key)) !== undefined) return;
+    await this.#o.storage.commit([{ op: "put-local-mark", key, value: "1" }]);
+  }
+
+  /**
+   * §41.1: RESOURCE_NOT_HOSTED from a route in the Resource's route set that
+   * hosted or opened it for us before: host it again from the exact Genesis
+   * bytes, then open it. False when re-hosting is not allowed here.
+   */
+  async #rehost(ctx: ResourceContext): Promise<boolean> {
+    if (ctx.rehosted || this.#connection.state !== "READY") return false;
+    const R = ctx.binding.resourceId;
+    const chain = await loadControlChain(this.#o.storage, R);
+    if (chain?.kind !== "linear") return false;
+    const route = chain.state.route;
+    const url = this.#o.url;
+    if (!route.endpoints.some((e) => e.url === url) && route.coordinatorUrl !== url) return false;
+    if ((await this.#o.storage.localMarks.get(hostedMark(R, url))) === undefined) return false;
+    const genesis = chain.records[0];
+    if (genesis === undefined || genesis.payload.controlSeq !== 0n) return false;
+    ctx.rehosted = true;
+    this.#move(ctx, "CLOSE");
+    this.#request(
+      { kind: "rehost", resource: toHex(R) },
+      createMessage("RESOURCE_HOST", { genesis: genesis.signed.bytes }),
+    );
+    return true;
+  }
+
+  /**
+   * §68.1: the server's Control Head is a record we hold below our own head:
+   * upload the records above it, one CONTROL_PUT each, in order, each
+   * expecting the record before it.
+   */
+  async #offerControl(ctx: ResourceContext, heads: readonly ControlHeadRef[]): Promise<void> {
+    if (this.#connection.state !== "READY") return;
+    const R = ctx.binding.resourceId;
+    const chain = await loadControlChain(this.#o.storage, R);
+    if (chain?.kind !== "linear") return;
+    const plan = planControlSync(localControlOf(chain), heads);
+    if (plan.kind !== "peer-behind") return;
+    for (const record of chain.records) {
+      if (record.payload.controlSeq <= plan.peerSeq) continue;
+      const previous = record.payload.prevControlId;
+      if (previous === null) continue;
+      this.#request(
+        { kind: "offer-control", resource: toHex(R) },
+        createMessage("CONTROL_PUT", {
+          resourceId: R,
+          expectedHead: previous,
+          record: record.signed.bytes,
+        }),
+      );
+    }
+    await this.#offerKeys(ctx);
+  }
+
+  /**
+   * §68.1: the accepted units the server's Have Vector lacks, ours and
+   * other actors' (relay), per actor in ascending sequence. Units still in
+   * our outbound queue go through it instead. Then the queued items held
+   * for UNKNOWN_PREVIOUS are released behind them.
+   */
+  async #offerData(ctx: ResourceContext): Promise<void> {
+    if (this.#connection.state !== "READY") return;
+    const R = ctx.binding.resourceId;
+    const queued = new Set((await this.#o.storage.outbound.list(R)).map((o) => toHex(o.itemId)));
+    let local: HaveVector = [];
+    for (const status of OFFERABLE)
+      for (const u of await this.#o.storage.dataUnits.withStatus(R, status))
+        if (u.accepted) local = addSequence(local, u.actor, u.actorSeq);
+    const { offer } = haveDifference(local, ctx.remoteHave);
+    const offerable: ReadonlySet<string> = new Set(OFFERABLE);
+    let sent = 0;
+    for (const range of offer) {
+      const units = (
+        await this.#o.storage.dataUnits.range(
+          R,
+          range.actor,
+          actorSequence(range.start),
+          actorSequence(range.end),
+        )
+      ).filter(
+        (u: StoredDataUnit) =>
+          u.accepted &&
+          offerable.has(u.status) &&
+          !queued.has(toHex(u.unitId)) &&
+          !ctx.offering.has(toHex(u.unitId)),
+      );
+      sent += units.length;
+      this.#offerUnits(
+        ctx,
+        units.map((u) => ({ id: toHex(u.unitId), bytes: u.bytes })),
+      );
+    }
+    this.#o.outbound.offered(R);
+    if (sent > 0) await this.#offerKeys(ctx);
+    await this.#flush(ctx);
+  }
+
+  /** DATA_PUTs of one actor's units in order, within the message size and object limits. */
+  #offerUnits(
+    ctx: ResourceContext,
+    units: readonly { readonly id: string; readonly bytes: Uint8Array }[],
+  ): void {
+    const R = ctx.binding.resourceId;
+    const limit = this.#maxMessageBytes - 1024;
+    let batch: { id: string; bytes: Uint8Array }[] = [];
+    let size = 0;
+    const send = () => {
+      if (batch.length === 0) return;
+      for (const u of batch) ctx.offering.add(u.id);
+      this.#request(
+        { kind: "offer-data", resource: toHex(R), units: batch },
+        createMessage("DATA_PUT", { resourceId: R, objects: batch.map((u) => u.bytes) }),
+      );
+      batch = [];
+      size = 0;
+    };
+    for (const u of units) {
+      if (batch.length >= OFFER_BATCH || size + u.bytes.length > limit) send();
+      batch.push(u);
+      size += u.bytes.length;
+    }
+    send();
+  }
+
+  /**
+   * §68.1, §86: a server that lacked Control Records or units may have lost
+   * Key Packages too: the ones we sent or that are addressed to us are
+   * uploaded again, once per open. A package the server stores is answered
+   * as the first time (§70).
+   */
+  async #offerKeys(ctx: ResourceContext): Promise<void> {
+    if (ctx.keysOffered || this.#connection.state !== "READY") return;
+    ctx.keysOffered = true;
+    const R = ctx.binding.resourceId;
+    const me = toHex(this.#o.signer.descriptor.principalId);
+    const packages = (await this.#o.storage.keyPackages.list(R)).filter(
+      (k) => toHex(k.sender) === me || toHex(k.recipient) === me,
+    );
+    const limit = this.#maxMessageBytes - 1024;
+    for (let i = 0; i < packages.length; ) {
+      const batch: Uint8Array[] = [];
+      let size = 0;
+      while (i < packages.length && batch.length < OFFER_BATCH) {
+        const bytes = (packages[i] as { bytes: Uint8Array }).bytes;
+        if (batch.length > 0 && size + bytes.length > limit) break;
+        batch.push(bytes);
+        size += bytes.length;
+        i++;
+      }
+      this.#request(
+        { kind: "offer-keys", resource: toHex(R) },
+        createMessage("KEY_PACKAGE_PUT", { resourceId: R, objects: batch }),
+      );
+    }
+  }
+
+  /**
+   * A refused offer. A DATA_PUT is all-or-nothing (§51): each unit of a
+   * refused batch is offered again alone. ACTOR_EQUIVOCATION for a relayed
+   * unit is expected when the server holds the other unit of a pair, and
+   * UNKNOWN_PREVIOUS when it lacks an earlier unit we do not hold either:
+   * neither is an alarm. A refused Control Record (the server's head moved)
+   * is caught up by the next Control round.
+   */
+  #onOfferNack(
+    request: Extract<Request, { kind: "offer-control" | "offer-data" | "offer-keys" }>,
+    code: string,
+    diagnostic: string | undefined,
+  ): void {
+    const ctx = this.#resources.get(request.resource);
+    if (ctx === undefined) return;
+    if (request.kind === "offer-data") {
+      for (const u of request.units) ctx.offering.delete(u.id);
+      if (request.units.length > 1) {
+        for (const u of request.units) this.#offerUnits(ctx, [u]);
+        return;
+      }
+      if (code === "ACTOR_EQUIVOCATION" || code === "UNKNOWN_PREVIOUS") return;
+    }
+    if (request.kind === "offer-control" && code === "CONTROL_HEAD_MISMATCH") return;
+    this.#error(
+      code,
+      `an object offered to the server was refused (§68.1)${diagnostic ? `: ${diagnostic}` : ""}`,
+      ctx.binding.resourceId,
+    );
   }
 }
 

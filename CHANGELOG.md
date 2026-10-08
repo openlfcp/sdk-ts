@@ -8,6 +8,31 @@ remove or rename any.
 
 ### Added
 
+- `@openlfcp/client`, recovery after server data loss (ADR 0008,
+  LFCP-WIRE-01 §41.1, §51.1, §68.1, §86, baseline.9):
+  - **Both directions of anti-entropy.** On every `RESOURCE_OPENED`, on
+    every `DATA_HAVE` or `CONTROL_HAVE` from the server and after
+    `UNKNOWN_PREVIOUS`, the client uploads what the server lacks: the
+    Control Records above the server's head (one `CONTROL_PUT` each, in
+    order), then the accepted units its Have Vector lacks, ours and other
+    actors' (relay), per actor in ascending sequence, never a unit held
+    for its `previous`, quarantined, equivocating or still queued. A server
+    that lacked something also gets the Key Packages we sent or received
+    again, once per open. A refused batch is split; `ACTOR_EQUIVOCATION`
+    for a relayed unit is expected and raises no alarm.
+  - **`UNKNOWN_PREVIOUS`.** The outbound queue holds a refused unit (the
+    new `NackOutcome` `"needs-offer"`, with the `previous` the server
+    lacks) until the client has asked the server's Have Vector and offered
+    what it lacks (`OutboundQueue.offered`); then it is sent again.
+  - **Re-hosting.** `RESOURCE_NOT_HOSTED` for `RESOURCE_OPEN` from a route
+    in the Resource's route set that hosted or opened it for this client
+    before (a local mark) re-hosts it from the exact Genesis bytes, opens
+    it again and offers it everything: the new `rehost` event, `outcome:
+    "hosted"`. A refused re-host (`HOSTING_DENIED`, `QUOTA_EXCEEDED`,
+    `RATE_LIMITED`, …) is `outcome: "refused"` with the code, and the
+    Resource is refused (`resource-refused`, request `"rehost"`); it is
+    not retried by itself. Otherwise `RESOURCE_NOT_HOSTED` stays terminal,
+    as in 0.1.1.
 - `@openlfcp/client` and `@openlfcp/storage`, POST-001 (SHARED-OBJECTS-PROFILE-01
   §14.1): a unit whose change another change's actor and sequence number
   already has is reported as the new `ApplyOutcome` `"profile-held"`

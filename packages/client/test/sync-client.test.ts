@@ -13,6 +13,7 @@ import {
   importAgreementKey,
   importResourceDEK,
   importSigningKey,
+  sha256 as sha,
 } from "@openlfcp/crypto";
 import {
   dekSecretRef,
@@ -24,6 +25,7 @@ import {
 import {
   type AnyMessage,
   type ControlBody,
+  createMessage,
   type DataProfileCodec,
   principalDescriptorFromKeys,
   rotateEpoch,
@@ -42,6 +44,7 @@ import {
   OutboundQueue,
   queueControlRecord,
   queueKeyEpoch,
+  queueKeyPackage,
   SyncClient,
   type SyncEvent,
   saveControlChain,
@@ -1016,5 +1019,283 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     await expect(owner.sync.host(chain.records[0] as Uint8Array)).rejects.toThrow(
       "RESOURCE_HOST refused: NACK HOSTING_DENIED",
     );
+  });
+
+  /** OWNER's acknowledged units 1..n (stored as accepted, no longer queued). */
+  async function ackedUnits(
+    c: ReturnType<typeof client>,
+    chain: ReturnType<typeof chainFor>,
+    values: readonly string[],
+  ) {
+    const v = chain.view();
+    const out: { unitId: Uint8Array; bytes: Uint8Array }[] = [];
+    for (const value of values) {
+      const u = await createQueuedDataUnit(c.storage, {
+        view: v,
+        controlHead: v.state.head,
+        actor: OWNER.signer,
+        dek: DEK0,
+        profile: TEXT,
+        previousUnitId: (out.at(-1)?.unitId as never) ?? null,
+        value,
+      });
+      out.push(u);
+    }
+    return out;
+  }
+
+  const dequeue = (c: ReturnType<typeof client>, ids: readonly Uint8Array[]) =>
+    c.storage.commit(ids.map((id) => ({ op: "dequeue" as const, itemId: hash32(id) })));
+
+  it("offers a restored server the Control Records, units and Key Packages it lacks (§68.1)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(208);
+    const grant = chain.add({
+      type: "CAPABILITY_GRANT",
+      subject: BOB.signer.descriptor,
+      abilities: [1n, 2n],
+      delegable: [],
+    });
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    const units = await ackedUnits(owner, chain, ["one", "two", "three"]);
+    const kp = await sealKeyPackage({
+      resourceId: chain.R,
+      epoch: dataEpoch(0n),
+      controlHead: grant.recordId,
+      recipient: BOB.signer.descriptor,
+      dek: DEK0,
+      signer: OWNER.signer,
+    });
+    const kpId = await queueKeyPackage(owner.storage, kp.bytes);
+    await dequeue(owner, [...units.map((u) => u.unitId), kpId]);
+    // The server was restored from a copy holding the Genesis and units 1..2.
+    server.onMessage = (m, s) => {
+      const reply = (type: AnyMessage["type"], body: unknown) =>
+        s.reply(m, type as never, body as never);
+      if (m.type === "RESOURCE_OPEN")
+        reply("RESOURCE_OPENED", {
+          resourceId: chain.R,
+          heads: [{ seq: 0n, recordId: chain.ids[0] }],
+          haves: [{ principalId: OWNER.signer.descriptor.principalId, contiguous: 2n }],
+        });
+      else if (m.type === "CONTROL_PUT") reply("ACK", { requestType: 26n, objectIds: [] });
+      else if (m.type === "DATA_PUT") reply("ACK", { requestType: 33n, objectIds: [] });
+      else if (m.type === "KEY_PACKAGE_PUT") reply("ACK", { requestType: 36n, objectIds: [] });
+      return [];
+    };
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(200);
+    await owner.sync.idle();
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+    const puts = server.received.filter((m) =>
+      ["CONTROL_PUT", "DATA_PUT", "KEY_PACKAGE_PUT"].includes(m.type),
+    );
+    expect(puts.map((m) => m.type)).toEqual(["CONTROL_PUT", "KEY_PACKAGE_PUT", "DATA_PUT"]);
+    const control = server.of("CONTROL_PUT")[0];
+    expect(control?.body.record).toEqual(chain.records[1]);
+    expect(toHex(control?.body.expectedHead as Uint8Array)).toBe(toHex(chain.ids[0] as Uint8Array));
+    expect(server.of("DATA_PUT")[0]?.body.objects).toEqual([units[2]?.bytes]);
+    expect(server.of("KEY_PACKAGE_PUT")[0]?.body.objects).toEqual([kp.bytes]);
+    expect(owner.events.filter((e) => e.type === "error" || e.type === "nack")).toEqual([]);
+    // A server that lacks nothing is offered nothing.
+    server.received.length = 0;
+    server.push(
+      createMessage("DATA_HAVE", {
+        resourceId: chain.R,
+        haves: [{ principalId: OWNER.signer.descriptor.principalId, contiguous: 3n }],
+      }),
+    );
+    await settle(100);
+    await owner.sync.idle();
+    expect(server.of("DATA_PUT")).toEqual([]);
+  });
+
+  it("an offered unit refused as equivocation is no alarm; a refused batch is split (§68.1)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(209);
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    const units = await ackedUnits(owner, chain, ["one", "two"]);
+    await dequeue(
+      owner,
+      units.map((u) => u.unitId),
+    );
+    server.onMessage = (m, s) => {
+      if (m.type === "RESOURCE_OPEN")
+        s.reply(m, "RESOURCE_OPENED", {
+          resourceId: chain.R,
+          heads: [{ seq: 0n, recordId: chain.ids[0] as ControlRecordId }],
+          haves: [],
+        });
+      else if (m.type === "DATA_PUT") s.reply(m, "NACK", { code: 16n });
+      return [];
+    };
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(200);
+    await owner.sync.idle();
+    expect(server.of("DATA_PUT").map((m) => m.body.objects.length)).toEqual([2, 1, 1]);
+    expect(owner.events.filter((e) => e.type === "error" || e.type === "nack")).toEqual([]);
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+  });
+
+  it("re-supplies the unit a server lost before its successor (UNKNOWN_PREVIOUS, §51.1)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(210);
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    const units = await ackedUnits(owner, chain, ["one", "two", "three"]);
+    await dequeue(owner, [units[0]?.unitId as Uint8Array, units[1]?.unitId as Uint8Array]);
+    // The server says it holds 1..2, then turns out to have lost 2.
+    let stored = 1;
+    server.onMessage = (m, s) => {
+      const R = chain.R;
+      if (m.type === "RESOURCE_OPEN")
+        s.reply(m, "RESOURCE_OPENED", {
+          resourceId: R,
+          heads: [{ seq: 0n, recordId: chain.ids[0] as ControlRecordId }],
+          haves: [{ principalId: OWNER.signer.descriptor.principalId, contiguous: 2n }],
+        });
+      else if (m.type === "DATA_HAVE")
+        s.reply(m, "DATA_HAVE", {
+          resourceId: R,
+          haves: [{ principalId: OWNER.signer.descriptor.principalId, contiguous: BigInt(stored) }],
+        });
+      else if (m.type === "DATA_PUT") {
+        const seqs = m.body.objects.map(
+          (o) => units.findIndex((u) => toHex(u.bytes) === toHex(o)) + 1,
+        );
+        if (seqs[0] !== stored + 1)
+          s.reply(m, "NACK", { code: 23n, details: units[stored]?.unitId as Uint8Array });
+        else {
+          stored = seqs.at(-1) as number;
+          s.reply(m, "ACK", {
+            requestType: 33n,
+            objectIds: m.body.objects.map((o) => hash32(sha(o))),
+          });
+        }
+      }
+      return [];
+    };
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(300);
+    await owner.sync.idle();
+    const sent = server
+      .of("DATA_PUT")
+      .map((m) =>
+        m.body.objects.map((o) => units.findIndex((u) => toHex(u.bytes) === toHex(o)) + 1),
+      );
+    expect(sent).toEqual([[3], [2], [3]]);
+    expect(stored).toBe(3);
+    expect(
+      owner.events
+        .filter((e) => e.type === "nack")
+        .map((e) => (e as { outcome: { kind: string } }).outcome.kind),
+    ).toEqual(["needs-offer"]);
+    expect(await owner.storage.outbound.list(chain.R)).toEqual([]);
+  });
+
+  it("re-hosts a Resource a route that hosted it lost, and offers it everything (§41.1)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(211);
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    const units = await ackedUnits(owner, chain, ["one"]);
+    await dequeue(
+      owner,
+      units.map((u) => u.unitId),
+    );
+    hostOf(
+      server,
+      chain,
+      units.map((u) => u.bytes),
+    );
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(200);
+    await owner.sync.idle();
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+    // The server is restored from a copy without the Resource.
+    let hosted = false;
+    server.onMessage = (m, s) => {
+      if (m.type === "RESOURCE_OPEN") {
+        if (!hosted) s.reply(m, "NACK", { code: 6n });
+        else
+          s.reply(m, "RESOURCE_OPENED", {
+            resourceId: chain.R,
+            heads: [{ seq: 0n, recordId: chain.ids[0] as ControlRecordId }],
+            haves: [],
+          });
+      } else if (m.type === "RESOURCE_HOST") {
+        expect(m.body.genesis).toEqual(chain.records[0]);
+        hosted = true;
+        s.reply(m, "RESOURCE_HOSTED", { resourceId: chain.R, durability: 2n });
+      } else if (m.type === "DATA_PUT") s.reply(m, "ACK", { requestType: 33n, objectIds: [] });
+      return [];
+    };
+    server.current.drop();
+    await settle(50);
+    clock.t += 1000;
+    owner.sync.tick(clock.t);
+    await settle(300);
+    await owner.sync.idle();
+    expect(owner.events.filter((e) => e.type === "rehost")).toEqual([
+      { type: "rehost", resourceId: chain.R, url: "ws://127.0.0.1:1/v1/ws", outcome: "hosted" },
+    ]);
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+    expect(server.of("DATA_PUT")[0]?.body.objects).toEqual([units[0]?.bytes]);
+    expect(owner.events.some((e) => e.type === "resource-refused")).toBe(false);
+  });
+
+  it("stops at a refused re-host: an event and a refusal, no retry (§41.1)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(212);
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    hostOf(server, chain);
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(200);
+    await owner.sync.idle();
+    server.onMessage = (m, s) => {
+      if (m.type === "RESOURCE_OPEN") s.reply(m, "NACK", { code: 6n });
+      else if (m.type === "RESOURCE_HOST") s.reply(m, "NACK", { code: 20n });
+      return [];
+    };
+    server.current.drop();
+    await settle(50);
+    clock.t += 1000;
+    owner.sync.tick(clock.t);
+    await settle(300);
+    await owner.sync.idle();
+    expect(owner.events.filter((e) => e.type === "rehost")).toEqual([
+      {
+        type: "rehost",
+        resourceId: chain.R,
+        url: "ws://127.0.0.1:1/v1/ws",
+        outcome: "refused",
+        code: "HOSTING_DENIED",
+      },
+    ]);
+    expect(owner.sync.resourceRefusal(chain.R)).toMatchObject({
+      code: "HOSTING_DENIED",
+      request: "rehost",
+    });
+    expect(server.of("RESOURCE_HOST")).toHaveLength(1);
+    for (let i = 0; i < 3; i++) {
+      clock.t += 60_000;
+      owner.sync.tick(clock.t);
+      await settle(20);
+    }
+    await owner.sync.idle();
+    expect(server.of("RESOURCE_HOST")).toHaveLength(1);
   });
 });

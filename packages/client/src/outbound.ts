@@ -176,6 +176,17 @@ export type NackOutcome =
     }
   /** The server lacks Control records: retried after the next Control sync (controlSynced). */
   | { readonly kind: "needs-control-sync"; readonly items: readonly Hash32[] }
+  /**
+   * The server lacks the unit a Data Unit names as its `previous`
+   * (UNKNOWN_PREVIOUS, §51.1): it lost what it acknowledged. Retried once
+   * the client offered what the server lacks (§68.1, `offered`).
+   */
+  | {
+      readonly kind: "needs-offer";
+      readonly resourceId: ResourceId;
+      readonly previous: Hash32 | null;
+      readonly items: readonly Hash32[];
+    }
   /** Transient or unknown: retried after the RetryPolicy delay. */
   | {
       readonly kind: "retry";
@@ -244,6 +255,10 @@ export class OutboundQueue {
   readonly #solo = new Set<string>();
   /** Items waiting for a Control sync (MISSING_DEPENDENCY). */
   readonly #awaitingControl = new Set<string>();
+  /** Items waiting until what the server lacks was offered (UNKNOWN_PREVIOUS, §68.1). */
+  readonly #awaitingOffer = new Set<string>();
+  /** item ID hex → Resource ID hex, for the items in #awaitingOffer. */
+  readonly #resourceOf = new Map<string, string>();
 
   constructor(options: OutboundQueueOptions) {
     this.#storage = options.storage;
@@ -300,6 +315,7 @@ export class OutboundQueue {
         o.blocked === null &&
         !this.#inFlight.has(toHex(o.itemId)) &&
         !this.#awaitingControl.has(toHex(o.itemId)) &&
+        !this.#awaitingOffer.has(toHex(o.itemId)) &&
         (o.nextAttempt === null || o.nextAttempt <= now),
     );
     const out: OutboundMessage[] = [];
@@ -530,6 +546,8 @@ export class OutboundQueue {
     this.#inFlight.delete(key);
     this.#solo.delete(key);
     this.#awaitingControl.delete(key);
+    this.#awaitingOffer.delete(key);
+    this.#resourceOf.delete(key);
   }
 
   async #block(
@@ -560,6 +578,7 @@ export class OutboundQueue {
    * MESSAGE_TOO_LARGE → blocked "too-large";
    * CONTROL_HEAD_MISMATCH → blocked "repropose" with the current head;
    * MISSING_DEPENDENCY → retried after the next controlSynced();
+   * UNKNOWN_PREVIOUS → retried after the next offered() (§51.1, §68.1);
    * anything else → retried after the RetryPolicy delay.
    */
   async onNack(message: LfcpMessage<"NACK">, now: string): Promise<NackOutcome> {
@@ -616,6 +635,19 @@ export class OutboundQueue {
       case "MISSING_DEPENDENCY":
         for (const id of items) this.#awaitingControl.add(toHex(id));
         return Object.freeze({ kind: "needs-control-sync", items: Object.freeze(items) });
+      case "UNKNOWN_PREVIOUS": {
+        const d = message.body.details;
+        for (const id of items) {
+          this.#awaitingOffer.add(toHex(id));
+          this.#resourceOf.set(toHex(id), toHex(flight.resourceId));
+        }
+        return Object.freeze({
+          kind: "needs-offer",
+          resourceId: flight.resourceId,
+          previous: d instanceof Uint8Array && d.length === 32 ? hash32(d) : null,
+          items: Object.freeze(items),
+        });
+      }
       default:
         await this.#retryLater(items, "transient", now, code);
         return Object.freeze({ kind: "retry", code, items: Object.freeze(items) });
@@ -639,6 +671,18 @@ export class OutboundQueue {
   async controlSynced(resource: ResourceId): Promise<void> {
     for (const item of await this.#storage.outbound.list(resource))
       this.#awaitingControl.delete(toHex(item.itemId));
+  }
+
+  /**
+   * What the server of `resource` lacked was offered (§68.1): items held
+   * for UNKNOWN_PREVIOUS are due again, behind the offered objects.
+   */
+  offered(resource: ResourceId): void {
+    for (const key of [...this.#awaitingOffer])
+      if (this.#resourceOf.get(key) === toHex(resource)) {
+        this.#awaitingOffer.delete(key);
+        this.#resourceOf.delete(key);
+      }
   }
 
   /**
