@@ -20,7 +20,10 @@ export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** Runs `git -C dir ...args` and returns stdout as bytes; throws with git's stderr on failure. */
 export function runGit(dir, args) {
   try {
-    return new Uint8Array(execFileSync("git", ["-C", dir, ...args], { stdio: "pipe" }));
+    // The section corpus alone is several MiB; execFileSync's default buffer is 1 MiB.
+    return new Uint8Array(
+      execFileSync("git", ["-C", dir, ...args], { stdio: "pipe", maxBuffer: 256 * 1024 * 1024 }),
+    );
   } catch (e) {
     const stderr = e.stderr ? String(e.stderr).trim() : String(e.message ?? e);
     throw new Error(`git ${args.join(" ")} failed in ${dir}: ${stderr}`);
