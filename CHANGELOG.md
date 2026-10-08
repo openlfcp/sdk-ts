@@ -4,7 +4,10 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
-## Unreleased
+## 0.1.2 — 2026-10-08
+
+The 0.1.x sustaining release for MVP 0.2 wave W0: spec
+`mvp-0.1-baseline.9` (ADR 0008, POST-001), tested against server 0.3.0.
 
 ### Added
 

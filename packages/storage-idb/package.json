@@ -1,6 +1,6 @@
 {
   "name": "@openlfcp/storage-idb",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Durable portable storage for LFCP clients on IndexedDB (browsers, Electron, mobile WebViews).",
   "keywords": [
     "openlfcp",
