@@ -1,7 +1,8 @@
 /**
  * SHARED-SECTIONS-PROFILE-01 (org.openlfcp.shared-sections.v1, Working
- * Draft 0.3): profile dispatch, the profile's values and actor binding, and
- * schema validation of a section document (LFCP-02-011).
+ * Draft 0.3): profile dispatch, the profile's values and actor binding,
+ * schema validation of a section document (LFCP-02-011), and its writer
+ * with the section and creation intents (LFCP-02-012).
  * `@openlfcp/shared-objects/sections`. Its admission (SOP §§7–18) is the
  * shared `@openlfcp/shared-objects/admission` with SECTIONS_ACTOR_DOMAIN.
  */
@@ -12,6 +13,15 @@ export {
   taskRefModel,
 } from "./dispatch.js";
 export { SectionDocument, type ValueType } from "./document.js";
+export {
+  AUTHORING_BUDGET,
+  type SectionIntent,
+  type SectionIntentCode,
+  SectionIntentError,
+  type SectionLocalChange,
+  SectionReplica,
+  type SectionReplicaOptions,
+} from "./replica.js";
 export {
   SECTION_DIAGNOSTIC_ORDER,
   type SectionDiagnostic,

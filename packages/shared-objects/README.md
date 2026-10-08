@@ -31,8 +31,10 @@ SHARED-SECTIONS-PROFILE-01 (`org.openlfcp.shared-sections.v1`, Working
 Draft 0.3, not in any implementation baseline): profile dispatch by a
 Resource's Genesis profile (`profileModel`), the section actor binding
 (`deriveSectionActorId`) and schema validation of a section document
-(`validateSection`, `SectionDocument`). Section intents, the effective
-tree and the section admission rules are not there yet. It may change
+(`validateSection`, `SectionDocument`), and the writer of a section's
+creation and Task intents (`SectionReplica`). Moves, lifecycle, Text
+edits, the effective tree and the section admission rules are not there
+yet. It may change
 without notice until the profile is in a baseline.
 
 ## Automerge and WebAssembly

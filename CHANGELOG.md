@@ -25,6 +25,16 @@ remove or rename any.
   §14.2 diagnostic per invalid node, placement or Task. Checked against
   every case of SHARED-SECTIONS-TEST-VECTORS-01 at the development pin in
   `spec-sections.lock`.
+- `SectionReplica` in `@openlfcp/shared-objects/sections` (LFCP-02-012),
+  Working Draft: the section writer. `commit(intents)` validates a batch as
+  a whole and writes it as one change of the section actor:
+  `section.create`, `section.set_title`, `section.mark_ready`,
+  `task.create_in_section`, `paragraph.create`, `item.create`, `raw.create`
+  (node, placement, children entry and `placement` register atomically,
+  the caller's IDs, inserted after a visible sibling), and the Shared
+  Objects Task intents on section Tasks. A refused batch writes nothing and
+  throws `SectionIntentError` with a typed `code` and the intent's index.
+  Authoring SS01 with the corpus identities reaches its reference state.
 
 ## 0.1.3 — 2026-10-08
 
