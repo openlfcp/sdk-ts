@@ -426,6 +426,67 @@ export function storedObjectProblems(
   );
 }
 
+/** A Task intent checked against the stored objects, ready to write inside a change. */
+export interface PreparedTaskIntent {
+  /** The Task it writes. */
+  readonly id: string;
+  /** Writes the intent into the `objects` map of a change's document. */
+  readonly perform: (objects: Record<string, unknown>) => void;
+}
+
+/**
+ * Checks one Task intent against `objects`, the stored objects map of
+ * `doc`, before anything is written: §21 no reuse of an Object ID on
+ * create, §74 the Task after the intent is valid, and no Text left in a
+ * field it writes. Throws ProfileError or ObjectIdCollisionError. Shared by
+ * every profile whose Tasks are SOP Tasks (SHARED-SECTIONS-PROFILE-01 §2).
+ */
+export function prepareTaskIntent(
+  doc: A.Doc<unknown>,
+  objects: Record<string, unknown>,
+  intent: ReplicaIntent,
+): PreparedTaskIntent {
+  if (intent.intent === "task.create") {
+    const task = intent.task as unknown as Record<string, Json>;
+    const id = String(task.id);
+    // §21: a local create never reuses an Object ID this replica already holds.
+    if (id in objects) throw new ObjectIdCollisionError(id);
+    const problems = objectProblems(task, id);
+    if (problems.length > 0) throw new ProfileError(problems);
+    return Object.freeze({
+      id,
+      perform: (o: Record<string, unknown>) => {
+        o[id] = scalarize(task, 0); // §53: the whole Task in one change (the object map is depth 0)
+      },
+    });
+  }
+
+  const id = intent.id;
+  const stored = objects[id];
+  if (!isMap(stored as Json)) throw new ProfileError(objectProblems(undefined, id));
+  if (A.getConflicts(objects, id) !== undefined) throw new ObjectIdCollisionError(id);
+  const object = stored as AMap;
+  const writes = writesOf(intent);
+  const touched = new Set(
+    writes.map((w) => (w.op === "put" || w.op === "delete" ? w.field : w.set)),
+  );
+  const next = candidate(plain(object) as Record<string, Json>, writes);
+  const problems = [
+    ...(next.type === "task"
+      ? objectProblems(next, id)
+      : [problem("INVALID_FIELD_TYPE", `/objects/${pointerToken(id)}/type`, "not a Task (§25)")]),
+    // Text in a field this intent writes is replaced by the write.
+    ...textProblems(doc as Doc, object, id).filter(
+      (p) => !touched.has(unescapeToken(p.pointer.split("/")[3] ?? "")),
+    ),
+  ];
+  if (problems.length > 0) throw new ProfileError(problems);
+  return Object.freeze({
+    id,
+    perform: (o: Record<string, unknown>) => perform(o[id] as AMap, writes),
+  });
+}
+
 /** One intent's writes on one object, in order. */
 type Write =
   | { readonly op: "put"; readonly field: string; readonly value: Json }
@@ -988,41 +1049,8 @@ export class SharedObjectsReplica {
         rootProblems.length > 0 ? rootProblems : [problem("INVALID_ROOT", "/", "no root (§15)")],
       );
 
-    if (intent.intent === "task.create") {
-      const task = intent.task as unknown as Record<string, Json>;
-      const id = String(task.id);
-      // §21: a local create never reuses an Object ID this replica already holds.
-      if (id in objects) throw new ObjectIdCollisionError(id);
-      const problems = objectProblems(task, id);
-      if (problems.length > 0) throw new ProfileError(problems);
-      return this.#commit(intent.intent, [id], (d) => {
-        (d.objects as AMap)[id] = scalarize(task, 0); // §53: the whole Task in one change (the object map is depth 0)
-      });
-    }
-
-    const id = intent.id;
-    const stored = objects[id];
-    if (!isMap(stored as Json)) throw new ProfileError(objectProblems(undefined, id));
-    if (A.getConflicts(objects, id) !== undefined) throw new ObjectIdCollisionError(id);
-    const object = stored as AMap;
-    const writes = writesOf(intent);
-    const touched = new Set(
-      writes.map((w) => (w.op === "put" || w.op === "delete" ? w.field : w.set)),
-    );
-    const next = candidate(plain(object) as Record<string, Json>, writes);
-    const problems = [
-      ...(next.type === "task"
-        ? objectProblems(next, id)
-        : [problem("INVALID_FIELD_TYPE", `/objects/${pointerToken(id)}/type`, "not a Task (§25)")]),
-      // Text in a field this intent writes is replaced by the write.
-      ...textProblems(this.#doc, object, id).filter(
-        (p) => !touched.has(unescapeToken(p.pointer.split("/")[3] ?? "")),
-      ),
-    ];
-    if (problems.length > 0) throw new ProfileError(problems);
-    return this.#commit(intent.intent, [id], (d) =>
-      perform((d.objects as AMap)[id] as AMap, writes),
-    );
+    const prepared = prepareTaskIntent(this.#doc, objects, intent);
+    return this.#commit(intent.intent, [prepared.id], (d) => prepared.perform(d.objects as AMap));
   }
 
   #commit(message: string, ids: readonly string[], fn: (d: AMap) => void): LocalChange | null {
