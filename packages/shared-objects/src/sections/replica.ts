@@ -312,6 +312,12 @@ export interface StagedSectionChange {
 export interface SectionReplicaOptions {
   readonly resource: ResourceId;
   readonly principal: PrincipalId;
+  /**
+   * SOP §9: the actor sequence this device already used (a restored
+   * checkpoint's). Below it the replica writes nothing: its next change
+   * would reuse a sequence number another change of this actor has.
+   */
+  readonly minSeq?: number;
 }
 
 type Doc = A.Doc<Record<string, unknown>>;
@@ -338,14 +344,59 @@ export class SectionReplica {
   readonly actorId: Uint8Array;
   readonly #principal: PrincipalId;
   readonly #actor: string;
+  readonly #minSeq: number;
   #doc: Doc;
 
   private constructor(doc: Doc, opts: SectionReplicaOptions) {
     this.resource = opts.resource;
+    this.#minSeq = opts.minSeq ?? 0;
     this.#principal = opts.principal;
     this.actorId = deriveSectionActorId(opts.resource, opts.principal);
     this.#actor = toHex(this.actorId);
     this.#doc = A.getActorId(doc) === this.#actor ? doc : A.clone(doc, { actor: this.#actor });
+  }
+
+  /** This actor's latest change sequence in the document (0 when it has none). */
+  get actorSeq(): number {
+    return this.#sequences().get(this.#actor) ?? 0;
+  }
+
+  /** SOP §9: whether this replica may write (it is not behind its actor's used sequence). */
+  get writable(): boolean {
+    return this.actorSeq >= this.#minSeq;
+  }
+
+  /** Whether the document holds the change with this hex hash. */
+  hasChange(hash: string): boolean {
+    return A.hasHeads(this.#doc, [hash]);
+  }
+
+  /**
+   * SOP §14.1 (G-EP7): the replica rebuilt from its changes minus `exclude`
+   * (change hashes); changes that depend on an excluded one are unapplied
+   * too. An excluded change of this actor is not lost state (§9): the
+   * rebuilt replica writes on from its own sequence.
+   */
+  rebuildWithout(exclude: Iterable<string>): {
+    readonly replica: SectionReplica;
+    readonly unapplied: readonly string[];
+  } {
+    const out = new Set(exclude);
+    const kept = A.getAllChanges(this.#doc).filter((c) => !out.has(A.decodeChange(c).hash));
+    return SectionReplica.fromChanges(kept, {
+      resource: this.resource,
+      principal: this.#principal,
+      minSeq: this.writable ? 0 : this.#minSeq,
+    });
+  }
+
+  /** An empty replica of the same actor that keeps the §9 sequence (SNAP-EP reset). */
+  emptied(): SectionReplica {
+    return SectionReplica.empty({
+      resource: this.resource,
+      principal: this.#principal,
+      minSeq: Math.max(this.#minSeq, this.actorSeq),
+    });
   }
 
   /** An empty document, for section.create or for receiving. */
@@ -571,6 +622,11 @@ export class SectionReplica {
    */
   stage(intents: readonly SectionIntent[]): StagedSectionChange | null {
     if (intents.length === 0) return null;
+    if (!this.writable)
+      throw new LfcpError(
+        "SEQUENCE_REUSE",
+        `the replica is at actor sequence ${this.actorSeq}, behind ${this.#minSeq} already used (SOP §9)`,
+      );
     if (A.getActorId(this.#doc) !== this.#actor)
       throw new Error("the document actor is not the §2 actor");
     const writes: Write[] = [];
