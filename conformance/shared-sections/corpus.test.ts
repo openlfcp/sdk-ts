@@ -2,7 +2,8 @@
 // Working Draft) through the sdk-ts section schema (LFCP-02-011), read at
 // the development pin in spec-sections.lock. For every case:
 //
-// - the reference snapshot loads, and replaying the case's changes without
+// - the reference snapshot loads (within the SOP §13.1 floor, or is refused
+//   when the case says it is past it), and replaying the case's changes without
 //   the ones refused at admission and held behind them reaches its heads;
 // - schema validation never changes the document, and reports exactly the
 //   invalid nodes the corpus expects (§14.2), with no section-level problem,
@@ -43,6 +44,8 @@ interface Case {
   readonly expected: {
     readonly classification: string;
     readonly collisions?: readonly string[];
+    /** SOP §13.1: whether the reference snapshot is within the floor (SS55, SS56). */
+    readonly snapshot?: { readonly rows: number; readonly within_floor: boolean };
     readonly invalid: readonly { readonly id: string; readonly diagnostic: string }[];
     readonly refused: readonly { readonly change: string; readonly diagnostic: string }[];
     readonly held: readonly (string | { readonly change: string })[];
@@ -106,7 +109,20 @@ describe("shared sections corpus (dev pin, pre-baseline)", () => {
 
   for (const c of suite.cases)
     it(`${c.id}: schema validation matches the corpus`, () => {
-      const doc = load(c);
+      // SOP §13.1: a Snapshot past the floor is refused by a receiver with
+      // floor limits, which then rebuilds from the units (SS56).
+      const snapshot = bytes(c.reference_snapshot);
+      if (c.expected.snapshot?.within_floor === false)
+        expect(() => SectionDocument.fromSave(snapshot)).toThrow(
+          expect.objectContaining({
+            code: "PROFILE_INVALID",
+            diagnostic: "INVALID_AUTOMERGE_BYTES",
+          }),
+        );
+      const doc =
+        c.expected.snapshot?.within_floor === false
+          ? SectionDocument.fromSave(snapshot, "local-state")
+          : SectionDocument.fromSave(snapshot);
       const heads = [...c.expected_heads].sort();
       expect(doc.heads()).toEqual(heads);
       const { document: replayed, unapplied } = SectionDocument.fromChanges(admitted(c).map(bytes));
