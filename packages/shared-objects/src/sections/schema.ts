@@ -127,26 +127,24 @@ const first = (problems: readonly SectionProblem[]): SectionProblem | undefined 
 
 const ref = (base: string, key: string) => `${base}/${pointerToken(key)}`;
 
-/** Reads a document through the backend at its current heads. */
+/** Reads a document through the backend, at its current state (no heads: a historical read is far slower). */
 class Reader {
   readonly #backend: ReturnType<typeof A.getBackend>;
-  readonly #heads: A.Heads;
 
   constructor(doc: A.Doc<unknown>) {
     this.#backend = A.getBackend(doc);
-    this.#heads = A.getHeads(doc);
   }
 
   all(obj: string, prop: string | number): Value[] {
-    return this.#backend.getAll(obj, prop, this.#heads) as Value[];
+    return this.#backend.getAll(obj, prop) as Value[];
   }
 
   keys(obj: string): string[] {
-    return this.#backend.keys(obj, this.#heads);
+    return this.#backend.keys(obj);
   }
 
   length(obj: string): number {
-    return this.#backend.length(obj, this.#heads);
+    return this.#backend.length(obj);
   }
 
   /** The value of `prop` when it has exactly one, and that one is a map. */
@@ -359,6 +357,7 @@ export function validateSection(doc: A.Doc<unknown>): SectionValidation {
   const nodeKeys = nodesObj === undefined ? [] : r.keys(nodesObj);
   const placementKeys = placementsObj === undefined ? [] : r.keys(placementsObj);
   const objectKeys = objectsObj === undefined ? [] : r.keys(objectsObj);
+  const nodeSet = new Set(nodeKeys);
 
   // §14.2, SOP §21: collisions. A key created concurrently twice holds two maps.
   const collisions = new Set<string>();
@@ -420,9 +419,9 @@ export function validateSection(doc: A.Doc<unknown>): SectionValidation {
       const node = r.str(obj, "node_id");
       const parent = r.str(obj, "parent_id");
       if (out.length === 0) {
-        if (node === undefined || !nodeKeys.includes(node))
+        if (node === undefined || !nodeSet.has(node))
           out.push(problem("INVALID_REFERENCE", ref(at, "node_id"), "node_id names no node"));
-        if (parent === undefined || (parent !== sectionId && !nodeKeys.includes(parent)))
+        if (parent === undefined || (parent !== sectionId && !nodeSet.has(parent)))
           out.push(
             problem(
               "INVALID_REFERENCE",
