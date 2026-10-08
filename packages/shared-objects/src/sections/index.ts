@@ -14,6 +14,16 @@ export {
   SectionAdmissionError,
 } from "./admission.js";
 export {
+  type SectionsApplyResult,
+  type SectionsBatchResult,
+  type SectionsCheckpoint,
+  type SectionsCodec,
+  type SectionsExcludeResult,
+  type SectionsNodesChanged,
+  type SectionsUnit,
+  SharedSectionsDataProfile,
+} from "./data-profile.js";
+export {
   type ProfileModel,
   profileModel,
   SUPPORTED_DATA_PROFILES,
