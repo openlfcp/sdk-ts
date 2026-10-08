@@ -13,7 +13,7 @@ export {
   frameSnapshot,
   unframeChange,
   unframeSnapshot,
-} from "./automerge-bytes.js";
+} from "./admission/framing.js";
 export {
   CHANGE_LIMITS,
   type ChunkExpansion,
@@ -22,7 +22,7 @@ export {
   MAX_DOCUMENT_DEPTH,
   SNAPSHOT_LIMITS_FLOOR,
   type SnapshotLimits,
-} from "./chunk-limits.js";
+} from "./admission/limits.js";
 export {
   type SharedObjectsApplyResult,
   type SharedObjectsBatchResult,

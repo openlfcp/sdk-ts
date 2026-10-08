@@ -13,13 +13,14 @@ import {
   checkSaveHeader,
   unframeChange,
   unframeSnapshot,
-} from "./automerge-bytes.js";
+} from "./admission/framing.js";
 import {
   checkSnapshotExpansion,
   MAX_DOCUMENT_DEPTH,
   SNAPSHOT_LIMITS_FLOOR,
   type SnapshotLimits,
-} from "./chunk-limits.js";
+} from "./admission/limits.js";
+import { admitBatch, admitChange, type DocumentSequences } from "./admission/sequence.js";
 
 /** The decoded actions that create an object (§11.2). */
 const MAKE_ACTIONS: ReadonlySet<string> = new Set(["makeMap", "makeList", "makeText", "makeTable"]);
@@ -611,6 +612,14 @@ export class SharedObjectsReplica {
    * same batch). Refuses an object deeper than MAX_DOCUMENT_DEPTH, or one
    * written into an object the document does not have, before the engine.
    */
+  /** The document as the admission module reads it (§14.1). */
+  #sequences(): DocumentSequences {
+    return {
+      hasChange: (hash) => A.hasHeads(this.#doc, [hash]),
+      latestSeq: (actor) => this.#seqs.get(actor) ?? 0,
+    };
+  }
+
   #createdDepths(change: CheckedChange, prior: ReadonlyMap<string, number>): Map<string, number> {
     const decoded = A.decodeChange(change.bytes);
     const created = new Map<string, number>();
@@ -1088,77 +1097,17 @@ export class SharedObjectsReplica {
       seen.add(checked.hash);
       all.push(checked);
     }
-    const index = new Map(all.map((c, i) => [c.hash, i]));
-    const blocking = all.map(() => 0);
-    const unreachable = all.map(() => false);
-    const children = new Map<string, number[]>();
-    all.forEach((c, i) => {
-      for (const d of c.deps) {
-        if (A.hasHeads(this.#doc, [d])) continue;
-        if (index.has(d)) {
-          blocking[i] = (blocking[i] as number) + 1;
-          children.set(d, [...(children.get(d) ?? []), i]);
-        } else unreachable[i] = true;
-      }
-    });
-    const seqs = new Map<string, number>();
-    const latest = (actor: string) => seqs.get(actor) ?? this.#seqs.get(actor) ?? 0;
-    const admitted: CheckedChange[] = [];
+    // §11.1, §14.1 (the admission module both profiles share), then §11.2:
+    // the depths of the objects a change creates, given the document and
+    // the batch so far.
     const batchDepths = new Map<string, number>();
-    const duplicates: CheckedChange[] = [];
-    const done = all.map(() => false);
-    const ready = all.flatMap((_, i) => (blocking[i] === 0 && !unreachable[i] ? [i] : []));
-    for (let k = 0; k < ready.length; k++) {
-      const i = ready[k] as number;
-      const c = all[i] as CheckedChange;
-      done[i] = true;
-      if (A.hasHeads(this.#doc, [c.hash])) duplicates.push(c);
-      else if (c.seq <= latest(c.actor)) {
-        refused.push({
-          change: c,
-          error: new LfcpError(
-            "ACTOR_EQUIVOCATION",
-            `actor ${c.actor} sequence ${c.seq} already has a different change (§26.2)`,
-          ),
-        });
-        continue;
-      } else if (c.otherActors.some((a) => latest(a) === 0)) {
-        refused.push({
-          change: c,
-          error: new ProfileInvalidError(
-            "INVALID_AUTOMERGE_BYTES",
-            `the change names an actor unknown to this document (§11.1)`,
-          ),
-        });
-        continue;
-      } else if (c.seq !== latest(c.actor) + 1) {
-        refused.push({
-          change: c,
-          error: new ProfileInvalidError(
-            "INVALID_AUTOMERGE_BYTES",
-            `actor ${c.actor} sequence ${c.seq} skips sequence ${latest(c.actor) + 1} (§14.1)`,
-          ),
-        });
-        continue;
-      } else {
-        // §11.2: the depths of the objects it creates, given the document and the batch so far.
-        let created: Map<string, number>;
-        try {
-          created = this.#createdDepths(c, batchDepths);
-        } catch (e) {
-          refused.push({ change: c, error: e as LfcpError });
-          continue;
-        }
-        for (const [id, d] of created) batchDepths.set(id, d);
-        seqs.set(c.actor, c.seq);
-        admitted.push(c);
-      }
-      for (const child of children.get(c.hash) ?? []) {
-        blocking[child] = (blocking[child] as number) - 1;
-        if (blocking[child] === 0 && !unreachable[child]) ready.push(child);
-      }
-    }
-    const waiting = all.filter((_, i) => !done[i]);
+    const decided = admitBatch(all, this.#sequences(), (c) => {
+      for (const [id, d] of this.#createdDepths(c, batchDepths)) batchDepths.set(id, d);
+    });
+    for (const r of decided.refused) refused.push({ change: r.change, error: r.error });
+    const admitted = [...decided.admitted];
+    const duplicates = [...decided.duplicates];
+    const waiting = [...decided.waiting];
     const before = A.getHeads(this.#doc);
     let applied: CheckedChange[] = admitted;
     if (admitted.length > 0) {
@@ -1197,38 +1146,20 @@ export class SharedObjectsReplica {
   }
 
   #receive(change: CheckedChange): ReceiveResult {
-    if (A.hasHeads(this.#doc, [change.hash])) return Object.freeze({ status: "duplicate", change });
-    const missing = change.deps.filter((d) => !A.hasHeads(this.#doc, [d]));
-    if (missing.length > 0)
+    // §11.1, §14.1 before Automerge sees it (the admission module both
+    // profiles share): Automerge 3.5.0 records a skipping change in its graph
+    // without its operations, so the document no longer saves loadably
+    // (automerge-rs 0.12 aborts), and aborts on an unknown actor. A taken
+    // sequence is an equivocation (or, for our own actor, a lost-state fork, §9).
+    const admission = admitChange(change, this.#sequences());
+    if (admission.kind === "duplicate") return Object.freeze({ status: "duplicate", change });
+    if (admission.kind === "missing")
       return Object.freeze({
         status: "missing_dependencies",
         change,
-        missing: Object.freeze(missing),
+        missing: admission.missing,
       });
-    // Same actor and sequence, different change: an equivocation (or, for our
-    // own actor, a lost-state fork, §9). Checked before Automerge sees it.
-    if (change.seq <= (this.#seqs.get(change.actor) ?? 0))
-      throw new LfcpError(
-        "ACTOR_EQUIVOCATION",
-        `actor ${change.actor} sequence ${change.seq} already has a different change (§26.2)`,
-      );
-    // §14.1: with every dependency present, the sequence follows the
-    // actor's latest change. Checked before Automerge sees it: Automerge
-    // 3.5.0 records a skipping change in its graph without its operations
-    // and the document no longer saves loadably (automerge-rs 0.12 aborts).
-    // §11.1: every other actor of the change is already an actor of the
-    // document (Automerge aborts on an unknown one).
-    const unknown = change.otherActors.find((a) => !this.#seqs.has(a));
-    if (unknown !== undefined)
-      throw new ProfileInvalidError(
-        "INVALID_AUTOMERGE_BYTES",
-        `the change names actor ${unknown}, unknown to this document (§11.1)`,
-      );
-    if (change.seq !== (this.#seqs.get(change.actor) ?? 0) + 1)
-      throw new ProfileInvalidError(
-        "INVALID_AUTOMERGE_BYTES",
-        `actor ${change.actor} sequence ${change.seq} skips sequence ${(this.#seqs.get(change.actor) ?? 0) + 1} (§14.1)`,
-      );
+    if (admission.kind === "held" || admission.kind === "invalid") throw admission.error;
     // §11.2: no object deeper than MAX_DOCUMENT_DEPTH, before the engine.
     const created = this.#createdDepths(change, new Map());
     const before = A.getHeads(this.#doc);

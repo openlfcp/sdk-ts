@@ -1,7 +1,7 @@
 import * as A from "@automerge/automerge";
 import { type ObjectId, principalId, resourceId, toHex } from "@openlfcp/core";
 import { describe, expect, it } from "vitest";
-import { MAX_DOCUMENT_DEPTH } from "../src/chunk-limits.js";
+import { MAX_DOCUMENT_DEPTH } from "../src/admission/limits.js";
 import {
   createTask,
   deriveActorId,

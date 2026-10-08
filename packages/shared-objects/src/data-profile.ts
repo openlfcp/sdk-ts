@@ -5,15 +5,16 @@ import {
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
+import { checkChangeActor } from "./admission/actor.js";
 import {
   type CheckedChange,
   frameChange,
   frameSnapshot,
   unframeChange,
   unframeSnapshot,
-} from "./automerge-bytes.js";
+} from "./admission/framing.js";
 import { type ObjectChange, type ReplicaOptions, SharedObjectsReplica } from "./replica.js";
-import { type Json, ProfileInvalidError } from "./validate.js";
+import type { Json } from "./validate.js";
 import { deriveActorId, PROFILE_ID } from "./values.js";
 
 /**
@@ -285,14 +286,7 @@ export class SharedObjectsDataProfile {
     // §8, §11 (SO-SEC1): a unit carries only changes of its signer's §8
     // actor, so no Principal can write into another Principal's Automerge
     // history. Anything else is PROFILE_INVALID / CHANGE_ACTOR_MISMATCH.
-    const bound = (change: CheckedChange): CheckedChange => {
-      if (change.actor !== actor)
-        throw new ProfileInvalidError(
-          "CHANGE_ACTOR_MISMATCH",
-          `the change's Automerge actor ${change.actor} is not the §8 actor ${actor} of the unit's signer (§11, SO-SEC1)`,
-        );
-      return change;
-    };
+    const bound = (change: CheckedChange): CheckedChange => checkChangeActor(change, actor);
     return {
       dataProfile: PROFILE_ID,
       encode: (change) => frameChange(bound(change).bytes),

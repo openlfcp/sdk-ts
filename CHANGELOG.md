@@ -4,6 +4,18 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## Unreleased
+
+### Added
+
+- `@openlfcp/shared-objects/admission` (LFCP-02-085): the admission of
+  SHARED-OBJECTS-PROFILE-01 §§7–18 as a module every inheriting profile
+  shares (SHARED-SECTIONS-PROFILE-01 §2): the framing, the expansion,
+  depth and Snapshot limits, the actor binding with the profile's domain
+  (`deriveDomainActorId`, `checkChangeActor`) and the sequence admission
+  with held changes (`admitBatch`, `admitChange`). The Shared Objects
+  profile now runs on it; its behaviour and exports are unchanged.
+
 ## 0.1.3 — 2026-10-08
 
 0.1.2 was published without build output; 0.1.3 is the same code. The

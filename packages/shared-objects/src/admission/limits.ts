@@ -23,7 +23,7 @@
 // - for a Snapshot, the bytes of all column data after inflation.
 
 import { Inflate } from "fflate";
-import { ProfileInvalidError } from "./profile-invalid.js";
+import { ProfileInvalidError } from "../profile-invalid.js";
 
 /** The exact limits of a change (§11.1): writers stay within them, receivers reject above. */
 export const CHANGE_LIMITS = Object.freeze({

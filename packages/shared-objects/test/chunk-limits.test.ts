@@ -6,7 +6,7 @@ import {
   checkChangeExpansion,
   checkSnapshotExpansion,
   SNAPSHOT_LIMITS_FLOOR,
-} from "../src/chunk-limits.js";
+} from "../src/admission/limits.js";
 import { ProfileInvalidError } from "../src/profile-invalid.js";
 
 // SHARED-OBJECTS-PROFILE-01 §11.1 and §13.1 (SPEC-PATCH-07): the expansion
