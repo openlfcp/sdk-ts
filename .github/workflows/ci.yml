@@ -15,7 +15,7 @@ jobs:
       run:
         working-directory: sdk-ts
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: sdk-ts
       # The conformance runner reads official vectors from a spec checkout
@@ -24,7 +24,7 @@ jobs:
         run: echo "tag=$(jq -er .tag spec.lock)" >> "$GITHUB_OUTPUT"
       # Full history with tags, so the runner can check that the tag still
       # resolves to the commit in spec.lock.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: openlfcp/spec
           ref: refs/tags/${{ steps.spec-lock.outputs.tag }}
@@ -36,7 +36,7 @@ jobs:
       # (a path dependency, ../sdk-rs).
       - id: server-lock
         run: echo "commit=$(jq -er .commit server.lock)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: openlfcp/server
           ref: ${{ steps.server-lock.outputs.commit }}
@@ -44,7 +44,7 @@ jobs:
       - id: sdk-rs-lock
         working-directory: server
         run: echo "commit=$(jq -er .commit sdk-rs.lock)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: openlfcp/sdk-rs
           ref: ${{ steps.sdk-rs-lock.outputs.commit }}
@@ -57,7 +57,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: sdk-ts/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
