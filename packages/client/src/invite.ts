@@ -227,6 +227,13 @@ export interface AcceptInvitationOptions {
   readonly secrets: SecretStore;
   /** Abilities to claim; default the grant's, without invite/claim unless it is delegable (§18.1 rule 4). */
   readonly abilities?: readonly bigint[];
+  /**
+   * The Data Profiles the caller can open (§27). When given, the Resource's
+   * Genesis profile must be one of them: otherwise the join stops with
+   * "profile-unsupported" before the Key Package is fetched and before the
+   * claim, so the invitation stays unused. Default: no check.
+   */
+  readonly dataProfiles?: readonly string[];
   /** The endpoint to use; default the link's first. */
   readonly url?: string;
   readonly now: () => number;
@@ -272,6 +279,18 @@ export type AcceptedInvitation =
       readonly resourceId: ResourceId;
       readonly code: string;
       readonly attempts: readonly string[];
+    }
+  | {
+      /**
+       * The Resource's Data Profile is not in the caller's dataProfiles: no
+       * Key Package was fetched, no claim was made and nothing was stored,
+       * so the invitation can still be used by a client that implements it.
+       */
+      readonly kind: "profile-unsupported";
+      readonly resourceId: ResourceId;
+      readonly code: "PROFILE_UNSUPPORTED";
+      /** The Resource's Data Profile, from its Genesis. */
+      readonly dataProfile: string;
     }
   | {
       /**
@@ -430,7 +449,9 @@ async function fetchChain(
 /**
  * The joiner's side (§18.1, §18.2, §73). On "claimed" the claimant's
  * storage holds the chain with the claimant's grant and its secrets the
- * DEK: open the Resource with a SyncClient for the claimant. Throws
+ * DEK: open the Resource with a SyncClient for the claimant. With
+ * `dataProfiles`, a Resource of another Data Profile is
+ * "profile-unsupported" before the Key Package and the claim. Throws
  * INVALID_INVITATION for a link without a secret or a secret that is not
  * the grant's subject, MISSING_DEPENDENCY when the grant is not on the
  * chain, and KEY_PACKAGE_OPEN_FAILED when no package delivers the current
@@ -476,6 +497,18 @@ export async function acceptInvitation(
     const grant =
       chain.state.grants.get(toHex(invitation.grantId)) ??
       fail("MISSING_DEPENDENCY", "the invitation grant is not on the chain");
+
+    // §27: a profile the caller cannot open is refused before the DEK and the claim.
+    if (
+      options.dataProfiles !== undefined &&
+      !options.dataProfiles.includes(chain.state.dataProfile)
+    )
+      return Object.freeze({
+        kind: "profile-unsupported",
+        resourceId: R,
+        code: "PROFILE_UNSUPPORTED",
+        dataProfile: chain.state.dataProfile,
+      });
 
     // §73, §25.2: the invitation's Key Package delivers the DEK.
     progress("retrieving-key");

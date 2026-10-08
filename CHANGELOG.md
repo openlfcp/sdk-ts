@@ -4,6 +4,29 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## Unreleased
+
+### Added
+
+- `@openlfcp/client`: `acceptInvitation` can check the Resource's Data
+  Profile before it claims (LFCP-02-086). The new option
+  `dataProfiles` lists the profiles the caller can open. When the Genesis
+  names another one, the join stops after the chain is fetched and the
+  link's secret is checked, before the Key Package is fetched and before
+  the `CAPABILITY_CLAIM`. It returns the new result
+  `{ kind: "profile-unsupported", resourceId, code: "PROFILE_UNSUPPORTED",
+  dataProfile }`, with the Resource's profile. Nothing is stored, and a
+  one-time invitation stays unused for a client that implements the
+  profile. Without the option nothing changes: any profile is claimed, as
+  before.
+
+### Changed
+
+- `@openlfcp/client`, types: `AcceptedInvitation` has the new variant
+  `"profile-unsupported"`. It is returned only when `dataProfiles` is
+  given, but a `switch` over `kind` that checks exhaustiveness needs a
+  case for it.
+
 ## 0.1.1 — 2026-10-07
 
 ### Added

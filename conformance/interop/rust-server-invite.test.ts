@@ -6,11 +6,13 @@
 //    grant to a fresh Invitation Principal (claim_limit 1) and a Key
 //    Package sealed to it, through the outbound queue; the bearer link is
 //    handed over in memory.
+//    A client limited to another Data Profile stops before the claim: the
+//    link stays unused.
 // 2. BOB, a fresh Principal with no grant, accepts it: as the Invitation
 //    Principal he fetches the chain, verifies the secret against the grant,
 //    opens the invitation's package and claims; then he opens the Resource
 //    as himself, gets OWNER's Task, edits it, and OWNER sees the edit.
-// 3. CAROL tries the same one-time link and is refused (AUTHORIZATION_FAILED).
+// 3. CAROL, now opening any profile, tries the same one-time link and is refused (AUTHORIZATION_FAILED).
 // 4. On a second one-time invitation DAVE's claim is held until ERIN's
 //    commits: DAVE gets CONTROL_HEAD_MISMATCH, refreshes, and is refused;
 //    and two claims racing freely on a third leave exactly one winner.
@@ -244,6 +246,7 @@ const joiner = (
   webSocket?: WebSocketFactory,
   abilities?: readonly bigint[],
   onProgress?: (p: AcceptInvitationProgress) => void,
+  dataProfiles?: readonly string[],
 ) => {
   const storage = new InMemoryLfcpStorage();
   const secrets = new InMemorySecretStore();
@@ -261,6 +264,7 @@ const joiner = (
         ...(webSocket === undefined ? {} : { webSocket }),
         ...(abilities === undefined ? {} : { abilities }),
         ...(onProgress === undefined ? {} : { onProgress }),
+        ...(dataProfiles === undefined ? {} : { dataProfiles }),
       }),
   };
 };
@@ -413,9 +417,29 @@ describe("invitations ↔ Rust reference server (live, LFCP-053)", () => {
         ABILITY.INVITE_CLAIM,
       ]);
 
-      // 2. BOB (no grant) accepts: verify, open the invitation package, claim.
+      // 2a. A client that opens only another profile stops before the Key
+      // Package and the claim: it stores nothing and the link stays unused.
+      const otherProgress: AcceptInvitationProgress[] = [];
+      const other = joiner(CAROL, first.link, undefined, undefined, (p) => otherProgress.push(p), [
+        "org.openlfcp.shared-sections.v1",
+      ]);
+      expect(await other.accept()).toEqual({
+        kind: "profile-unsupported",
+        resourceId: R,
+        code: "PROFILE_UNSUPPORTED",
+        dataProfile: PROFILE_ID,
+      });
+      expect(otherProgress).toEqual([{ stage: "connecting" }, { stage: "validating-invitation" }]);
+      expect(await other.storage.control.head(R)).toBeUndefined();
+      expect(await other.storage.control.epochs(R)).toEqual([]);
+      expect(await other.storage.resources.get(R)).toBeUndefined();
+      expect(await other.secrets.get(dekSecretRef(R, dataEpoch(0n)))).toBeUndefined();
+
+      // 2b. BOB (no grant) accepts: verify, open the invitation package, claim.
       const bobProgress: AcceptInvitationProgress[] = [];
-      const bobJoin = joiner(BOB, first.link, undefined, undefined, (p) => bobProgress.push(p));
+      const bobJoin = joiner(BOB, first.link, undefined, undefined, (p) => bobProgress.push(p), [
+        PROFILE_ID,
+      ]);
       const bobResult = await bobJoin.accept();
       // The §73 steps in order, for a join dialog; the payloads name the step only.
       expect(bobProgress).toEqual([
