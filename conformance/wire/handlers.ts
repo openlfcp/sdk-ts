@@ -63,6 +63,9 @@ import {
   encodeMessage,
   encodePrincipalDescriptor,
   expectedSignerOf,
+  type HaveVector,
+  hasSequence,
+  haveDifference,
   InMemorySeenUnits,
   type KeyPackagePayload,
   type KeyPackageRecipient,
@@ -1747,6 +1750,95 @@ const principalNegative: Handler = (c) => {
   return negative(c, actual);
 };
 
+/**
+ * LFCP-WIRE-01 §28, §68.1 (baseline.9): from a local and a remote Have
+ * Vector, what the replica requests and what it offers, as minimal ranges
+ * per actor in ascending order.
+ */
+const haveDifferenceCase: Handler = (c, context) => {
+  const vector = (name: string) => canonicalFrontierFromCbor(decodeStrict(hexOf(c.inputs, name)));
+  const names = new Map<string, string>();
+  for (const [key, signer] of principals(context))
+    if (!/^[0-9a-f]{64}$/.test(key)) names.set(toHex(signer.descriptor.principalId), key);
+  const named = (ranges: readonly { actor: PrincipalId; start: bigint; end: bigint }[]) =>
+    ranges.map((r) => ({
+      actor: names.get(toHex(r.actor)) ?? toHex(r.actor),
+      start: Number(r.start),
+      end: Number(r.end),
+    }));
+  const d = haveDifference(vector("local_have_cbor"), vector("remote_have_cbor"));
+  const e = c.expected as { request?: unknown; offer?: unknown };
+  return {
+    checks: [
+      equalCheck("request", e.request, named(d.request)),
+      equalCheck("offer", e.offer, named(d.offer)),
+    ],
+  };
+};
+
+/**
+ * LFCP-WIRE-01 §51.1 (baseline.9), the server's `previous` link check, run
+ * here as a second implementation of the rule: a DATA_PUT's units in
+ * message order against the stored units of their actor and a stored
+ * Snapshot frontier. All-or-nothing: the first unit that fails refuses the
+ * message with its `previous` as the NACK details.
+ */
+const dataPutPrevious: Handler = (c) => {
+  const stored = Object.keys(c.inputs ?? {})
+    .filter((k) => k.startsWith("stored_") && k.endsWith("_cose"))
+    .map((k) => parseDataUnit(hexOf(c.inputs, k)));
+  const frontier: HaveVector = has(c.inputs, "stored_snapshot_frontier")
+    ? canonicalFrontierFromCbor(decodeStrict(hexOf(c.inputs, "stored_snapshot_frontier")))
+    : [];
+  const m = decodeMessage(hexOf(c.inputs, "message_cbor"));
+  if (m.type !== "DATA_PUT") throw new Error(`message_cbor is a ${m.type}, not a DATA_PUT`);
+  const units = (m as LfcpMessage<"DATA_PUT">).body.objects.map((b) => parseDataUnit(b));
+  const held = [...stored];
+  let refused: Uint8Array | null = null;
+  for (const u of units) {
+    const { actor, actorSeq: n, prevDataUnitId: previous } = u.payload;
+    if (previous !== null) {
+      const sameActor = held.filter((x) => bytesEqual(x.payload.actor, actor));
+      const linked = sameActor.some(
+        (x) => x.payload.actorSeq < n && bytesEqual(x.signed.id, previous),
+      );
+      // Rule 3: the highest sequence below n the frontier covers, with no stored unit after it.
+      let covered = 0n;
+      for (let s = n - 1n; s >= 1n && covered === 0n; s--)
+        if (hasSequence(frontier, actor, s)) covered = s;
+      const viaSnapshot =
+        covered > 0n &&
+        !sameActor.some((x) => x.payload.actorSeq > covered && x.payload.actorSeq < n);
+      if (!linked && !viaSnapshot) {
+        refused = previous;
+        break;
+      }
+    }
+    held.push(u);
+  }
+  const e = c.expected as { valid?: unknown; error?: { code?: unknown; details?: unknown } };
+  if (e.valid === true)
+    return {
+      checks: [
+        check("outcome", () => refused === null || `refused with ${toHex(refused as Uint8Array)}`),
+      ],
+    };
+  return {
+    checks: [
+      outcomeCheck(
+        "outcome",
+        typeof e.error?.code === "string" ? e.error.code : null,
+        refused === null ? null : "UNKNOWN_PREVIOUS",
+      ),
+      check("error.details", () => {
+        if (refused === null) return "accepted";
+        const expected = hexOf(e.error as Record<string, unknown>, "details");
+        return bytesEqual(expected, refused) || `details ${toHex(refused)}`;
+      }),
+    ],
+  };
+};
+
 export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   "bytes/principal": principal,
   "bytes/control_record": controlRecord,
@@ -1767,4 +1859,6 @@ export const WIRE_HANDLERS: Readonly<Record<string, Handler>> = {
   "validation/ed25519_signature": ed25519Signature,
   "validation/actor_chain": actorChain,
   "validation/invite_uri": inviteUriParse,
+  "validation/data_put_previous": dataPutPrevious,
+  "behavioral/have_difference": haveDifferenceCase,
 };

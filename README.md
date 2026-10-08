@@ -13,7 +13,7 @@ stay portable to browsers and editors; Node-only code goes into separate
 ## Scope
 
 sdk-ts implements the OpenLFCP MVP 0.1 subset of LFCP-WIRE-01
-at `mvp-0.1-baseline.8`, not every deferred WIRE-01 feature (coordinator
+at `mvp-0.1-baseline.9`, not every deferred WIRE-01 feature (coordinator
 recovery, Resource tombstones, route migration, presence, mirror
 seeding and others; see `.github: docs/release/deferred-wire-01-features.md` (in [openlfcp/.github](https://github.com/openlfcp/.github))).
 It does not claim full LFCP-WIRE-01 conformance.
@@ -131,7 +131,7 @@ The official vectors belong to `openlfcp/spec` and are never copied into
 sdk-ts. `spec.lock` pins the spec version the SDK implements:
 
 ```json
-{ "tag": "mvp-0.1-baseline.8", "commit": "da3977f927feaf3e7c5b8f653797d3696ce0613b" }
+{ "tag": "mvp-0.1-baseline.9", "commit": "f42533c47f58fc980afd4e06f1366891592f7691" }
 ```
 
 `conformance/spec.mjs` reads spec files with `git show <commit>:<path>`

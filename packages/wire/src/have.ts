@@ -328,6 +328,19 @@ export function missingFrom(local: HaveVector, remote: HaveVector): ActorRange[]
 }
 
 /**
+ * Both directions of anti-entropy (§28, §68.1): what a replica requests
+ * from its peer (the units `remote` holds and `local` lacks) and what it
+ * offers to it (the units `local` holds and `remote` lacks), each as the
+ * fewest ranges, by ascending raw Principal ID and then sequence.
+ */
+export function haveDifference(
+  local: HaveVector,
+  remote: HaveVector,
+): { readonly request: ActorRange[]; readonly offer: ActorRange[] } {
+  return Object.freeze({ request: missingFrom(local, remote), offer: missingFrom(remote, local) });
+}
+
+/**
  * Catch-up after loading a Snapshot (§29, §66 step 4): what `theirs` holds
  * that is neither in `ours` nor covered by the Snapshot's frontier.
  */

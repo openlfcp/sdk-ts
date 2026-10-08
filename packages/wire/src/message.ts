@@ -119,6 +119,8 @@ export const ERROR_CODE = Object.freeze({
   HOSTING_DENIED: 20n,
   RESOURCE_TOMBSTONED: 21n,
   INTERNAL_ERROR: 22n,
+  /** §51.1 (baseline.9): a Data Unit whose `previous` the server does not store. */
+  UNKNOWN_PREVIOUS: 23n,
 });
 export type WireErrorName = keyof typeof ERROR_CODE;
 

@@ -8,6 +8,10 @@ remove or rename any.
 
 ### Added
 
+- `@openlfcp/wire`: the §62 code `UNKNOWN_PREVIOUS` (23), a server's
+  refusal of a Data Unit whose `previous` it does not store (§51.1), and
+  `haveDifference(local, remote)`, both directions of anti-entropy: what a
+  replica requests and what it offers (§28, §68.1).
 - `@openlfcp/client`: `acceptInvitation` can check the Resource's Data
   Profile before it claims (LFCP-02-086). The new option
   `dataProfiles` lists the profiles the caller can open. When the Genesis
@@ -22,6 +26,10 @@ remove or rename any.
 
 ### Changed
 
+- The SDK implements spec `mvp-0.1-baseline.9` (SPEC-PATCH-09, ADR 0008
+  and POST-001); the conformance runner checks its new vectors
+  `have_difference` and `data_put_previous` (the server's `previous` rule,
+  run as a second implementation).
 - `@openlfcp/client`, types: `AcceptedInvitation` has the new variant
   `"profile-unsupported"`. It is returned only when `dataProfiles` is
   given, but a `switch` over `kind` that checks exhaustiveness needs a

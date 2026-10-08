@@ -145,6 +145,7 @@ export {
   checkLiveHave,
   type HaveVector,
   hasSequence,
+  haveDifference,
   type LiveHaveEntry,
   liveHavesOf,
   MAX_DATA_GET_RANGES,
