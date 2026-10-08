@@ -651,8 +651,13 @@ export class SyncClient {
           this.#connection.state === "READY"
         )
           await this.#sendOpen(ctx);
-        if (ctx.state === "LIVE" && now - ctx.lastHave >= this.#antiEntropyMs)
+        // Periodic anti-entropy (§68.1), both planes: the server's answer
+        // to CONTROL_HAVE also re-offers Control Records it still lacks,
+        // e.g. after a refused or lost re-supply.
+        if (ctx.state === "LIVE" && now - ctx.lastHave >= this.#antiEntropyMs) {
           this.#sendHave(ctx, now);
+          this.#refreshControl(ctx);
+        }
         if (ctx.state === "KEY_BLOCKED" && now - ctx.lastKeyRequest >= this.#antiEntropyMs)
           this.#requestKeys(ctx, now);
         await this.#flush(ctx);
