@@ -6,8 +6,13 @@ import {
   toHex,
 } from "@openlfcp/core";
 import { checkChangeActor } from "../admission/actor.js";
-import { type CheckedChange, frameChange, unframeChange } from "../admission/framing.js";
-import { SectionReplica, type SectionSnapshot } from "./replica.js";
+import {
+  type CheckedChange,
+  checkChange,
+  frameChange,
+  unframeChange,
+} from "../admission/framing.js";
+import { type SectionIntent, SectionReplica, type SectionSnapshot } from "./replica.js";
 import { deriveSectionActorId, SECTIONS_PROFILE_ID } from "./values.js";
 
 /**
@@ -78,6 +83,25 @@ export interface SectionsExcludeResult {
   readonly released: readonly DataUnitId[];
 }
 
+/** A batch staged for commit (structurally the client's StagedOperation). */
+export interface SectionsStagedOperation {
+  readonly values: readonly CheckedChange[];
+  readonly affectedNodeIds: readonly string[];
+  readonly modelRevision: string;
+  apply(): void;
+  revert(): void;
+  writes(
+    units: readonly { readonly unitId: DataUnitId }[],
+  ): readonly { readonly op: "put-profile-checkpoint"; readonly checkpoint: SectionsCheckpoint }[];
+  committed(unitIds: readonly DataUnitId[]): void;
+}
+
+/** How a sync client commits section batches (structurally the client's CommitBinding). */
+export interface SectionsCommitBinding {
+  readonly codec: SectionsCodec;
+  stage(intents: readonly unknown[]): SectionsStagedOperation | null;
+}
+
 /** SDK-SECTIONS-INTEGRATION-01 §5 nodes-changed: what changed, and why. */
 export interface SectionsNodesChanged {
   readonly nodeIds: readonly string[];
@@ -146,6 +170,51 @@ export class SharedSectionsDataProfile {
       dataProfile: SECTIONS_PROFILE_ID,
       encode: (change) => frameChange(bound(change).bytes),
       decode: (plaintext) => bound(unframeChange(plaintext)),
+    };
+  }
+
+  /**
+   * SDK-SECTIONS-INTEGRATION-01 §3.1: the binding through which a sync
+   * client commits this Principal's batches (structurally the client's
+   * CommitBinding): `stage` validates the intents and changes a copy of the
+   * replica, splitting what one change cannot carry (§12); the staged
+   * operation adopts it, writes the checkpoint with the new units and
+   * records them once committed.
+   */
+  commitBinding(principal: PrincipalId): SectionsCommitBinding {
+    const codec = this.codecFor({ resourceId: this.#replica.resource, actor: principal });
+    return {
+      codec,
+      stage: (intents) => {
+        const staged = this.#replica.stage(intents as readonly SectionIntent[]);
+        if (staged === null) return null;
+        const parts = staged.change.parts;
+        return {
+          values: parts.map((p) => checkChange(p.change)),
+          affectedNodeIds: staged.change.affectedNodeIds,
+          modelRevision: staged.change.modelRevision,
+          apply: () => staged.apply(),
+          revert: () => staged.revert(),
+          writes: (units) => [
+            {
+              op: "put-profile-checkpoint",
+              checkpoint: this.checkpoint(
+                units.map((u, i) => ({
+                  unitId: u.unitId,
+                  ref: (parts[i] as { hash: string }).hash,
+                })),
+              ),
+            },
+          ],
+          committed: (unitIds) => {
+            unitIds.forEach((unitId, i) => {
+              const part = parts[i];
+              if (part !== undefined) this.#merged.set(toHex(unitId), { unitId, hash: part.hash });
+            });
+            this.#emit(staged.change.affectedNodeIds, "local");
+          },
+        };
+      },
     };
   }
 

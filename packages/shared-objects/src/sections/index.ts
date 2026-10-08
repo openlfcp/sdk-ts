@@ -18,8 +18,10 @@ export {
   type SectionsBatchResult,
   type SectionsCheckpoint,
   type SectionsCodec,
+  type SectionsCommitBinding,
   type SectionsExcludeResult,
   type SectionsNodesChanged,
+  type SectionsStagedOperation,
   type SectionsUnit,
   SharedSectionsDataProfile,
 } from "./data-profile.js";
