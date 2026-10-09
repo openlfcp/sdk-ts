@@ -302,33 +302,61 @@ class Fields {
 const isNodeKind = (s: string): s is NodeKind => (NODE_KINDS as readonly string[]).includes(s);
 const LIFECYCLES = new Set(["active", "deleted"]);
 
-/** Validations by document object, and the latest few by heads (a clone has the heads of its source). */
-const byDoc = new WeakMap<object, SectionValidation>();
-const byHeads = new Map<string, SectionValidation>();
-const HEADS_KEPT = 8;
-
 /**
- * Validates a section document (§3, §4, §14.2). Reads only; the document is
- * unchanged. A document's heads determine its content, so a validation is
- * computed once per heads: committing and then reading one revision (or a
- * clone of it) validates it once.
+ * What one validation reads, per entity: everything a node, a placement or
+ * an object contributes that depends on its own subtree only, and the root
+ * and section part. The checks across entities (references, collided
+ * parents) are derived from these facts without reading the document.
  */
-export function validateSection(doc: A.Doc<unknown>): SectionValidation {
-  const known = byDoc.get(doc);
-  if (known !== undefined) return known;
-  const heads = A.getHeads(doc).slice().sort().join(",");
-  let v = byHeads.get(heads);
-  if (v === undefined) {
-    v = computeValidation(doc);
-    byHeads.set(heads, v);
-    if (byHeads.size > HEADS_KEPT) byHeads.delete(byHeads.keys().next().value as string);
-  }
-  byDoc.set(doc, v);
-  return v;
+interface NodeFacts {
+  readonly collides: boolean;
+  /** The node's map when it has exactly one value, a map. */
+  readonly map: string | undefined;
+  readonly kind: NodeKind | undefined;
+  /** The values of `placement` (one when not in conflict). */
+  readonly selected: readonly Value[];
+  /** The node's own problems, before its references are checked. */
+  readonly local: readonly SectionProblem[];
 }
 
-function computeValidation(doc: A.Doc<unknown>): SectionValidation {
-  const r = new Reader(doc);
+interface PlacementFacts {
+  readonly collides: boolean;
+  readonly map: string | undefined;
+  readonly local: readonly SectionProblem[];
+  readonly nodeId: string | undefined;
+  readonly parentId: string | undefined;
+}
+
+interface ObjectFacts {
+  readonly collides: boolean;
+  /** The object's map when it has exactly one value, a map. */
+  readonly map: string | undefined;
+  /** Its `type`, a scalar string, when it is one map. */
+  readonly type: string | undefined;
+  /** The object's problems (§2, SOP §74.1); undefined when it has none. */
+  readonly problems: readonly ProfileProblem[] | undefined;
+}
+
+interface RootFacts {
+  readonly problems: readonly SectionProblem[];
+  readonly sectionId: string | undefined;
+  readonly ready: boolean;
+  readonly nodesObj: string | undefined;
+  readonly placementsObj: string | undefined;
+  readonly objectsObj: string | undefined;
+}
+
+interface Facts {
+  readonly root: RootFacts;
+  readonly nodeKeys: readonly string[];
+  readonly placementKeys: readonly string[];
+  readonly objectKeys: readonly string[];
+  readonly nodes: ReadonlyMap<string, NodeFacts>;
+  readonly placements: ReadonlyMap<string, PlacementFacts>;
+  readonly objects: ReadonlyMap<string, ObjectFacts>;
+}
+
+function rootFacts(r: Reader): RootFacts {
   const root = new Fields(r, "_root", "", "the root");
   const rootProblems: SectionProblem[] = [];
 
@@ -386,89 +414,277 @@ function computeValidation(doc: A.Doc<unknown>): SectionValidation {
     rootProblems.push(...section.out);
     sectionId = r.str(sectionObj, "id");
   }
+  return {
+    problems: rootProblems,
+    sectionId,
+    ready,
+    nodesObj: containers.get("nodes"),
+    placementsObj: containers.get("placements"),
+    objectsObj: containers.get("objects"),
+  };
+}
 
-  const nodesObj = containers.get("nodes");
-  const placementsObj = containers.get("placements");
-  const objectsObj = containers.get("objects");
-  const nodeKeys = nodesObj === undefined ? [] : r.keys(nodesObj);
-  const placementKeys = placementsObj === undefined ? [] : r.keys(placementsObj);
-  const objectKeys = objectsObj === undefined ? [] : r.keys(objectsObj);
-  const nodeSet = new Set(nodeKeys);
-
-  // §14.2, SOP §21: collisions. A key created concurrently twice holds two maps.
-  const collisions = new Set<string>();
-  for (const [obj, keys] of [
-    [nodesObj, nodeKeys],
-    [placementsObj, placementKeys],
-    [objectsObj, objectKeys],
-  ] as const)
-    for (const k of keys) if (obj !== undefined && r.all(obj, k).length > 1) collisions.add(k);
-
-  const kinds = new Map<string, NodeKind>();
-  for (const k of nodeKeys) {
-    const node = nodesObj === undefined ? undefined : r.map(nodesObj, k);
-    const kind = node === undefined ? undefined : r.str(node, "kind");
-    if (kind !== undefined && isNodeKind(kind)) kinds.set(k, kind);
+function nodeFacts(r: Reader, nodesObj: string, k: string): NodeFacts {
+  const collides = r.all(nodesObj, k).length > 1;
+  const obj = r.map(nodesObj, k);
+  const own = obj === undefined ? undefined : r.str(obj, "kind");
+  const kind = own !== undefined && isNodeKind(own) ? own : undefined;
+  const selected = obj === undefined ? [] : r.all(obj, "placement");
+  const at = ref("/nodes", k);
+  const out: SectionProblem[] = [];
+  if (!isObjectId(k))
+    out.push(problem("INVALID_OBJECT_ID", at, "a NodeId key is not a canonical UUIDv7"));
+  if (obj === undefined) {
+    out.push(problem("INVALID_FIELD_TYPE", at, "a node must be a map (§4.2)"));
+    return { collides, map: obj, kind, selected, local: out };
   }
+  const f = new Fields(r, obj, at, "a node");
+  f.required(["id", "kind", "created_by", "lifecycle", "placement", "children", "extensions"]);
+  if (kind === "task") f.required(["task_id"]);
+  if (kind !== undefined && TEXT_KINDS.has(kind)) f.required(["text"]);
+  if (f.has("id")) f.id(k);
+  if (f.has("kind"))
+    f.scalar(
+      "kind",
+      isNodeKind,
+      "INVALID_ENUM_VALUE",
+      "is not task, paragraph, item or raw (§4.2)",
+      true,
+    );
+  if (f.has("created_by")) f.createdBy();
+  f.createdAt();
+  if (f.has("lifecycle"))
+    f.scalar(
+      "lifecycle",
+      (s) => (kind === "task" ? s === "active" : LIFECYCLES.has(s)),
+      "INVALID_ENUM_VALUE",
+      kind === "task"
+        ? "of a task node is always active; its Task holds the lifecycle (§4.2)"
+        : "is not active or deleted (§9)",
+      false,
+    );
+  if (f.has("placement"))
+    f.scalar(
+      "placement",
+      isObjectId,
+      "INVALID_OBJECT_ID",
+      "is not a canonical UUIDv7 PlacementId",
+      false,
+    );
+  if (f.has("children")) f.list("children");
+  if (f.has("extensions")) f.extensions();
+  // task_id on task nodes only, equal to the node's ID.
+  if (f.has("task_id")) {
+    if (kind !== undefined && kind !== "task")
+      f.out.push(
+        problem("INVALID_FIELD_TYPE", ref(at, "task_id"), "only a task node has task_id (§4.2)"),
+      );
+    else {
+      f.scalar("task_id", isObjectId, "INVALID_OBJECT_ID", "is not a canonical UUIDv7", true);
+      const taskId = r.str(obj, "task_id");
+      if (taskId !== undefined && isObjectId(taskId) && taskId !== k)
+        f.out.push(
+          problem(
+            "OBJECT_ID_MISMATCH",
+            ref(at, "task_id"),
+            "a task node's ID differs from its task_id (§4.2)",
+          ),
+        );
+    }
+  }
+  // text: collaborative Text on paragraph, item and raw nodes; absent on task nodes.
+  const texts = r.all(obj, "text");
+  if (kind === "task" && texts.length > 0)
+    f.out.push(problem("INVALID_FIELD_TYPE", ref(at, "text"), "a task node has no text (§4.2)"));
+  else if (texts.some((v) => v[0] !== "text"))
+    f.out.push(
+      problem("INVALID_FIELD_TYPE", ref(at, "text"), "text must be collaborative Text (§4.2)"),
+    );
+  // list_style on task and item nodes only.
+  if (f.has("list_style")) {
+    if (kind === "paragraph" || kind === "raw")
+      f.out.push(
+        problem(
+          "INVALID_FIELD_TYPE",
+          ref(at, "list_style"),
+          "only task and item nodes have list_style (§4.2)",
+        ),
+      );
+    else
+      f.scalar(
+        "list_style",
+        (s) => (LIST_STYLES as readonly string[]).includes(s),
+        "INVALID_ENUM_VALUE",
+        "is not bullet or ordered (§4.2)",
+        false,
+      );
+  }
+  out.push(...f.out);
+  return { collides, map: obj, kind, selected, local: out };
+}
 
+function placementFacts(r: Reader, placementsObj: string, k: string): PlacementFacts {
+  const collides = r.all(placementsObj, k).length > 1;
+  const at = ref("/placements", k);
+  const obj = r.map(placementsObj, k);
+  const out: SectionProblem[] = [];
+  if (!isObjectId(k))
+    out.push(problem("INVALID_OBJECT_ID", at, "a PlacementId key is not a canonical UUIDv7"));
+  if (obj === undefined) {
+    out.push(problem("INVALID_FIELD_TYPE", at, "a placement must be a map (§4.3)"));
+    return { collides, map: obj, local: out, nodeId: undefined, parentId: undefined };
+  }
+  const f = new Fields(r, obj, at, "a placement");
+  f.required(["id", "node_id", "parent_id", "created_by"]);
+  if (f.has("id")) f.id(k);
+  for (const field of ["node_id", "parent_id"])
+    if (f.has(field))
+      f.scalar(field, isObjectId, "INVALID_OBJECT_ID", "is not a canonical UUIDv7", true);
+  if (f.has("created_by")) f.createdBy();
+  out.push(...f.out);
+  return {
+    collides,
+    map: obj,
+    local: out,
+    nodeId: r.str(obj, "node_id"),
+    parentId: r.str(obj, "parent_id"),
+  };
+}
+
+function objectFacts(doc: A.Doc<unknown>, r: Reader, objectsObj: string, k: string): ObjectFacts {
+  const values = r.all(objectsObj, k);
+  const collides = values.length > 1;
+  const map = r.map(objectsObj, k);
+  const type = map === undefined ? undefined : r.str(map, "type");
+  if (collides) return { collides, map, type, problems: undefined };
   // Objects: SOP Tasks and preserved unknown Shared Objects (§2, §3).
-  const objects = new Map<string, readonly ProfileProblem[]>();
-  for (const k of objectKeys) {
-    if (objectsObj === undefined || collisions.has(k)) continue;
-    const values = r.all(objectsObj, k);
-    if (values[0]?.[0] !== "map") {
-      objects.set(k, [
+  if (values[0]?.[0] !== "map")
+    return {
+      collides,
+      map,
+      type,
+      problems: [
         Object.freeze({
           code: "PROFILE_INVALID",
           diagnostic: "INVALID_FIELD_TYPE",
           pointer: ref("/objects", k),
           message: "a Shared Object must be a map",
         }),
-      ]);
-      continue;
+      ],
+    };
+  const stored = (doc as Record<string, Record<string, Record<string, unknown>>>).objects?.[k];
+  const problems = stored === undefined ? [] : storedObjectProblems(doc, stored, k);
+  return {
+    collides,
+    map,
+    type,
+    problems: problems.length > 0 ? Object.freeze(problems) : undefined,
+  };
+}
+
+/** Facts of every entity, or of the `dirty` ones over `base`, whose other entities are unchanged. */
+function readFacts(
+  doc: A.Doc<unknown>,
+  base?: { readonly facts: Facts; readonly dirty: Dirty },
+): Facts {
+  const r = new Reader(doc);
+  const root = rootFacts(r);
+  const reuse =
+    base !== undefined &&
+    base.facts.root.nodesObj === root.nodesObj &&
+    base.facts.root.placementsObj === root.placementsObj &&
+    base.facts.root.objectsObj === root.objectsObj
+      ? base
+      : undefined;
+  const nodeKeys = root.nodesObj === undefined ? [] : r.keys(root.nodesObj);
+  const placementKeys = root.placementsObj === undefined ? [] : r.keys(root.placementsObj);
+  const objectKeys = root.objectsObj === undefined ? [] : r.keys(root.objectsObj);
+  const collect = <F>(
+    keys: readonly string[],
+    obj: string | undefined,
+    old: ReadonlyMap<string, F> | undefined,
+    dirty: ReadonlySet<string> | undefined,
+    read: (obj: string, k: string) => F,
+  ): Map<string, F> => {
+    const out = new Map<string, F>();
+    if (obj === undefined) return out;
+    for (const k of keys) {
+      const kept = dirty?.has(k) ? undefined : old?.get(k);
+      out.set(k, kept ?? read(obj, k));
     }
-    const stored = (doc as Record<string, Record<string, Record<string, unknown>>>).objects?.[k];
-    const problems = stored === undefined ? [] : storedObjectProblems(doc, stored, k);
-    if (problems.length > 0) objects.set(k, Object.freeze(problems));
+    return out;
+  };
+  return {
+    root,
+    nodeKeys,
+    placementKeys,
+    objectKeys,
+    nodes: collect(nodeKeys, root.nodesObj, reuse?.facts.nodes, reuse?.dirty.nodes, (o, k) =>
+      nodeFacts(r, o, k),
+    ),
+    placements: collect(
+      placementKeys,
+      root.placementsObj,
+      reuse?.facts.placements,
+      reuse?.dirty.placements,
+      (o, k) => placementFacts(r, o, k),
+    ),
+    objects: collect(
+      objectKeys,
+      root.objectsObj,
+      reuse?.facts.objects,
+      reuse?.dirty.objects,
+      (o, k) => objectFacts(doc, r, o, k),
+    ),
+  };
+}
+
+/** The validation of a document from its facts: the checks across entities, in document order. */
+function assemble(facts: Facts): SectionValidation {
+  const { root, nodeKeys, placementKeys, objectKeys } = facts;
+  const { sectionId } = root;
+  const nodeSet = new Set(nodeKeys);
+
+  // §14.2, SOP §21: collisions. A key created concurrently twice holds two maps.
+  const collisions = new Set<string>();
+  for (const [keys, of] of [
+    [nodeKeys, facts.nodes],
+    [placementKeys, facts.placements],
+    [objectKeys, facts.objects],
+  ] as const)
+    for (const k of keys)
+      if ((of as ReadonlyMap<string, { collides: boolean }>).get(k)?.collides) collisions.add(k);
+
+  const kinds = new Map<string, NodeKind>();
+  for (const k of nodeKeys) {
+    const kind = facts.nodes.get(k)?.kind;
+    if (kind !== undefined) kinds.set(k, kind);
+  }
+
+  const objects = new Map<string, readonly ProfileProblem[]>();
+  for (const k of objectKeys) {
+    const o = facts.objects.get(k);
+    if (o === undefined || collisions.has(k)) continue;
+    if (o.problems !== undefined) objects.set(k, o.problems);
   }
 
   // §4.3: placements.
   const placements = new Map<string, SectionProblem>();
   for (const k of placementKeys) {
-    if (placementsObj === undefined || collisions.has(k)) continue;
+    const p = facts.placements.get(k);
+    if (p === undefined || collisions.has(k)) continue;
     const at = ref("/placements", k);
-    const obj = r.map(placementsObj, k);
-    const out: SectionProblem[] = [];
-    if (!isObjectId(k))
-      out.push(problem("INVALID_OBJECT_ID", at, "a PlacementId key is not a canonical UUIDv7"));
-    if (obj === undefined) {
-      out.push(problem("INVALID_FIELD_TYPE", at, "a placement must be a map (§4.3)"));
-    } else {
-      const f = new Fields(r, obj, at, "a placement");
-      f.required(["id", "node_id", "parent_id", "created_by"]);
-      if (f.has("id")) f.id(k);
-      for (const field of ["node_id", "parent_id"])
-        if (f.has(field))
-          f.scalar(field, isObjectId, "INVALID_OBJECT_ID", "is not a canonical UUIDv7", true);
-      if (f.has("created_by")) f.createdBy();
-      out.push(...f.out);
-      const node = r.str(obj, "node_id");
-      const parent = r.str(obj, "parent_id");
-      if (out.length === 0) {
-        if (node === undefined || !nodeSet.has(node))
-          out.push(problem("INVALID_REFERENCE", ref(at, "node_id"), "node_id names no node"));
-        if (parent === undefined || (parent !== sectionId && !nodeSet.has(parent)))
-          out.push(
-            problem(
-              "INVALID_REFERENCE",
-              ref(at, "parent_id"),
-              "parent_id names no node or section",
-            ),
-          );
-      }
+    const out = [...p.local];
+    if (out.length === 0 && p.map !== undefined) {
+      if (p.nodeId === undefined || !nodeSet.has(p.nodeId))
+        out.push(problem("INVALID_REFERENCE", ref(at, "node_id"), "node_id names no node"));
+      if (p.parentId === undefined || (p.parentId !== sectionId && !nodeSet.has(p.parentId)))
+        out.push(
+          problem("INVALID_REFERENCE", ref(at, "parent_id"), "parent_id names no node or section"),
+        );
     }
-    const p = first(out);
-    if (p !== undefined) placements.set(k, p);
+    const worst = first(out);
+    if (worst !== undefined) placements.set(k, worst);
   }
 
   // §14.2: a node whose own ID (a Task node's is its Task ID) or selected
@@ -476,118 +692,29 @@ function computeValidation(doc: A.Doc<unknown>): SectionValidation {
   const collided = new Set(
     nodeKeys.filter((k) => {
       if (collisions.has(k)) return true;
-      const node = nodesObj === undefined ? undefined : r.map(nodesObj, k);
-      const selected = node === undefined ? [] : r.all(node, "placement");
+      const selected = facts.nodes.get(k)?.selected ?? [];
       return selected.length === 1 && collisions.has(selected[0]?.[1] as string);
     }),
   );
 
   // §4.2: nodes, then their references.
   const nodes = new Map<string, SectionProblem>();
-  const placementOf = (id: string) =>
-    placementsObj === undefined ? undefined : r.map(placementsObj, id);
   for (const k of nodeKeys) {
-    if (nodesObj === undefined || collided.has(k)) continue;
+    const n = facts.nodes.get(k);
+    if (n === undefined || collided.has(k)) continue;
     const at = ref("/nodes", k);
-    const obj = r.map(nodesObj, k);
-    const out: SectionProblem[] = [];
-    if (!isObjectId(k))
-      out.push(problem("INVALID_OBJECT_ID", at, "a NodeId key is not a canonical UUIDv7"));
-    if (obj === undefined) {
-      out.push(problem("INVALID_FIELD_TYPE", at, "a node must be a map (§4.2)"));
+    const out = [...n.local];
+    if (n.map === undefined) {
       nodes.set(k, first(out) as SectionProblem);
       continue;
     }
-    const f = new Fields(r, obj, at, "a node");
-    const kind = kinds.get(k);
-    f.required(["id", "kind", "created_by", "lifecycle", "placement", "children", "extensions"]);
-    if (kind === "task") f.required(["task_id"]);
-    if (kind !== undefined && TEXT_KINDS.has(kind)) f.required(["text"]);
-    if (f.has("id")) f.id(k);
-    if (f.has("kind"))
-      f.scalar(
-        "kind",
-        isNodeKind,
-        "INVALID_ENUM_VALUE",
-        "is not task, paragraph, item or raw (§4.2)",
-        true,
-      );
-    if (f.has("created_by")) f.createdBy();
-    f.createdAt();
-    if (f.has("lifecycle"))
-      f.scalar(
-        "lifecycle",
-        (s) => (kind === "task" ? s === "active" : LIFECYCLES.has(s)),
-        "INVALID_ENUM_VALUE",
-        kind === "task"
-          ? "of a task node is always active; its Task holds the lifecycle (§4.2)"
-          : "is not active or deleted (§9)",
-        false,
-      );
-    if (f.has("placement"))
-      f.scalar(
-        "placement",
-        isObjectId,
-        "INVALID_OBJECT_ID",
-        "is not a canonical UUIDv7 PlacementId",
-        false,
-      );
-    if (f.has("children")) f.list("children");
-    if (f.has("extensions")) f.extensions();
-    // task_id on task nodes only, equal to the node's ID.
-    if (f.has("task_id")) {
-      if (kind !== undefined && kind !== "task")
-        f.out.push(
-          problem("INVALID_FIELD_TYPE", ref(at, "task_id"), "only a task node has task_id (§4.2)"),
-        );
-      else {
-        f.scalar("task_id", isObjectId, "INVALID_OBJECT_ID", "is not a canonical UUIDv7", true);
-        const taskId = r.str(obj, "task_id");
-        if (taskId !== undefined && isObjectId(taskId) && taskId !== k)
-          f.out.push(
-            problem(
-              "OBJECT_ID_MISMATCH",
-              ref(at, "task_id"),
-              "a task node's ID differs from its task_id (§4.2)",
-            ),
-          );
-      }
-    }
-    // text: collaborative Text on paragraph, item and raw nodes; absent on task nodes.
-    const texts = r.all(obj, "text");
-    if (kind === "task" && texts.length > 0)
-      f.out.push(problem("INVALID_FIELD_TYPE", ref(at, "text"), "a task node has no text (§4.2)"));
-    else if (texts.some((v) => v[0] !== "text"))
-      f.out.push(
-        problem("INVALID_FIELD_TYPE", ref(at, "text"), "text must be collaborative Text (§4.2)"),
-      );
-    // list_style on task and item nodes only.
-    if (f.has("list_style")) {
-      if (kind === "paragraph" || kind === "raw")
-        f.out.push(
-          problem(
-            "INVALID_FIELD_TYPE",
-            ref(at, "list_style"),
-            "only task and item nodes have list_style (§4.2)",
-          ),
-        );
-      else
-        f.scalar(
-          "list_style",
-          (s) => (LIST_STYLES as readonly string[]).includes(s),
-          "INVALID_ENUM_VALUE",
-          "is not bullet or ordered (§4.2)",
-          false,
-        );
-    }
-    out.push(...f.out);
 
     // §14.2 references, for an otherwise valid node.
     if (out.length === 0) {
-      if (kind === "task") {
-        const task = objectsObj === undefined ? undefined : r.map(objectsObj, k);
+      if (n.kind === "task") {
+        const task = facts.objects.get(k);
         const taskProblems = objects.get(k);
-        if (task === undefined || r.str(task, "type") !== "task")
+        if (task?.map === undefined || task.type !== "task")
           out.push(
             problem("INVALID_REFERENCE", ref(at, "task_id"), "task_id names no Task (§4.2)"),
           );
@@ -608,11 +735,10 @@ function computeValidation(doc: A.Doc<unknown>): SectionValidation {
         }
       }
       // Only an unconflicted placement selects a parent (§7); a conflict is a fact, not a problem.
-      const selected = r.all(obj, "placement");
-      if (selected.length === 1) {
-        const pid = selected[0]?.[1] as string;
-        const placement = placementOf(pid);
-        if (placement === undefined || placements.has(pid))
+      if (n.selected.length === 1) {
+        const pid = n.selected[0]?.[1] as string;
+        const placement = facts.placements.get(pid);
+        if (placement?.map === undefined || placements.has(pid))
           out.push(
             problem(
               "INVALID_REFERENCE",
@@ -620,12 +746,12 @@ function computeValidation(doc: A.Doc<unknown>): SectionValidation {
               "placement names no valid placement",
             ),
           );
-        else if (r.str(placement, "node_id") !== k)
+        else if (placement.nodeId !== k)
           out.push(
             problem("INVALID_REFERENCE", ref(at, "placement"), "placement belongs to another node"),
           );
         else {
-          const parent = r.str(placement, "parent_id") as string;
+          const parent = placement.parentId as string;
           // Under a collided parent the node is blocked (§7), not invalid.
           if (parent !== sectionId && !collided.has(parent)) {
             const parentKind = kinds.get(parent);
@@ -641,14 +767,14 @@ function computeValidation(doc: A.Doc<unknown>): SectionValidation {
         }
       }
     }
-    const p = first(out);
-    if (p !== undefined) nodes.set(k, p);
+    const worst = first(out);
+    if (worst !== undefined) nodes.set(k, worst);
   }
 
-  const state = rootProblems.length > 0 ? "invalid" : ready ? "ready" : "importing";
+  const state = root.problems.length > 0 ? "invalid" : root.ready ? "ready" : "importing";
   return Object.freeze({
     state,
-    problems: Object.freeze(rootProblems),
+    problems: Object.freeze([...root.problems]),
     sectionId,
     nodes,
     placements,
@@ -656,4 +782,77 @@ function computeValidation(doc: A.Doc<unknown>): SectionValidation {
     collisions: Object.freeze([...collisions].sort()),
     collided: Object.freeze([...collided].sort()),
   });
+}
+
+/** The entities a range of changes touched, by the patches of A.diff. */
+interface Dirty {
+  readonly nodes: ReadonlySet<string>;
+  readonly placements: ReadonlySet<string>;
+  readonly objects: ReadonlySet<string>;
+}
+
+/** Null when a patch is above an entity (a container replaced): read everything again. */
+function dirtyOf(patches: readonly A.Patch[]): Dirty | null {
+  const dirty = {
+    nodes: new Set<string>(),
+    placements: new Set<string>(),
+    objects: new Set<string>(),
+  };
+  for (const p of patches) {
+    const [container, key] = p.path;
+    if (container === "nodes" || container === "placements" || container === "objects") {
+      if (typeof key !== "string") return null;
+      dirty[container].add(key);
+    }
+    // Any other path is the root or the section, read again on every validation.
+  }
+  return dirty;
+}
+
+/** Validations by document object, and the latest few by heads (a clone has the heads of its source). */
+const byDoc = new WeakMap<object, SectionValidation>();
+const byHeads = new Map<string, SectionValidation>();
+/** The facts of the latest validations, to validate a later revision of one of them incrementally. */
+const bases: { heads: A.Heads; facts: Facts }[] = [];
+const KEPT = 8;
+
+/**
+ * Validates a section document (§3, §4, §14.2). Reads only; the document is
+ * unchanged. A document's heads determine its content, so a validation is
+ * computed once per heads: committing and then reading one revision (or a
+ * clone of it) validates it once. A later revision of a document validated
+ * before reads again only the nodes, placements and objects its changes
+ * touched (A.diff); the checks across entities run in full each time.
+ */
+export function validateSection(doc: A.Doc<unknown>): SectionValidation {
+  const known = byDoc.get(doc);
+  if (known !== undefined) return known;
+  const heads = A.getHeads(doc);
+  const key = heads.slice().sort().join(",");
+  let v = byHeads.get(key);
+  if (v === undefined) {
+    const facts = factsOf(doc, heads);
+    v = assemble(facts);
+    byHeads.set(key, v);
+    if (byHeads.size > KEPT) byHeads.delete(byHeads.keys().next().value as string);
+    bases.unshift({ heads, facts });
+    if (bases.length > KEPT) bases.pop();
+  }
+  byDoc.set(doc, v);
+  return v;
+}
+
+function factsOf(doc: A.Doc<unknown>, heads: A.Heads): Facts {
+  for (const base of bases) {
+    if (!A.hasHeads(doc, base.heads)) continue;
+    const dirty = dirtyOf(A.diff(doc, base.heads, heads));
+    if (dirty === null) break;
+    return readFacts(doc, { facts: base.facts, dirty });
+  }
+  return readFacts(doc);
+}
+
+/** Validates without the per-revision cache and the incremental path: for tests. */
+export function validateSectionInFull(doc: A.Doc<unknown>): SectionValidation {
+  return assemble(readFacts(doc));
 }
