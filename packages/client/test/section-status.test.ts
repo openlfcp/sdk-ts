@@ -173,6 +173,8 @@ async function device(
   chain: ReturnType<typeof chainFor>,
   /** How many of the chain's records the device knows (default all). */
   known = chain.records.length,
+  /** The Snapshot policy; with it the Resource gets a Snapshot binding. */
+  snapshotPolicy?: (resource: unknown, units: number) => boolean,
 ) {
   const storage = new InMemoryLfcpStorage();
   const secrets = new InMemorySecretStore();
@@ -231,6 +233,7 @@ async function device(
     now: () => clock.t,
     webSocket: server.factory,
     reconnect: () => 1000,
+    ...(snapshotPolicy === undefined ? {} : { snapshotPolicy }),
   });
   const events: StatusEvent[] = [];
   sync.on((e) => {
@@ -244,6 +247,9 @@ async function device(
       handlers: [handler as DataProfileHandler<unknown>],
     }),
     commit: commit as CommitBinding<unknown>,
+    ...(snapshotPolicy === undefined
+      ? {}
+      : { snapshot: { codec: TEXT, load: () => {}, current: () => "state" } as never }),
   });
   const live = async () => {
     sync.start();
@@ -599,5 +605,23 @@ describe("catch-up (LFCP-02-028)", () => {
       ["receiving", 5_000],
       ["current-at-checkpoint", 7_000],
     ]);
+  });
+});
+
+describe("the Snapshot policy (LFCP-02-097)", () => {
+  it("counts the units this client commits, so a section's only writer reaches it", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(232);
+    serve(server, chain);
+    const asked: number[] = [];
+    const d = await device(server, chain, chain.records.length, (_, n) => {
+      asked.push(n);
+      return false;
+    });
+    await d.live();
+    await d.sync.commit(chain.R, ["a", "b"], { operationId: "op-1" });
+    await d.sync.commit(chain.R, ["c"], { operationId: "op-2" });
+    await d.at(1_000);
+    expect(asked.at(-1)).toBe(3);
   });
 });

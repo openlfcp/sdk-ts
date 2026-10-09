@@ -166,6 +166,9 @@ remove or rename any.
   continues the sequence. A section Resource is added beside it with its
   own profile and actor. A 0.1.x client then refuses the store. README
   "Local storage upgrades" gives the version matrix.
+- `SyncClient`'s `snapshotPolicy` now counts the units this client commits
+  through `commit`, not only the units it receives. A section's only
+  writer reaches its threshold and publishes Snapshots.
 
 ## 0.1.3 — 2026-10-08
 

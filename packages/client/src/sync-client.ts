@@ -263,7 +263,8 @@ export interface SyncClientOptions {
   readonly dataProfiles?: readonly string[];
   /**
    * Whether to publish a Snapshot of a LIVE Resource now, asked on every
-   * tick with the number of units merged since the last one; no automatic
+   * tick with the number of units merged since the last one, received or
+   * committed here (a section's only writer reaches it too); no automatic
    * schedule otherwise (publishSnapshot can also be called directly).
    */
   readonly snapshotPolicy?: (resourceId: ResourceId, unitsSinceLast: number) => boolean;
@@ -1979,6 +1980,8 @@ export class SyncClient {
       if (!committed) staged?.revert();
       else staged?.committed(receipt.unitIds);
       if (committed) {
+        // Our own units grow the history a Snapshot covers, as received ones do.
+        ctx.unitsSinceSnapshot += receipt.unitIds.length;
         await this.#reportBatches(R, [receipt.operationId]);
         this.#refreshSection(ctx);
       }
