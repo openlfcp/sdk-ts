@@ -763,6 +763,24 @@ export class SectionReplica {
     return revisionOf(this.#doc);
   }
 
+  /**
+   * The Shared Objects (by ID) that changes since `revision`, an earlier
+   * revision() of this document, wrote: a Task's fields, conflicts
+   * included, live there and not in its node. From A.diff, without reading
+   * the document; undefined when this document does not hold `revision`
+   * (a rebuild, or another document).
+   */
+  objectsTouchedSince(revision: string): readonly string[] | undefined {
+    const heads = revision === "" ? [] : revision.split(",");
+    if (!A.hasHeads(this.#doc, heads)) return undefined;
+    const out = new Set<string>();
+    for (const p of A.diff(this.#doc, heads, A.getHeads(this.#doc))) {
+      const [container, key] = p.path;
+      if (container === "objects" && typeof key === "string") out.add(key);
+    }
+    return [...out].sort();
+  }
+
   save(): Uint8Array {
     return A.save(this.#doc);
   }

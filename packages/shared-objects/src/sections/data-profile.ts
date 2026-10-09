@@ -148,6 +148,53 @@ function changed(before: Map<string, string>, after: Map<string, string>): strin
   return [...ids].filter((id) => id !== "" && before.get(id) !== after.get(id)).sort();
 }
 
+/** A replica's state before a merge, a Snapshot load or a rebuild: what nodesChanged compares with. */
+interface Before {
+  readonly replica: SectionReplica;
+  readonly revision: string;
+  readonly fingerprints: Map<string, string>;
+}
+
+const stateOf = (replica: SectionReplica): Before => ({
+  replica,
+  revision: replica.revision(),
+  fingerprints: fingerprints(replica.snapshot()),
+});
+
+/**
+ * The nodes that changed from `before` to `to`, by the rule of a receipt's
+ * affectedNodeIds (SDK-SECTIONS-INTEGRATION-01 §3): a node whose fields,
+ * Text, placement or lifecycle changed, a task node whose Task's fields
+ * changed (they live in the Task object, not in the node), and the section
+ * when its title changed.
+ */
+function nodesChanged(before: Before, to: SectionReplica): string[] {
+  const after = fingerprints(to.snapshot());
+  const ids = new Set(changed(before.fingerprints, after));
+  if (before.fingerprints.get("") !== after.get("")) {
+    const section = to.validate().sectionId ?? before.replica.validate().sectionId;
+    if (section !== undefined) ids.add(section);
+  }
+  // A task node's ID is its Task's (§4.2): the Tasks the changes wrote, by A.diff where the
+  // document still holds the earlier revision, else (a rebuild) by comparing each Task.
+  const isNode = (id: string) => before.fingerprints.has(id) || after.has(id);
+  const nodes = [...new Set([...before.fingerprints.keys(), ...after.keys()])].filter(
+    (id) => id !== "",
+  );
+  const tasks =
+    to.objectsTouchedSince(before.revision) ??
+    // The same replica changed in place without its earlier revision: no state
+    // to compare with, so every task node is reported, never one missed.
+    (before.replica === to
+      ? nodes.filter((id) => to.task(id) !== undefined)
+      : nodes.filter(
+          (id) =>
+            JSON.stringify(before.replica.task(id) ?? null) !== JSON.stringify(to.task(id) ?? null),
+        ));
+  for (const id of tasks) if (isNode(id)) ids.add(id);
+  return [...ids].sort();
+}
+
 export class SharedSectionsDataProfile {
   readonly dataProfile = SECTIONS_PROFILE_ID;
   #replica: SectionReplica;
@@ -306,7 +353,7 @@ export class SharedSectionsDataProfile {
     const offered = [...this.#pending.values()];
     const unitsOf = new Map<string, Buffered[]>();
     for (const b of offered) unitsOf.set(b.change.hash, [...(unitsOf.get(b.change.hash) ?? []), b]);
-    const before = fingerprints(this.#replica.snapshot());
+    const before = stateOf(this.#replica);
     const out = this.#replica.receiveChanges(offered.map((b) => b.change.bytes));
     const merged: DataUnitId[] = [];
     const settle = (hash: string, to: "merged" | "held" | "pending") => {
@@ -337,8 +384,7 @@ export class SharedSectionsDataProfile {
           });
         }
     }
-    const objects =
-      merged.length > 0 ? changed(before, fingerprints(this.#replica.snapshot())) : [];
+    const objects = merged.length > 0 ? nodesChanged(before, this.#replica) : [];
     this.#emit(objects, "remote");
     return Object.freeze({
       merged: Object.freeze(merged),
@@ -368,7 +414,7 @@ export class SharedSectionsDataProfile {
       }
     }
     if (hashes.length === 0) return Object.freeze({ objects: [], pending: [], released: [] });
-    const before = fingerprints(this.#replica.snapshot());
+    const before = stateOf(this.#replica);
     const { replica, unapplied } = this.#replica.rebuildWithout(hashes);
     this.#replica = replica;
     const waiting = new Set(unapplied);
@@ -378,7 +424,7 @@ export class SharedSectionsDataProfile {
       this.#merged.delete(key);
       pending.push(m.unitId);
     }
-    const objects = changed(before, fingerprints(this.#replica.snapshot()));
+    const objects = nodesChanged(before, this.#replica);
     this.#emit(objects, "rebuild");
     const heldBefore = new Set(this.#held.keys());
     const retried = heldBefore.size > 0 ? this.#offer(true) : undefined;
@@ -430,10 +476,10 @@ export class SharedSectionsDataProfile {
     readonly nodeIds: readonly string[];
     readonly merged: readonly DataUnitId[];
   } {
-    const before = fingerprints(this.#replica.snapshot());
+    const before = stateOf(this.#replica);
     this.#replica = this.#replica.mergeSave(save);
     const merged = [...this.#offer(false).merged];
-    const nodeIds = changed(before, fingerprints(this.#replica.snapshot()));
+    const nodeIds = nodesChanged(before, this.#replica);
     this.#emit(nodeIds, "remote");
     return Object.freeze({ nodeIds: Object.freeze(nodeIds), merged: Object.freeze(merged) });
   }
@@ -451,12 +497,12 @@ export class SharedSectionsDataProfile {
 
   /** Forgets the whole state, keeping the §9 sequence (SNAP-EP). */
   reset(): void {
-    const before = fingerprints(this.#replica.snapshot());
+    const before = stateOf(this.#replica);
     this.#replica = this.#replica.emptied();
     this.#merged.clear();
     this.#pending.clear();
     this.#held.clear();
-    this.#emit(changed(before, fingerprints(this.#replica.snapshot())), "rebuild");
+    this.#emit(nodesChanged(before, this.#replica), "rebuild");
   }
 
   /**

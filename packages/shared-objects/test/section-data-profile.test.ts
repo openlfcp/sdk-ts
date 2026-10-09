@@ -72,8 +72,9 @@ describe("SharedSectionsDataProfile", () => {
     expect(p.pendingUnits().map(toHex)).toEqual([toHex(unit(2).unitId)]);
     const r = p.apply(unit(1), changes[0] as never);
     expect(r.merged.map(toHex)).toEqual([unit(1).unitId, unit(2).unitId].map(toHex));
-    expect(r.objects).toEqual([T]);
-    expect(events.at(-1)).toMatchObject({ nodeIds: [T], origin: "remote" });
+    // The section's title appears with section.create (§3: the section when its title is written).
+    expect(r.objects).toEqual([SECTION, T]);
+    expect(events.at(-1)).toMatchObject({ nodeIds: [SECTION, T], origin: "remote" });
   });
 
   it("rejects a change the section admission refuses, and keeps the rest", () => {
@@ -138,5 +139,79 @@ describe("SharedSectionsDataProfile", () => {
     staged?.apply();
     p.recordLocal(unit(1).unitId, staged?.change as never);
     expect(p.checkpoint().units).toEqual([{ unitId: unit(1).unitId, ref: staged?.change.hash }]);
+  });
+
+  describe("nodes changed by a remote change (§5; affectedNodeIds rule of §3)", () => {
+    /** Bob's profile holding Alice's section, and a way to deliver Alice's next change to it. */
+    function shared() {
+      const { r, changes } = written();
+      const p = bobProfile();
+      changes.forEach((c, i) => p.apply(unit(i + 1), c as never));
+      const events: SectionsNodesChanged[] = [];
+      p.onNodesChanged((e) => events.push(e));
+      let n = 10;
+      const deliver = (intents: SectionIntent[]) => {
+        const change = checkChange(r.commit(intents)?.change as Uint8Array);
+        p.apply(unit(n++), change as never);
+        return events.at(-1);
+      };
+      return { p, r, events, deliver };
+    }
+
+    const taskIntents: [string, SectionIntent][] = [
+      ["title", { intent: "task.set_title", id: T as never, title: "T by Alice" }],
+      ["status", { intent: "task.set_status", id: T as never, status: "in_progress" }],
+      ["completion", { intent: "task.complete", id: T as never, completionDate: "2026-10-09" }],
+      ["due date", { intent: "task.set_due", id: T as never, date: "2026-10-20" }],
+      ["priority", { intent: "task.set_priority", id: T as never, priority: "high" }],
+      ["tag", { intent: "task.add_tag", id: T as never, tag: "launch" }],
+    ];
+    for (const [field, intent] of taskIntents)
+      it(`reports the task node when a Task's ${field} changes`, () => {
+        const { deliver } = shared();
+        expect(deliver([intent])).toMatchObject({ nodeIds: [T], origin: "remote" });
+      });
+
+    it("reports the section when its title changes", () => {
+      const { deliver } = shared();
+      expect(deliver([{ intent: "section.set_title", title: "S by Alice" }])).toMatchObject({
+        nodeIds: [SECTION],
+        origin: "remote",
+      });
+    });
+
+    it("reports the task node when concurrent titles put the field in conflict", () => {
+      const { p, deliver } = shared();
+      p.replica.commit([{ intent: "task.set_title", id: T as never, title: "T by Bob" }]);
+      const e = deliver([{ intent: "task.set_title", id: T as never, title: "T by Alice" }]);
+      expect(e).toMatchObject({ nodeIds: [T], origin: "remote" });
+      expect(p.replica.task(T)?.fields.title.conflicted).toBe(true);
+    });
+
+    it("leaves the local path as it was: a staged batch reports its affectedNodeIds", () => {
+      const r = SectionReplica.empty({ resource, principal: alice });
+      const p = new SharedSectionsDataProfile(r);
+      const events: SectionsNodesChanged[] = [];
+      p.onNodesChanged((e) => events.push(e));
+      const binding = p.commitBinding(alice);
+      const commitLocal = (intents: SectionIntent[]) => {
+        const staged = binding.stage(intents);
+        staged?.apply();
+        staged?.committed(staged.values.map((_, i) => unit(40 + events.length + i).unitId));
+        return events.at(-1);
+      };
+      commitLocal([{ intent: "section.create", sectionId: SECTION, title: "S", createdBy: alice }]);
+      commitLocal([
+        {
+          intent: "task.create_in_section",
+          task: createTask({ id: T as never, title: "T", createdBy: alice }).task,
+          parent: SECTION,
+          after: null,
+        },
+      ]);
+      expect(
+        commitLocal([{ intent: "task.set_title", id: T as never, title: "T2" }]),
+      ).toMatchObject({ nodeIds: [T], origin: "local" });
+    });
   });
 });
