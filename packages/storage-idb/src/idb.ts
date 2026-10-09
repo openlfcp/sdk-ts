@@ -23,11 +23,18 @@ import {
   type EpochRow,
   type KeyPackageRow,
   type LfcpStorage,
+  type LocalStateCipher,
+  type LocalStateDiagnostics,
+  LocalStateKeyring,
+  type LocalStateMeta,
   nextActorSequence,
   type OutboundItem,
   type ProfileCheckpoint,
+  type ResealRow,
   type ResourceRow,
   type RouteRow,
+  reseal,
+  type SecretStore,
   type SeenRecord,
   type SnapshotRow,
   type SnapshotSequenceReservation,
@@ -93,7 +100,26 @@ export interface IdbStorageOptions {
    * fails and its value is abandoned, never reissued.
    */
   readonly onReserved?: (reserved: ReservedSequence) => void;
+  /**
+   * Local state encrypted at rest (LFCP-02-098): the SecretStore that holds
+   * the install's local state key, and the cipher (`localStateCipher` of
+   * @openlfcp/crypto). Profile checkpoints are then stored as `lse1`
+   * envelopes. A database that seals its local state cannot be opened
+   * without it.
+   */
+  readonly localState?: IdbLocalState;
 }
+
+export interface IdbLocalState {
+  readonly secrets: SecretStore;
+  readonly cipher: LocalStateCipher;
+  /** The clock of the diagnostics' events (default: the system clock). */
+  readonly now?: () => Date;
+}
+
+/** The meta key of the local state encryption metadata; the store name of checkpoints in their AAD. */
+const LOCAL_STATE = "local-state";
+const CHECKPOINTS = "checkpoints";
 
 const hex = toHex;
 /** uint64 as a fixed-width decimal string, so key order is numeric order. */
@@ -207,10 +233,13 @@ function upgrade(db: IDBDatabase): void {
 export class IdbLfcpStorage implements LfcpStorage {
   readonly #db: IDBDatabase;
   readonly #onReserved: ((r: ReservedSequence) => void) | undefined;
+  readonly #localState: IdbLocalState | undefined;
+  #keyring: LocalStateKeyring | null = null;
 
   private constructor(db: IDBDatabase, options: IdbStorageOptions) {
     this.#db = db;
     this.#onReserved = options.onReserved;
+    this.#localState = options.localState;
   }
 
   /** Opens (creating or upgrading) the database `name`. */
@@ -228,7 +257,126 @@ export class IdbLfcpStorage implements LfcpStorage {
           new LfcpError("UNSUPPORTED_VALUE", `IndexedDB ${name} is blocked by another connection`),
         );
     });
-    return new IdbLfcpStorage(db, options);
+    const storage = new IdbLfcpStorage(db, options);
+    try {
+      await storage.#startLocalState();
+    } catch (e) {
+      db.close();
+      throw e;
+    }
+    return storage;
+  }
+
+  #now(): string {
+    return (this.#localState?.now?.() ?? new Date()).toISOString();
+  }
+
+  /**
+   * LFCP-02-098: with `localState`, prepares the keyring (the key goes to the
+   * SecretStore before the metadata that names it), then migrates, or
+   * continues a half-done migration or rotation. Without it, a database that
+   * seals its local state is refused.
+   */
+  async #startLocalState(): Promise<void> {
+    const stored = (await this.meta.get(LOCAL_STATE)) as LocalStateMeta | undefined;
+    const local = this.#localState;
+    if (local === undefined) {
+      if (stored !== undefined)
+        throw new LfcpError(
+          "UNSUPPORTED_VALUE",
+          "this database seals its local state: open it with the localState option",
+        );
+      return;
+    }
+    const keyring = await LocalStateKeyring.prepare(
+      local.cipher,
+      local.secrets,
+      stored,
+      this.#now(),
+    );
+    if (JSON.stringify(keyring.meta) !== JSON.stringify(stored))
+      await this.meta.put(LOCAL_STATE, keyring.meta);
+    this.#keyring = keyring;
+    if (keyring.meta.phase !== "ready") await this.#finishPhase();
+  }
+
+  /**
+   * Seals every checkpoint the current phase needs, in resumable batches,
+   * then records the phase as ready and removes a key a rotation retired. A
+   * batch writes a row only if it still holds the bytes it read, so a
+   * checkpoint committed meanwhile is never overwritten.
+   */
+  async #finishPhase(): Promise<void> {
+    const keyring = this.#keyring as LocalStateKeyring;
+    const read = new Map<string, Uint8Array>();
+    const scan = (after: string | null, limit: number): Promise<ResealRow[]> =>
+      this.#tx(["checkpoints"], "readonly", async (tx) => {
+        const range = after === null ? undefined : IDBKeyRange.lowerBound(after, true);
+        const values = (await req(
+          tx.objectStore("checkpoints").getAll(range, limit),
+        )) as ProfileCheckpoint[];
+        return values.map((c) => {
+          const key = hex(c.resourceId);
+          read.set(key, c.state);
+          return { store: CHECKPOINTS, key, bytes: Uint8Array.from(c.state) };
+        });
+      });
+    const write = (rows: readonly ResealRow[]): Promise<void> =>
+      this.#tx(["checkpoints"], "readwrite", async (tx) => {
+        const store = tx.objectStore("checkpoints");
+        for (const r of rows) {
+          const now = (await req(store.get(r.key))) as ProfileCheckpoint | undefined;
+          const before = read.get(r.key);
+          if (now === undefined || before === undefined || !bytesEqual(now.state, before)) continue;
+          await req(store.put({ ...now, state: r.bytes }, r.key));
+        }
+      });
+    await reseal(keyring, scan, write);
+    const retired = keyring.retired;
+    const finished = keyring.finished(this.#now());
+    await this.meta.put(LOCAL_STATE, finished.meta);
+    this.#keyring = finished;
+    // The old key goes last: a crash before this line leaves it, harmlessly.
+    if (retired !== null) await (this.#localState as IdbLocalState).secrets.delete(retired);
+  }
+
+  /**
+   * Rotates the local state key (LFCP-02-098 §8): writes the next
+   * generation's key, seals every checkpoint again, then removes the old
+   * key. Resumed on the next open after a crash.
+   */
+  async rotateLocalStateKey(): Promise<void> {
+    if (this.#keyring === null || this.#localState === undefined)
+      throw new LfcpError("UNSUPPORTED_VALUE", "this database was not opened with localState");
+    this.#keyring = await this.#keyring.rotate(this.#localState.secrets, this.#now());
+    await this.meta.put(LOCAL_STATE, this.#keyring.meta);
+    await this.#finishPhase();
+  }
+
+  /** The local state encryption status, or null when the database was opened without it. */
+  async localStateDiagnostics(): Promise<LocalStateDiagnostics | null> {
+    const keyring = this.#keyring;
+    if (keyring === null) return null;
+    const values = await this.#tx(
+      ["checkpoints"],
+      "readonly",
+      async (tx) => (await req(tx.objectStore("checkpoints").getAll())) as ProfileCheckpoint[],
+    );
+    const rows = { sealed: 0, plaintext: 0, unreadable: 0 };
+    for (const c of values) {
+      const opened = keyring.open(CHECKPOINTS, hex(c.resourceId), c.state);
+      if (opened.kind === "plain") rows.plaintext++;
+      else if (opened.kind === "opened") rows.sealed++;
+      else rows.unreadable++;
+    }
+    return Object.freeze({
+      scheme: keyring.meta.scheme,
+      generation: keyring.meta.generation,
+      keyPresent: keyring.keyPresent,
+      phase: keyring.meta.phase,
+      rows: Object.freeze(rows),
+      lastEvent: keyring.meta.lastEvent,
+    });
   }
 
   /** Closes the connection; later calls fail. */
@@ -480,9 +628,15 @@ export class IdbLfcpStorage implements LfcpStorage {
       case "dequeue":
         await req(s("outbound").delete(hex(w.itemId)));
         return;
-      case "put-profile-checkpoint":
-        await req(s("checkpoints").put(w.checkpoint, hex(w.checkpoint.resourceId)));
+      case "put-profile-checkpoint": {
+        const key = hex(w.checkpoint.resourceId);
+        const state =
+          this.#keyring === null
+            ? w.checkpoint.state
+            : this.#keyring.seal(CHECKPOINTS, key, w.checkpoint.state);
+        await req(s("checkpoints").put({ ...w.checkpoint, state }, key));
         return;
+      }
       case "put-sync-state":
         await req(s("syncStates").put(w.row, hex(w.row.resourceId)));
         return;
@@ -733,8 +887,14 @@ export class IdbLfcpStorage implements LfcpStorage {
   };
 
   readonly profileState = {
-    checkpoint: (resource: ResourceId) =>
-      this.#get<ProfileCheckpoint>("checkpoints", hex(resource)),
+    checkpoint: async (resource: ResourceId): Promise<ProfileCheckpoint | undefined> => {
+      const row = await this.#get<ProfileCheckpoint>("checkpoints", hex(resource));
+      if (row === undefined || this.#keyring === null) return row;
+      const opened = this.#keyring.open(CHECKPOINTS, hex(resource), row.state);
+      // Sealed under a lost key: absent, rebuilt from the stored units.
+      if (opened.kind === "unreadable") return undefined;
+      return Object.freeze({ ...row, state: opened.bytes });
+    },
   };
 
   readonly syncState = {

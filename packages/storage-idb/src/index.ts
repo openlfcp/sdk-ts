@@ -6,4 +6,9 @@
  */
 export const PACKAGE = "@openlfcp/storage-idb";
 
-export { IdbLfcpStorage, type IdbStorageOptions, type ReservedSequence } from "./idb.js";
+export {
+  IdbLfcpStorage,
+  type IdbLocalState,
+  type IdbStorageOptions,
+  type ReservedSequence,
+} from "./idb.js";
