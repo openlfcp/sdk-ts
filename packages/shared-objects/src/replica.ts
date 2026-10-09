@@ -400,6 +400,46 @@ function conflictValueProblems(object: AMap, key: string): ProfileProblem[] {
 }
 
 /**
+ * §99: the Task under `id` of `objects` (the document's `objects` map) with
+ * conflict metadata, or undefined if there is no object or it is not a Task.
+ * Shared by the Shared Objects and the Shared Sections replicas.
+ */
+export function taskView(
+  doc: A.Doc<unknown>,
+  objects: AMap | undefined,
+  id: string,
+): TaskView | undefined {
+  const stored = objects?.[id];
+  if (objects === undefined || !isMap(stored as Json)) return undefined;
+  const object = stored as AMap;
+  if (plain(object.type) !== "task") return undefined;
+  const collided = A.getConflicts(objects, id) !== undefined;
+  const problems = storedObjectProblems(doc, object, id);
+  const parsed = parseTask(plain(object), id);
+  const field = (f: string): ScalarView => {
+    const values = valuesOf(object, f).map(plain).sort(byJson);
+    return Object.freeze({
+      value: f in object ? plain(object[f]) : undefined,
+      values: Object.freeze(values),
+      conflicted: values.length > 1,
+    });
+  };
+  const keys = (f: string): string[] =>
+    isMap(plain(object[f])) ? Object.keys(plain(object[f]) as object).sort() : [];
+  return Object.freeze({
+    id,
+    status: collided ? "object_id_collision" : problems.length > 0 ? "profile_invalid" : "ready",
+    problems: Object.freeze(problems),
+    task: parsed.valid ? parsed.task : undefined,
+    fields: Object.freeze(
+      Object.fromEntries(SCALAR_FIELDS.map((f) => [f, field(f)])),
+    ) as TaskView["fields"],
+    tags: Object.freeze(keys("tags")),
+    assignees: Object.freeze(keys("assignees")),
+  });
+}
+
+/**
  * §74.1 problems of one object as stored at `/objects/<id>` of `doc`: its
  * logical values, every collaborative Text in it (§30) and every concurrent
  * value of its scalar registers (§45), one diagnostic per field. Shared by
@@ -995,41 +1035,9 @@ export class SharedObjectsReplica {
     });
   }
 
-  #objectProblems(id: string, stored: AMap): ProfileProblem[] {
-    return storedObjectProblems(this.#doc, stored, id);
-  }
-
   /** §99: the Task under `id` with conflict metadata, or undefined if there is no object or it is not a Task. */
   task(id: string): TaskView | undefined {
-    const objects = this.#objects();
-    const stored = objects?.[id];
-    if (objects === undefined || !isMap(stored as Json)) return undefined;
-    const object = stored as AMap;
-    if (plain(object.type) !== "task") return undefined;
-    const collided = A.getConflicts(objects, id) !== undefined;
-    const problems = this.#objectProblems(id, object);
-    const parsed = parseTask(plain(object), id);
-    const field = (f: string): ScalarView => {
-      const values = valuesOf(object, f).map(plain).sort(byJson);
-      return Object.freeze({
-        value: f in object ? plain(object[f]) : undefined,
-        values: Object.freeze(values),
-        conflicted: values.length > 1,
-      });
-    };
-    const keys = (f: string): string[] =>
-      isMap(plain(object[f])) ? Object.keys(plain(object[f]) as object).sort() : [];
-    return Object.freeze({
-      id,
-      status: collided ? "object_id_collision" : problems.length > 0 ? "profile_invalid" : "ready",
-      problems: Object.freeze(problems),
-      task: parsed.valid ? parsed.task : undefined,
-      fields: Object.freeze(
-        Object.fromEntries(SCALAR_FIELDS.map((f) => [f, field(f)])),
-      ) as TaskView["fields"],
-      tags: Object.freeze(keys("tags")),
-      assignees: Object.freeze(keys("assignees")),
-    });
+    return taskView(this.#doc, this.#objects(), id);
   }
 
   /**
