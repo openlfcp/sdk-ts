@@ -8,4 +8,8 @@ export const PACKAGE = "@openlfcp/storage-node";
 
 export { MIGRATIONS, migrate, SCHEMA_VERSION, schemaVersion } from "./schema.js";
 export { FileSecretStore } from "./secrets.js";
-export { SqliteLfcpStorage, type SqliteStorageOptions } from "./sqlite.js";
+export {
+  SqliteLfcpStorage,
+  type SqliteLocalState,
+  type SqliteStorageOptions,
+} from "./sqlite.js";

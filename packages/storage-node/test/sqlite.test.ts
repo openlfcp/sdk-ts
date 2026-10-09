@@ -61,7 +61,7 @@ describe(PACKAGE, () => {
       db.close();
       t.storage = SqliteLfcpStorage.open(v1);
       expect(t.storage.schemaVersion).toBe(SCHEMA_VERSION);
-      expect(SCHEMA_VERSION).toBe(3);
+      expect(SCHEMA_VERSION).toBe(4);
       expect(await t.storage.outbound.list(R)).toEqual([
         {
           itemId: hash32(new Uint8Array(32).fill(7)),

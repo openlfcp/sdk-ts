@@ -4,6 +4,7 @@ export const PACKAGE = "@openlfcp/storage";
 export {
   LOCAL_STATE_SCHEME,
   type LocalStateCipher,
+  type LocalStateDiagnostics,
   type LocalStateEvent,
   LocalStateKeyring,
   type LocalStateMeta,

@@ -28,6 +28,10 @@ import {
   type KeyPackageRow,
   type LfcpStorage,
   type LocalMarkReader,
+  type LocalStateCipher,
+  type LocalStateDiagnostics,
+  LocalStateKeyring,
+  type LocalStateMeta,
   nextActorSequence,
   type OutboundBlock,
   type OutboundItem,
@@ -35,10 +39,13 @@ import {
   type OutboundReader,
   type ProfileCheckpoint,
   type ProfileStateReader,
+  type ResealRow,
   type ResourceReader,
   type ResourceRow,
   type RouteRow,
+  reseal,
   type SecretRef,
+  type SecretStore,
   type SeenRecord,
   type SnapshotReader,
   type SnapshotRow,
@@ -211,10 +218,27 @@ export interface SqliteStorageOptions {
   readonly busyTimeoutMs?: number;
 }
 
+/**
+ * Local state encrypted at rest (LFCP-02-098): the SecretStore that holds
+ * the install's local state key, and the cipher (`localStateCipher` of
+ * @openlfcp/crypto).
+ */
+export interface SqliteLocalState {
+  readonly secrets: SecretStore;
+  readonly cipher: LocalStateCipher;
+  /** The clock of the diagnostics' events (default: the system clock). */
+  readonly now?: () => Date;
+}
+
+/** The store name and primary key of a checkpoint in its AAD. */
+const CHECKPOINTS = "checkpoints";
+
 export class SqliteLfcpStorage implements LfcpStorage {
   readonly #db: Database.Database;
   /** The schema version after migration. */
   readonly schemaVersion: number;
+  #keyring: LocalStateKeyring | null = null;
+  #localState: SqliteLocalState | null = null;
 
   private constructor(db: Database.Database, version: number) {
     this.#db = db;
@@ -226,6 +250,57 @@ export class SqliteLfcpStorage implements LfcpStorage {
    * current schema and sets the durability pragmas.
    */
   static open(path: string, options: SqliteStorageOptions = {}): SqliteLfcpStorage {
+    const storage = SqliteLfcpStorage.#open(path, options);
+    if (storage.#storedMeta() !== undefined) {
+      storage.close();
+      throw new LfcpError(
+        "UNSUPPORTED_VALUE",
+        "this database seals its local state: open it with SqliteLfcpStorage.openSealed",
+      );
+    }
+    return storage;
+  }
+
+  /**
+   * Opens the database at `path` with its local state sealed at rest
+   * (LFCP-02-098): profile checkpoints are stored as `lse1` envelopes under
+   * the install's local state key, which lives only in `localState.secrets`.
+   * A database from before the scheme is migrated, in resumable batches; a
+   * half-done migration or rotation continues. A lost key is no failure: the
+   * next generation starts, and checkpoints sealed under the lost key read
+   * as absent until they are rewritten (the client rebuilds them from the
+   * stored units).
+   */
+  static async openSealed(
+    path: string,
+    localState: SqliteLocalState,
+    options: SqliteStorageOptions = {},
+  ): Promise<SqliteLfcpStorage> {
+    const storage = SqliteLfcpStorage.#open(path, options);
+    try {
+      // Freed pages are overwritten with zeros, so an old row's bytes do not
+      // linger in the file once replaced.
+      storage.#db.pragma("secure_delete = ON");
+      storage.#localState = localState;
+      const stored = storage.#storedMeta();
+      const keyring = await LocalStateKeyring.prepare(
+        localState.cipher,
+        localState.secrets,
+        stored,
+        storage.#now(),
+      );
+      // The key is in the SecretStore; now the metadata that names it.
+      if (JSON.stringify(keyring.meta) !== JSON.stringify(stored)) storage.#writeMeta(keyring.meta);
+      storage.#keyring = keyring;
+      if (keyring.meta.phase !== "ready") await storage.#finishPhase();
+      return storage;
+    } catch (e) {
+      storage.close();
+      throw e;
+    }
+  }
+
+  static #open(path: string, options: SqliteStorageOptions): SqliteLfcpStorage {
     const db = new Database(path);
     try {
       db.pragma("journal_mode = WAL");
@@ -237,6 +312,108 @@ export class SqliteLfcpStorage implements LfcpStorage {
       db.close();
       throw e;
     }
+  }
+
+  #now(): string {
+    return (this.#localState?.now?.() ?? new Date()).toISOString();
+  }
+
+  #storedMeta(): LocalStateMeta | undefined {
+    const row = this.#get("SELECT meta FROM local_state WHERE id = 1");
+    return row === undefined ? undefined : (JSON.parse(row.meta as string) as LocalStateMeta);
+  }
+
+  #writeMeta(meta: LocalStateMeta): void {
+    this.#db
+      .prepare(
+        "INSERT INTO local_state (id, meta) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET meta = excluded.meta",
+      )
+      .run(JSON.stringify(meta));
+  }
+
+  /**
+   * Seals every checkpoint the current phase needs, in resumable batches,
+   * then records the phase as ready and removes a key a rotation retired.
+   * A batch writes a row only if it is still the bytes it read, so a
+   * checkpoint committed meanwhile is never overwritten.
+   */
+  async #finishPhase(): Promise<void> {
+    const keyring = this.#keyring as LocalStateKeyring;
+    const read = new Map<string, Buffer>();
+    const scan = async (after: string | null, limit: number): Promise<ResealRow[]> => {
+      const rows =
+        after === null
+          ? this.#all(
+              "SELECT resource_id, state FROM profile_checkpoints ORDER BY resource_id LIMIT ?",
+              limit,
+            )
+          : this.#all(
+              "SELECT resource_id, state FROM profile_checkpoints WHERE resource_id > ? ORDER BY resource_id LIMIT ?",
+              Buffer.from(after, "hex"),
+              limit,
+            );
+      return rows.map((r) => {
+        const key = toHex(bytes(r.resource_id));
+        read.set(key, r.state as Buffer);
+        return { store: CHECKPOINTS, key, bytes: bytes(r.state) };
+      });
+    };
+    const write = (rows: readonly ResealRow[]): Promise<void> =>
+      this.#tx(() => {
+        const update = this.#db.prepare(
+          "UPDATE profile_checkpoints SET state = ? WHERE resource_id = ? AND state = ?",
+        );
+        for (const r of rows)
+          update.run(blob(r.bytes), Buffer.from(r.key, "hex"), read.get(r.key) as Buffer);
+      });
+    await reseal(keyring, scan, write);
+    const retired = keyring.retired;
+    const finished = keyring.finished(this.#now());
+    this.#writeMeta(finished.meta);
+    this.#keyring = finished;
+    if (keyring.meta.phase === "migrating") {
+      // Plaintext from before the scheme may linger in pages freed before
+      // secure_delete and in the WAL: rewrite the file and truncate the WAL.
+      this.#db.pragma("wal_checkpoint(TRUNCATE)");
+      this.#db.exec("VACUUM");
+      this.#db.pragma("wal_checkpoint(TRUNCATE)");
+    }
+    // The old key goes last: a crash before this line leaves it, harmlessly.
+    if (retired !== null) await (this.#localState as SqliteLocalState).secrets.delete(retired);
+  }
+
+  /**
+   * Rotates the local state key (LFCP-02-098 §8): writes the next
+   * generation's key, seals every checkpoint again, then removes the old
+   * key. Resumed on the next open after a crash.
+   */
+  async rotateLocalStateKey(): Promise<void> {
+    if (this.#keyring === null || this.#localState === null)
+      throw new LfcpError("UNSUPPORTED_VALUE", "this database was not opened with openSealed");
+    this.#keyring = await this.#keyring.rotate(this.#localState.secrets, this.#now());
+    this.#writeMeta(this.#keyring.meta);
+    await this.#finishPhase();
+  }
+
+  /** The local state encryption status, or null when the database was opened without it. */
+  localStateDiagnostics(): LocalStateDiagnostics | null {
+    const keyring = this.#keyring;
+    if (keyring === null) return null;
+    const rows = { sealed: 0, plaintext: 0, unreadable: 0 };
+    for (const r of this.#all("SELECT resource_id, state FROM profile_checkpoints")) {
+      const opened = keyring.open(CHECKPOINTS, toHex(bytes(r.resource_id)), bytes(r.state));
+      if (opened.kind === "plain") rows.plaintext++;
+      else if (opened.kind === "opened") rows.sealed++;
+      else rows.unreadable++;
+    }
+    return Object.freeze({
+      scheme: keyring.meta.scheme,
+      generation: keyring.meta.generation,
+      keyPresent: keyring.keyPresent,
+      phase: keyring.meta.phase,
+      rows: Object.freeze(rows),
+      lastEvent: keyring.meta.lastEvent,
+    });
   }
 
   close(): void {
@@ -566,7 +743,11 @@ export class SqliteLfcpStorage implements LfcpStorage {
         ).run(
           blob(c.resourceId),
           c.dataProfile,
-          blob(c.state),
+          blob(
+            this.#keyring === null
+              ? c.state
+              : this.#keyring.seal(CHECKPOINTS, toHex(c.resourceId), c.state),
+          ),
           c.actorSeq,
           JSON.stringify(c.units.map((u) => [toHex(u.unitId), u.ref])),
         );
@@ -768,7 +949,13 @@ export class SqliteLfcpStorage implements LfcpStorage {
     checkpoint: (res) =>
       this.#read(() => {
         const r = this.#get("SELECT * FROM profile_checkpoints WHERE resource_id = ?", blob(res));
-        return r === undefined ? undefined : checkpointRow(r);
+        if (r === undefined) return undefined;
+        const row = checkpointRow(r);
+        if (this.#keyring === null) return row;
+        const opened = this.#keyring.open(CHECKPOINTS, toHex(res), row.state);
+        // Sealed under a lost key: absent, rebuilt from the stored units.
+        if (opened.kind === "unreadable") return undefined;
+        return { ...row, state: opened.bytes };
       }),
   };
 

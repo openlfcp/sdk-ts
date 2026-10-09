@@ -70,6 +70,21 @@ export interface LocalStateMeta {
   readonly lastEvent: LocalStateEvent | null;
 }
 
+/** What an adapter's `localStateDiagnostics` reports: never key bytes, envelopes or plaintext. */
+export interface LocalStateDiagnostics {
+  readonly scheme: string;
+  readonly generation: number;
+  readonly keyPresent: boolean;
+  readonly phase: LocalStateMeta["phase"];
+  /** Rows sealed under a held key, in plaintext, and sealed under a lost key. */
+  readonly rows: {
+    readonly sealed: number;
+    readonly plaintext: number;
+    readonly unreadable: number;
+  };
+  readonly lastEvent: LocalStateEvent | null;
+}
+
 /** A row's bytes as read: plaintext from before the scheme, opened, or unreadable. */
 export type OpenedLocal =
   | { readonly kind: "plain"; readonly bytes: Uint8Array }

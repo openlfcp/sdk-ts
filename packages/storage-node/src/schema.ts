@@ -4,7 +4,8 @@ import type Database from "better-sqlite3";
 /**
  * The SQLite schema and its migrations. Version 1 is the LFCP-034 storage
  * model; version 2 adds outbound retry state and sync state (LFCP-036);
- * version 3 adds local marks (the crash-loop breaker's apply markers).
+ * version 3 adds local marks (the crash-loop breaker's apply markers);
+ * version 4 adds the local state encryption metadata (LFCP-02-098).
  * A database at a newer version than this code knows is refused:
  * it is never downgraded or "repaired".
  *
@@ -159,6 +160,17 @@ CREATE TABLE local_marks (
   key    TEXT PRIMARY KEY,
   value  TEXT NOT NULL
 ) WITHOUT ROWID;
+`,
+  ],
+  [
+    // LFCP-02-098: the local state encryption metadata (scheme, install ID,
+    // generation, phase); never key bytes.
+    4,
+    `
+CREATE TABLE local_state (
+  id    INTEGER PRIMARY KEY CHECK (id = 1),
+  meta  TEXT NOT NULL
+);
 `,
   ],
 ];
