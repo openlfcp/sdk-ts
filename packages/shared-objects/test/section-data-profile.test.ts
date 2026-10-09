@@ -146,7 +146,7 @@ describe("SharedSectionsDataProfile", () => {
     function shared() {
       const { r, changes } = written();
       const p = bobProfile();
-      changes.forEach((c, i) => p.apply(unit(i + 1), c as never));
+      for (const [i, c] of changes.entries()) p.apply(unit(i + 1), c as never);
       const events: SectionsNodesChanged[] = [];
       p.onNodesChanged((e) => events.push(e));
       let n = 10;
