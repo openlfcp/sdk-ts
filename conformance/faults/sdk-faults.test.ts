@@ -278,4 +278,26 @@ describe("SDK faults at the durable boundary (LFCP-02-030)", () => {
       expect(second.profile.replica.snapshot().nodes[id(12)]?.text).toBe("item 12");
       await second.close();
     }));
+
+  it("after a restart with the server unreachable, a queued batch stays pending while the client tries (SI03, SI06)", () =>
+    inTemp(async (dir) => {
+      const first = await device(dir);
+      await first.sync.commit(first.R, [create, item(12)], { operationId: "op-1" });
+      await first.close();
+
+      const second = await device(dir);
+      second.sync.start();
+      // A few connection attempts fail (nothing listens on the endpoint).
+      await new Promise((r) => setTimeout(r, 1_500));
+      expect(await second.storage.outbound.list(second.R)).not.toEqual([]);
+      const snap = await second.sync.statusSnapshot(second.R);
+      expect(snap.batches).toMatchObject([
+        { operationId: "op-1", status: "pending", acceptedUnitIds: [] },
+      ]);
+      expect(snap.catchUp.state).not.toBe("current");
+      expect(second.events.filter((e) => e.kind === "batch" && e.status === "accepted")).toEqual(
+        [],
+      );
+      await second.close();
+    }));
 });
