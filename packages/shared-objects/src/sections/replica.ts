@@ -16,7 +16,7 @@ import {
 } from "../admission/limits.js";
 import { admitBatch } from "../admission/sequence.js";
 import { ProfileInvalidError } from "../profile-invalid.js";
-import { prepareTaskIntent, type ReplicaIntent } from "../replica.js";
+import { prepareTaskIntent, type ReplicaIntent, type TaskView, taskView } from "../replica.js";
 import type { Task } from "../task.js";
 import type { Json } from "../validate.js";
 import { frameProfilePayload, isUtcTimestamp, principalRef } from "../values.js";
@@ -656,6 +656,22 @@ export class SectionReplica {
         scalarConflicts: tree.scalarConflicts,
       }),
     });
+  }
+
+  /**
+   * The Task of a task node (§4.2: stored under `/objects/<id>`, the node's
+   * ID) with its conflict metadata, in the form SharedObjectsReplica.task
+   * gives (SOP §99); undefined if there is no object or it is not a Task.
+   */
+  task(id: string): TaskView | undefined {
+    const objects = (this.#doc as AMap).objects;
+    return taskView(
+      this.#doc,
+      objects !== null && typeof objects === "object" && !A.isImmutableString(objects)
+        ? (objects as AMap)
+        : undefined,
+      id,
+    );
   }
 
   /** §3, §4, §14.2. */

@@ -6,7 +6,7 @@
 import { principalId, resourceId, toHex } from "@openlfcp/core";
 import { describe, expect, it } from "vitest";
 import { checkChange, checkChangeActor } from "../src/admission/index.js";
-import { createTask } from "../src/index.js";
+import { createTask, SCALAR_FIELDS } from "../src/index.js";
 import {
   AUTHORING_BUDGET,
   deriveSectionActorId,
@@ -139,6 +139,34 @@ describe("SectionReplica: creation (§4, §6, §11)", () => {
     expect(c?.affectedNodeIds).toEqual([T]);
     expect(view(r).objects[T]).toMatchObject({ status: "done", title: "Sign contract" });
     expect(view(r).nodes[P]?.text).toBe(before);
+  });
+
+  it("views a section Task as SharedObjectsReplica.task does (SOP §99)", () => {
+    const base = built();
+    const a = SectionReplica.fromSave(base.save(), { resource, principal: alice }, "local-state");
+    const b = SectionReplica.fromSave(base.save(), { resource, principal: bob }, "local-state");
+    a.commit([{ intent: "task.set_status", id: T as never, status: "done" }]);
+    b.commit([
+      { intent: "task.set_status", id: T as never, status: "cancelled" },
+      { intent: "task.add_tag", id: T as never, tag: "legal" },
+    ]);
+    const { replica: merged } = SectionReplica.fromChanges([...a.changes(), ...b.changes()], {
+      resource,
+      principal: alice,
+    });
+    const v = merged.task(T);
+    expect(v).toMatchObject({ id: T, status: "ready", problems: [], tags: ["legal"] });
+    expect(v?.task?.title).toBe("Prepare contract");
+    expect(v?.fields.status).toMatchObject({ values: ["cancelled", "done"], conflicted: true });
+    expect(v?.fields.title).toEqual({
+      value: "Prepare contract",
+      values: ["Prepare contract"],
+      conflicted: false,
+    });
+    expect(v?.fields.due).toEqual({ value: undefined, values: [], conflicted: false });
+    expect(Object.keys(v?.fields ?? {})).toEqual([...SCALAR_FIELDS]);
+    expect(merged.task(P)).toBeUndefined(); // a paragraph has no Task
+    expect(merged.task(id(999))).toBeUndefined();
   });
 
   it("creates and then edits a Task in one batch", () => {

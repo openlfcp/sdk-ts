@@ -82,6 +82,12 @@ remove or rename any.
   server reports, and opens again once; a revoked member sends nothing,
   and transient refusals are retried at most three times. New event
   `access-recovery` (`started`, `recovered`, `ended` with a reason).
+- `SectionReplica.task(id)`: the Task of a section's task node with its
+  conflict metadata, in the form of `SharedObjectsReplica.task(id)`
+  (`TaskView`: status, problems, the provisional Task, every scalar
+  register's concurrent values, tags and assignees), so a renderer of SOP
+  Tasks works on section Tasks unchanged. Both replicas share one
+  implementation.
 
 ## 0.1.3 — 2026-10-08
 
