@@ -7,6 +7,7 @@
  *   change chunk with a verified checksum;
  * - limits (§11.1, §11.2, §13.1): the exact change expansion limits, the
  *   document depth bound, the Snapshot limits with their floor;
+ * - the canonical change encoding (§11.3), by the format's properties;
  * - actor binding (§8), with the profile's domain;
  * - sequence admission (§14.1): duplicates, dependencies, the sequence
  *   check, and holding a change whose actor and sequence another change
@@ -16,6 +17,7 @@
  * run after it, on admitted changes only. `@openlfcp/shared-objects/admission`.
  */
 export { checkChangeActor, deriveDomainActorId } from "./actor.js";
+export { checkCanonicalChange, type ParsedChange, type ParsedOp } from "./canonical.js";
 export {
   type CheckedChange,
   checkChange,
@@ -24,6 +26,7 @@ export {
   frameChange,
   frameProfilePayload,
   frameSnapshot,
+  parsedOf,
   unframeChange,
   unframeProfilePayload,
   unframeSnapshot,

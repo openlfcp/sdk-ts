@@ -1,6 +1,7 @@
 import * as A from "@automerge/automerge";
 import { LfcpError, toHex } from "@openlfcp/core";
 import { ProfileInvalidError } from "../profile-invalid.js";
+import { checkCanonicalChange, type ParsedChange } from "./canonical.js";
 import { checkChangeExpansion } from "./limits.js";
 
 /**
@@ -61,6 +62,8 @@ export function checkChange(bytes: Uint8Array): CheckedChange {
   if (type !== CHUNK_CHANGE) reject(`chunk type ${type} is not an Automerge change (§11)`);
   // §11.1: what the change expands to and its structure, before Automerge decodes it.
   const expansion = checkChangeExpansion(bytes);
+  // §11.3: the canonical encoding, by the format's properties, still before the engine.
+  const parsed = checkCanonicalChange(bytes);
   let decoded: A.DecodedChange;
   try {
     decoded = A.decodeChange(bytes);
@@ -78,7 +81,21 @@ export function checkChange(bytes: Uint8Array): CheckedChange {
     otherActors: expansion.otherActors,
   });
   DECODED.set(checked, decoded);
+  PARSED.set(checked, parsed);
   return checked;
+}
+
+/** The operations checkChange read from the bytes (§11.3), for the references of §11.4. */
+const PARSED = new WeakMap<CheckedChange, ParsedChange>();
+
+/** The change as its canonical bytes give it (§11.3), reusing the walk of checkChange. */
+export function parsedOf(change: CheckedChange): ParsedChange {
+  let p = PARSED.get(change);
+  if (p === undefined) {
+    p = checkCanonicalChange(change.bytes);
+    PARSED.set(change, p);
+  }
+  return p;
 }
 
 /** The decoded form checkChange made, kept for the change's lifetime (decoding is not cheap). */
