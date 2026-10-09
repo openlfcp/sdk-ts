@@ -18,7 +18,13 @@ import {
   saveControlChain,
   TypingCoalescer,
 } from "@openlfcp/client";
-import { type ControlRecordId, dataEpoch, resourceId, toHex } from "@openlfcp/core";
+import {
+  type ControlRecordId,
+  dataEpoch,
+  type ResourceId,
+  resourceId,
+  toHex,
+} from "@openlfcp/core";
 import {
   dekCommitment,
   exportSecretKeyBytes,
@@ -171,8 +177,14 @@ async function device(opts: DeviceOptions = {}) {
     await saveControlChain(storage, next, before);
     return id;
   };
-  return { R, storage, profile, sync, head: view.state.head, sign, extend, restart };
+  return { R, storage, profile, sync, head: view.state.head, sign, extend, restart, connect };
 }
+
+/** The changes of the owner's section `S` in Resource `R`. */
+const ownerSection = (R: ResourceId): Uint8Array[] => {
+  const r = SectionReplica.empty({ resource: R, principal: me });
+  return (r.commit([create])?.parts ?? []).map((p) => p.change);
+};
 
 const create: SectionIntent = {
   intent: "section.create",
@@ -444,9 +456,22 @@ describe("access with its evidence (LFCP-02-027)", () => {
         g = add(grant([1n, 2n]));
       },
     });
-    await d.sync.commit(d.R, [{ ...create, createdBy: writer.signer.descriptor.principalId }], {
-      operationId: "op-1",
-    });
+    // The owner's section, already in the writer's model.
+    d.profile.replica.receiveChanges(ownerSection(d.R));
+    await d.sync.commit(
+      d.R,
+      [
+        {
+          intent: "item.create",
+          id: id(70),
+          parent: SECTION,
+          after: null,
+          text: "w",
+          createdBy: writer.signer.descriptor.principalId,
+        },
+      ],
+      { operationId: "op-1" },
+    );
     const queued = await d.storage.outbound.list(d.R);
     expect(queued).toHaveLength(1);
     await d.extend({ type: "CAPABILITY_REVOKE", grantId: g as ControlRecordId });
@@ -534,5 +559,46 @@ describe("restart with pending section work (LFCP-02-028)", () => {
       [...seqs].sort((a, b) => (a === b ? 0 : (a as bigint) < (b as bigint) ? -1 : 1)),
     );
     expect(new Set(seqs.map(String)).size).toBe(seqs.length);
+  });
+});
+
+describe("no new section over an incomplete load (§13, LFCP-02-028)", () => {
+  it("refuses section.create once units of the Resource are stored", async () => {
+    const d = await device();
+    await d.sync.commit(d.R, [create], { operationId: "op-1" });
+    // The model lost its state, the units are stored: no replacement section.
+    const blank = new SharedSectionsDataProfile(
+      SectionReplica.empty({ resource: d.R, principal: me }),
+    );
+    const again = d.connect(blank);
+    await expect(again.commit(d.R, [create], { operationId: "op-2" })).rejects.toMatchObject({
+      name: "CommitRefusedError",
+      code: "SECTION_EXISTS",
+      intentIndex: 0,
+    });
+    expect(await receiptOf(d.storage, d.R, "op-2")).toBeUndefined();
+    expect(blank.replica.revision()).toBe(
+      SectionReplica.empty({ resource: d.R, principal: me }).revision(),
+    );
+  });
+
+  it("refuses section.create by a member that has not caught up, and lets the owner create offline", async () => {
+    const w = await device({
+      as: party(40),
+      records: (add) =>
+        add({
+          type: "CAPABILITY_GRANT",
+          subject: party(40).signer.descriptor,
+          abilities: [1n, 2n],
+          delegable: [],
+        }),
+    });
+    await expect(
+      w.sync.commit(w.R, [{ ...create, createdBy: party(40).signer.descriptor.principalId }], {
+        operationId: "op-1",
+      }),
+    ).rejects.toMatchObject({ code: "SECTION_EXISTS" });
+    const o = await device();
+    expect((await o.sync.commit(o.R, [create], { operationId: "op-1" })).unitIds).toHaveLength(1);
   });
 });

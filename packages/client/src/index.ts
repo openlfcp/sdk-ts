@@ -120,6 +120,7 @@ export {
 } from "./storage.js";
 export {
   type CommitBinding,
+  CommitRefusedError,
   defaultReconnect,
   type ReconnectPolicy,
   type ResourceBinding,

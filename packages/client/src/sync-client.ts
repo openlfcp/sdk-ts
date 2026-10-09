@@ -16,6 +16,7 @@ import {
 } from "@openlfcp/core";
 import { type AgreementKeyPair, exportSecretKeyBytes, sha256 } from "@openlfcp/crypto";
 import {
+  type DataUnitStatus,
   dekSecretRef,
   type EpochRow,
   type LfcpStorage,
@@ -113,6 +114,36 @@ import {
   type WriteAccess,
   writeAccess,
 } from "./write-access.js";
+
+/** Every status of a stored unit: any of them means the Resource has content. */
+const STORED_STATUSES: readonly DataUnitStatus[] = [
+  "seen",
+  "merged",
+  "profile-pending",
+  "held",
+  "quarantined",
+  "equivocation",
+  "local-failure",
+  "profile-held",
+  "profile-rejected",
+  "profile-unsupported",
+];
+
+/**
+ * SDK-SECTIONS-INTEGRATION-01 §3.6: a batch the SDK refuses before the
+ * profile sees it, with the same codes and fields as the profile's
+ * refusals. Nothing is written.
+ */
+export class CommitRefusedError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly intentIndex: number,
+  ) {
+    super(message);
+    this.name = "CommitRefusedError";
+  }
+}
 
 /** Access as a comparable key, to report it only when it changed (verifiedAt aside). */
 const accessKey = (a: AccessState): string =>
@@ -1865,6 +1896,46 @@ export class SyncClient {
     return writeAccess(view, this.#o.signer.descriptor.principalId, dek !== undefined, at);
   }
 
+  /**
+   * SHARED-SECTIONS-PROFILE-01 §13, in depth behind the adapter's own
+   * check: an incomplete load never becomes a new, empty section. A batch
+   * that creates a section is refused (SECTION_EXISTS) when units of the
+   * Resource are stored (content exists that the model may not hold yet),
+   * or when this client is not the Resource's owner and the Resource was
+   * not live in this session (it has not caught up). The owner creates its
+   * new Resource's section offline.
+   */
+  async #guardCreate(
+    ctx: ResourceContext,
+    view: Extract<ChainResult, { kind: "linear" }>,
+    intents: readonly unknown[],
+  ): Promise<void> {
+    const index = intents.findIndex(
+      (i) =>
+        typeof i === "object" &&
+        i !== null &&
+        (i as { intent?: unknown }).intent === "section.create",
+    );
+    if (index < 0) return;
+    const R = ctx.binding.resourceId;
+    const stored = (
+      await Promise.all(STORED_STATUSES.map((st) => this.#o.storage.dataUnits.withStatus(R, st)))
+    ).some((units) => units.length > 0);
+    if (stored)
+      throw new CommitRefusedError(
+        "SECTION_EXISTS",
+        "units of this Resource are stored: it is not a new section (§13)",
+        index,
+      );
+    const owner = bytesEqual(view.state.owner.principalId, this.#o.signer.descriptor.principalId);
+    if (!owner && ctx.liveAt === null)
+      throw new CommitRefusedError(
+        "SECTION_EXISTS",
+        "the Resource has not caught up in this session: its section may exist (§13)",
+        index,
+      );
+  }
+
   async #commit(
     ctx: ResourceContext,
     binding: CommitBinding<unknown>,
@@ -1885,6 +1956,7 @@ export class SyncClient {
     if (!access.allowed || view?.kind !== "linear") throw new NotWritableError(access);
     const dek = await dekResolver(storage, this.#o.secrets, R)(view.state.epoch.epoch);
     if (dek === undefined) throw new NotWritableError(access);
+    await this.#guardCreate(ctx, view, intents);
     const staged = binding.stage(intents);
     staged?.apply();
     try {

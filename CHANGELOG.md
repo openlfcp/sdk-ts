@@ -146,6 +146,12 @@ remove or rename any.
   fetched, and `current-at-checkpoint` only once the Resource is live,
   with `checkedAt`. It stays so offline, as of that check. It is
   `unknown` while a Control conflict or a missing key blocks the catch-up.
+- `SyncClient.commit` refuses a batch with `section.create`
+  (`CommitRefusedError`, `SECTION_EXISTS`) when units of the Resource are
+  stored, or when this client is not the Resource's owner and the
+  Resource was not live in this session. An incomplete load never becomes
+  a new, empty section (SHARED-SECTIONS-PROFILE-01 §13). The owner still
+  creates its new Resource's section offline.
 
 ## 0.1.3 — 2026-10-08
 
