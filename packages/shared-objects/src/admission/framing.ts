@@ -1,8 +1,9 @@
 import * as A from "@automerge/automerge";
 import { LfcpError, toHex } from "@openlfcp/core";
+import { sha256 } from "@openlfcp/crypto";
 import { ProfileInvalidError } from "../profile-invalid.js";
 import { checkCanonicalChange, type ParsedChange } from "./canonical.js";
-import { checkChangeExpansion } from "./limits.js";
+import { checkChangeExpansion, MalformedChunkError } from "./limits.js";
 
 /**
  * Automerge byte checks of the SHARED-OBJECTS-PROFILE-01 payloads (LFCP-031):
@@ -83,6 +84,34 @@ export function checkChange(bytes: Uint8Array): CheckedChange {
   DECODED.set(checked, decoded);
   PARSED.set(checked, parsed);
   return checked;
+}
+
+/**
+ * The change hash of bytes checkChange refused, read without decoding
+ * them: the SHA-256 of the chunk from its type byte on (the Automerge
+ * change hash). A change above a §11.1 limit is named this way, so a
+ * receiver can report it without expanding it. Undefined when the bytes
+ * are not one change chunk that could be read: no magic bytes, another
+ * chunk type, a length that does not cover them exactly, or a header or
+ * column cut short.
+ */
+export function refusedChangeHash(bytes: Uint8Array, error: unknown): string | undefined {
+  if (error instanceof MalformedChunkError) return undefined;
+  if (bytes.length < HEADER || MAGIC.some((b, i) => bytes[i] !== b)) return undefined;
+  if (bytes[8] !== CHUNK_CHANGE) return undefined;
+  // The ULEB128 chunk length after the type byte must cover the rest exactly.
+  let length = 0;
+  let scale = 1;
+  let pos = HEADER;
+  for (;;) {
+    if (pos >= bytes.length || pos - HEADER >= 8) return undefined;
+    const b = bytes[pos++] as number;
+    length += (b & 0x7f) * scale;
+    scale *= 128;
+    if ((b & 0x80) === 0) break;
+  }
+  if (pos + length !== bytes.length) return undefined;
+  return toHex(sha256(bytes.subarray(8)));
 }
 
 /** The operations checkChange read from the bytes (§11.3), for the references of §11.4. */

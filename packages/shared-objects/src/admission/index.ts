@@ -28,6 +28,7 @@ export {
   frameProfilePayload,
   frameSnapshot,
   parsedOf,
+  refusedChangeHash,
   unframeChange,
   unframeProfilePayload,
   unframeSnapshot,

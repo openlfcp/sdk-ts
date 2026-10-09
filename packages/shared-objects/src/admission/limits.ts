@@ -92,6 +92,23 @@ const refuse = (why: string): never => {
   );
 };
 
+/**
+ * A chunk refused because it cannot be read as one: no magic bytes, a
+ * length that does not cover it exactly, a truncated number or field. A
+ * chunk refused for anything else (a limit, a deflated or duplicate column,
+ * an out-of-range value) was read in full and still names its change hash.
+ */
+export class MalformedChunkError extends ProfileInvalidError {
+  constructor(why: string) {
+    super("INVALID_AUTOMERGE_BYTES", `Automerge chunk refused (§11.1): ${why}`);
+    this.name = "MalformedChunkError";
+  }
+}
+
+const malformed = (why: string): never => {
+  throw new MalformedChunkError(why);
+};
+
 class Cursor {
   pos = 0;
   constructor(
@@ -104,7 +121,7 @@ class Cursor {
   }
 
   take(n: number): Uint8Array {
-    if (n > this.end - this.pos) refuse("a length runs past the end");
+    if (n > this.end - this.pos) malformed("a length runs past the end");
     const out = this.bytes.subarray(this.pos, this.pos + n);
     this.pos += n;
     return out;
@@ -115,13 +132,13 @@ class Cursor {
     let value = 0;
     let scale = 1;
     for (let i = 0; i < 10; i++) {
-      if (this.pos >= this.end) refuse("a LEB128 number runs past the end");
+      if (this.pos >= this.end) malformed("a LEB128 number runs past the end");
       const b = this.bytes[this.pos++] as number;
       value += (b & 0x7f) * scale;
       if ((b & 0x80) === 0) return value >= 2 ** 53 ? Number.POSITIVE_INFINITY : value;
       scale *= 128;
     }
-    return refuse("a LEB128 number is longer than 10 bytes");
+    return malformed("a LEB128 number is longer than 10 bytes");
   }
 
   /** Signed LEB128 as a number; magnitudes at or above 2^53 come back as +/-Infinity. */
@@ -129,7 +146,7 @@ class Cursor {
     let value = 0;
     let scale = 1;
     for (let i = 0; i < 10; i++) {
-      if (this.pos >= this.end) refuse("a LEB128 number runs past the end");
+      if (this.pos >= this.end) malformed("a LEB128 number runs past the end");
       const b = this.bytes[this.pos++] as number;
       value += (b & 0x7f) * scale;
       scale *= 128;
@@ -138,7 +155,7 @@ class Cursor {
         return Math.abs(value) >= 2 ** 53 ? Math.sign(value) * Number.POSITIVE_INFINITY : value;
       }
     }
-    return refuse("a LEB128 number is longer than 10 bytes");
+    return malformed("a LEB128 number is longer than 10 bytes");
   }
 }
 
@@ -234,7 +251,7 @@ interface ColumnMeta {
 /** Column metadata. The count has no limit of its own (§11.1): each entry takes at least two bytes. */
 function columnMetas(c: Cursor): ColumnMeta[] {
   const count = c.uleb();
-  if (count > (c.end - c.pos) / 2) refuse("the column metadata runs past the end");
+  if (count > (c.end - c.pos) / 2) malformed("the column metadata runs past the end");
   const out: ColumnMeta[] = [];
   const specs = new Set<number>();
   for (let i = 0; i < count; i++) {
@@ -278,13 +295,13 @@ function rowLimits(metas: readonly ColumnMeta[], limits: Limits): (spec: number)
 function body(bytes: Uint8Array, want: number, what: string): Cursor {
   const c = new Cursor(bytes);
   const magic = c.take(4);
-  if (!MAGIC.every((b, i) => magic[i] === b)) refuse(`${what} has no Automerge magic bytes`);
+  if (!MAGIC.every((b, i) => magic[i] === b)) malformed(`${what} has no Automerge magic bytes`);
   c.take(4); // checksum: verified elsewhere (checkChange; the engine for a Snapshot)
   const type = c.take(1)[0] as number;
   if (type !== want) refuse(`${what} is chunk type ${type}, not ${want}`);
   const length = c.uleb();
   if (length !== bytes.length - c.pos)
-    refuse(`${what} must be exactly one chunk with nothing after it`);
+    malformed(`${what} must be exactly one chunk with nothing after it`);
   return c;
 }
 
