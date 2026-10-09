@@ -197,6 +197,12 @@ sending) and restarts it on the same SQLite database, and checks what
 survives a restart: the Control head, keys, held and quarantined units,
 the replica checkpoint with replay and G-EP7, and Snapshot sequences.
 
+`conformance/faults/` (LFCP-02-030) injects a full disk at the commit's
+durable boundary and an unreadable key store on SQLite with file secrets,
+and restarts with an offline batch pending: no failed batch gets a receipt
+or a status, nothing is reset, and a retry under the same operation
+commits once.
+
 `conformance/upgrade/` (LFCP-02-029) opens storage the released 0.1.3 SDK
 wrote, SQLite with file secrets and IndexedDB, with this SDK (see
 [Local storage upgrades](#local-storage-upgrades)). The fixtures in
