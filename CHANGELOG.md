@@ -169,6 +169,10 @@ remove or rename any.
 - `SyncClient`'s `snapshotPolicy` now counts the units this client commits
   through `commit`, not only the units it receives. A section's only
   writer reaches its threshold and publishes Snapshots.
+- A key store that cannot be read is `key-unavailable` in `canWrite`,
+  `accessState` and `commit` (`NotWritableError`), instead of an error
+  from the DEK lookup (LFCP-02-030). Nothing is written, and no key or
+  reference is removed.
 
 ## 0.1.3 — 2026-10-08
 

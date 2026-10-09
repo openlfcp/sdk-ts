@@ -14,7 +14,12 @@ import {
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
-import { type AgreementKeyPair, exportSecretKeyBytes, sha256 } from "@openlfcp/crypto";
+import {
+  type AgreementKeyPair,
+  exportSecretKeyBytes,
+  type ResourceDEK,
+  sha256,
+} from "@openlfcp/crypto";
 import {
   type DataUnitStatus,
   dekSecretRef,
@@ -1860,8 +1865,7 @@ export class SyncClient {
     }
     const dek =
       view?.kind === "linear" &&
-      (await dekResolver(this.#o.storage, this.#o.secrets, resource)(view.state.epoch.epoch)) !==
-        undefined;
+      (await this.#currentDek(resource, view.state.epoch.epoch)) !== undefined;
     return accessState(view, this.#o.signer.descriptor.principalId, dek, write.verifiedAt ?? 0, {
       serverControlSeq: ctx?.serverControlSeq ?? null,
       pendingControl,
@@ -1880,6 +1884,19 @@ export class SyncClient {
     await this.#refreshAccess(ctx);
   }
 
+  /**
+   * The DEK of `epoch`, or undefined when it is not held or the key store
+   * cannot be read now (LFCP-02-030): an unreadable key store is
+   * key-unavailable, never a reason to write without it or to reset state.
+   */
+  async #currentDek(resource: ResourceId, epoch: DataEpoch): Promise<ResourceDEK | undefined> {
+    try {
+      return await dekResolver(this.#o.storage, this.#o.secrets, resource)(epoch);
+    } catch {
+      return undefined;
+    }
+  }
+
   async #access(
     resource: ResourceId,
     view: ChainResult | undefined | null,
@@ -1887,11 +1904,7 @@ export class SyncClient {
   ): Promise<WriteAccess> {
     if (view?.kind !== "linear")
       return writeAccess(view, this.#o.signer.descriptor.principalId, false, 0);
-    const dek = await dekResolver(
-      this.#o.storage,
-      this.#o.secrets,
-      resource,
-    )(view.state.epoch.epoch);
+    const dek = await this.#currentDek(resource, view.state.epoch.epoch);
     const at =
       verified !== null && bytesEqual(verified.head, view.state.head) ? verified.at : this.#o.now();
     return writeAccess(view, this.#o.signer.descriptor.principalId, dek !== undefined, at);
@@ -1955,8 +1968,9 @@ export class SyncClient {
     // §3.6, §6: a batch submitted while writing is not allowed writes nothing.
     const access = await this.#access(R, view, ctx.verified);
     if (!access.allowed || view?.kind !== "linear") throw new NotWritableError(access);
-    const dek = await dekResolver(storage, this.#o.secrets, R)(view.state.epoch.epoch);
-    if (dek === undefined) throw new NotWritableError(access);
+    const dek = await this.#currentDek(R, view.state.epoch.epoch);
+    if (dek === undefined)
+      throw new NotWritableError({ ...access, allowed: false, reason: "key-unavailable" });
     await this.#guardCreate(ctx, view, intents);
     const staged = binding.stage(intents);
     staged?.apply();
