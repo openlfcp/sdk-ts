@@ -192,6 +192,18 @@ remove or rename any.
     `would-remove-owner`, `not-member` and `not-authorized`.
   - `planRevocation` is the pure planner, and `controlRecordWrites` and
     `keyPackageWrites` queue in a caller's transaction.
+- A refusal of the Resource is reported in the status stream
+  (LFCP-02-115):
+  - When the server refuses this client the Resource
+    (`AUTHORIZATION_FAILED` on `RESOURCE_OPEN`) and access recovery does
+    not help, `accessState`, `canWrite` and `commit` report `allowed: false`
+    with the reason `server-refused`, `current: false`, and
+    `serverRefusal: { code, recovery }`, where `recovery` is how the access
+    recovery ended.
+  - It is never reported as "revoked": the server does not say why.
+  - Unaccepted batches are `blocked`, with the work kept; catch-up is
+    `unknown`.
+  - Events report each change, and `open()` again clears the refusal.
 
 ## 0.1.3 — 2026-10-08
 

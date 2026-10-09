@@ -20,7 +20,14 @@ export type WriteDeniedReason =
   | "read-only"
   | "key-unavailable"
   | "revoked"
-  | "unknown";
+  | "unknown"
+  /**
+   * LFCP-02-115: the server refuses this client the Resource
+   * (AUTHORIZATION_FAILED on RESOURCE_OPEN) although the local chain grants
+   * it. The server does not say why: a revocation this client has not seen,
+   * or a server that lost state and could not be recovered (106).
+   */
+  | "server-refused";
 
 /** §6: the answer of canWrite. `controlHead` and `verifiedAt` are its freshness. */
 export interface WriteAccess {
@@ -126,10 +133,30 @@ export interface AccessState extends WriteAccess {
   readonly pendingControl: readonly PendingControl[];
   /** An invitation claim of this principal is journaled and not settled (LFCP-02-110). */
   readonly pendingClaim: boolean;
+  /**
+   * LFCP-02-115: the server refuses this client the Resource in this
+   * session; then `allowed` is false with reason "server-refused" and
+   * `current` is false, whatever the local chain says.
+   */
+  readonly serverRefusal: ServerRefusal | null;
+}
+
+/** LFCP-02-115: the server's refusal of the Resource in this session, as far as it is known. */
+export interface ServerRefusal {
+  /** The §62 code, AUTHORIZATION_FAILED. */
+  readonly code: string;
+  /**
+   * How the access recovery (LFCP-02-106) ended, when it ran: "unknown-head"
+   * (the server holds Control Records this client has not seen), "refused",
+   * "still-refused", "not-granted", "server-current"; null when it did not run.
+   */
+  readonly recovery: string | null;
 }
 
 /** The evidence of `accessState` the chain does not hold. */
 export interface AccessContext {
+  /** The server refuses the Resource in this session (LFCP-02-115). */
+  readonly serverRefusal?: ServerRefusal | null;
   readonly serverControlSeq: bigint | null;
   readonly pendingControl: readonly PendingControl[];
   readonly pendingClaim: boolean;
@@ -149,11 +176,18 @@ export function accessState(
   const server = context.serverControlSeq;
   const name = (a: bigint) => ABILITY_NAMES.get(a) ?? `${a}`;
   const grants = state === undefined ? [] : [...state.grants.values()];
+  const refusal = context.serverRefusal ?? null;
   return Object.freeze({
     ...write,
+    ...(refusal === null ? {} : { allowed: false, reason: "server-refused" as const }),
     controlSeq,
     serverControlSeq: server,
-    current: server === null || controlSeq === null ? null : controlSeq >= server,
+    current:
+      refusal !== null
+        ? false
+        : server === null || controlSeq === null
+          ? null
+          : controlSeq >= server,
     owner: state !== undefined && bytesEqual(state.owner.principalId, principal),
     abilities: Object.freeze(state === undefined ? [] : abilitiesOf(state, principal).map(name)),
     paths: Object.freeze(
@@ -190,5 +224,6 @@ export function accessState(
     ),
     pendingControl: Object.freeze([...context.pendingControl]),
     pendingClaim: context.pendingClaim,
+    serverRefusal: refusal === null ? null : Object.freeze({ ...refusal }),
   });
 }

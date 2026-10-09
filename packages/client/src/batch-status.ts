@@ -17,7 +17,13 @@ export type BatchStatusName =
   | "pending"
   | "accepted"
   | "evidence-unavailable"
-  | "rejected";
+  | "rejected"
+  /**
+   * LFCP-02-115: not accepted, and the server refuses the Resource in this
+   * session (e.g. AUTHORIZATION_FAILED on RESOURCE_OPEN): it cannot be
+   * accepted there now. Not a refusal of the content; the work is kept.
+   */
+  | "blocked";
 
 /** §4.1, §5 `batch`: a committed batch and the evidence about its units. */
 export interface BatchStatus {
@@ -87,6 +93,7 @@ export function deriveStatus(
   receipt: Receipt,
   s: Stored,
   readyDurability: bigint | null,
+  refused = false,
 ): BatchStatus {
   const units = receipt.unitIds.map((u) => toHex(u));
   const accepted = units.filter((u) => s.accepted.includes(u));
@@ -97,10 +104,12 @@ export function deriveStatus(
         ? "saved"
         : accepted.length === units.length
           ? "accepted"
-          : units.some((u) => s.unconfirmed.includes(u) && !s.accepted.includes(u)) ||
-              (readyDurability !== null && readyDurability < ACCEPTANCE_DURABILITY)
-            ? "evidence-unavailable"
-            : "pending";
+          : refused
+            ? "blocked"
+            : units.some((u) => s.unconfirmed.includes(u) && !s.accepted.includes(u)) ||
+                (readyDurability !== null && readyDurability < ACCEPTANCE_DURABILITY)
+              ? "evidence-unavailable"
+              : "pending";
   const ids = (hex: readonly string[]) => Object.freeze(hex.map((h) => dataUnitId(fromHex(h))));
   return Object.freeze({
     operationId: receipt.operationId,
@@ -122,10 +131,16 @@ export async function batchStatus(
   resource: ResourceId,
   operationId: string,
   readyDurability: bigint | null,
+  refused = false,
 ): Promise<BatchStatus | undefined> {
   const receipt = await receiptOf(storage, resource, operationId);
   if (receipt === undefined) return undefined;
-  return deriveStatus(receipt, await stored(storage, resource, operationId), readyDurability);
+  return deriveStatus(
+    receipt,
+    await stored(storage, resource, operationId),
+    readyDurability,
+    refused,
+  );
 }
 
 /** Every receipt's batch of a Resource, by operation ID. */
@@ -133,11 +148,17 @@ export async function batchStatuses(
   storage: Pick<LfcpStorage, "localMarks">,
   resource: ResourceId,
   readyDurability: bigint | null,
+  refused = false,
 ): Promise<BatchStatus[]> {
   const out: BatchStatus[] = [];
   for (const receipt of await receiptsOf(storage, resource))
     out.push(
-      deriveStatus(receipt, await stored(storage, resource, receipt.operationId), readyDurability),
+      deriveStatus(
+        receipt,
+        await stored(storage, resource, receipt.operationId),
+        readyDurability,
+        refused,
+      ),
     );
   return out.sort((a, b) => (a.operationId < b.operationId ? -1 : 1));
 }

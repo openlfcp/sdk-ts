@@ -157,6 +157,7 @@ export {
   type IssuedInvitation,
   NotWritableError,
   type PendingControl,
+  type ServerRefusal,
   UNKNOWN_ACCESS,
   type WriteAccess,
   type WriteDeniedReason,

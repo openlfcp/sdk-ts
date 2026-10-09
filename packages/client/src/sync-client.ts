@@ -123,6 +123,7 @@ import {
   accessState,
   NotWritableError,
   type PendingControl,
+  type ServerRefusal,
   type WriteAccess,
   writeAccess,
 } from "./write-access.js";
@@ -555,6 +556,8 @@ interface ResourceContext {
   recoveryAttempts: number;
   /** A recovery pushed our chain and opened again: the next open answer ends it. */
   recoveryReopened: boolean;
+  /** How the last access recovery ended (LFCP-02-106), for the refusal's status (LFCP-02-115). */
+  recoveryEnd: string | null;
 }
 
 /**
@@ -667,7 +670,12 @@ export class SyncClient {
    */
   async statusSnapshot(resource: ResourceId): Promise<StatusSnapshot> {
     const ctx = this.#resources.get(toHex(resource));
-    const batches = await batchStatuses(this.#o.storage, resource, this.#readyDurability);
+    const batches = await batchStatuses(
+      this.#o.storage,
+      resource,
+      this.#readyDurability,
+      (ctx?.refusal ?? null) !== null,
+    );
     const received = await receivedState(this.#o.storage, resource);
     const access = await this.accessState(resource);
     const section = ctx?.binding.commit?.section?.() ?? "unknown";
@@ -694,7 +702,13 @@ export class SyncClient {
   async #reportBatches(resource: ResourceId, operations: Iterable<string>): Promise<void> {
     const ctx = this.#resources.get(toHex(resource));
     for (const op of operations) {
-      const b = await batchStatus(this.#o.storage, resource, op, this.#readyDurability);
+      const b = await batchStatus(
+        this.#o.storage,
+        resource,
+        op,
+        this.#readyDurability,
+        (ctx?.refusal ?? null) !== null,
+      );
       if (b === undefined) continue;
       ctx?.reported.batches.set(op, b.status);
       this.#emitStatus(resource, { kind: "batch", ...b });
@@ -732,12 +746,50 @@ export class SyncClient {
       if (ctx.reported.batches.size === 0) continue;
       const R = ctx.binding.resourceId;
       const changed: string[] = [];
-      for (const b of await batchStatuses(this.#o.storage, R, this.#readyDurability)) {
+      for (const b of await batchStatuses(
+        this.#o.storage,
+        R,
+        this.#readyDurability,
+        ctx.refusal !== null,
+      )) {
         const old = ctx.reported.batches.get(b.operationId);
         if (old !== undefined && old !== b.status) changed.push(b.operationId);
       }
       await this.#reportBatches(R, changed);
     }
+  }
+
+  /**
+   * LFCP-02-115: the server refuses this client the Resource in this
+   * session (AUTHORIZATION_FAILED on RESOURCE_OPEN, the recovery of 106
+   * not run or not enough). Null otherwise.
+   */
+  #serverRefusal(ctx: ResourceContext | undefined): ServerRefusal | null {
+    if (ctx?.refusal?.code !== "AUTHORIZATION_FAILED") return null;
+    return Object.freeze({ code: ctx.refusal.code, recovery: ctx.recoveryEnd });
+  }
+
+  /**
+   * After a refusal of the Resource, or an open that clears one: reports
+   * access, catch-up, and every batch whose status that changes (blocked
+   * while refused, pending again after).
+   */
+  async #reportRefusal(ctx: ResourceContext): Promise<void> {
+    const R = ctx.binding.resourceId;
+    await this.#refreshAccess(ctx);
+    this.#reportCatchUp(ctx);
+    const changed: string[] = [];
+    for (const b of await batchStatuses(
+      this.#o.storage,
+      R,
+      this.#readyDurability,
+      ctx.refusal !== null,
+    )) {
+      const old = ctx.reported.batches.get(b.operationId);
+      if (old !== b.status && (old !== undefined || b.status === "blocked"))
+        changed.push(b.operationId);
+    }
+    await this.#reportBatches(R, changed);
   }
 
   /** Reports write access when it changed (§5 `access`). */
@@ -752,6 +804,8 @@ export class SyncClient {
 
   /** LFCP-02-028: the catch-up fact of a Resource from its phase. */
   #catchUp(ctx: ResourceContext): CatchUp {
+    // Refused by the server in this session: how current we are is unknown.
+    if (ctx.refusal !== null) return "unknown";
     switch (ctx.state) {
       case "LIVE":
         return "current-at-checkpoint";
@@ -918,12 +972,15 @@ export class SyncClient {
         recoveryTried: false,
         recoveryAttempts: 0,
         recoveryReopened: false,
+        recoveryEnd: null,
       };
       this.#resources.set(key, ctx);
     }
     ctx.wanted = true;
     // An explicit open asks the server again after a refusal.
+    const wasRefused = ctx.refusal !== null;
     ctx.refusal = null;
+    if (wasRefused) this.#serial(() => this.#reportRefusal(ctx as ResourceContext));
     ctx.refusedAttempt = 0;
     ctx.reopenAt = null;
     if (this.#connection.state === "READY")
@@ -1420,6 +1477,8 @@ export class SyncClient {
       );
     this.#move(ctx, "CLOSE");
     this.#emit({ type: "resource-refused", resourceId: ctx.binding.resourceId, refusal });
+    // LFCP-02-115: the status stream says so too.
+    this.#serial(() => this.#reportRefusal(ctx));
   }
 
   /** CLOSED now, opened again after the ReconnectPolicy's delay for this Resource's attempt. */
@@ -1957,7 +2016,7 @@ export class SyncClient {
   async canWrite(resource: ResourceId): Promise<WriteAccess> {
     const ctx = this.#resources.get(toHex(resource));
     const view = ctx?.view ?? (await loadControlChain(this.#o.storage, resource));
-    return this.#access(resource, view, ctx?.verified ?? null);
+    return this.#access(resource, view, ctx?.verified ?? null, this.#serverRefusal(ctx));
   }
 
   /**
@@ -1971,7 +2030,8 @@ export class SyncClient {
   async accessState(resource: ResourceId): Promise<AccessState> {
     const ctx = this.#resources.get(toHex(resource));
     const view = ctx?.view ?? (await loadControlChain(this.#o.storage, resource));
-    const write = await this.#access(resource, view, ctx?.verified ?? null);
+    const refusal = this.#serverRefusal(ctx);
+    const write = await this.#access(resource, view, ctx?.verified ?? null, refusal);
     const pendingControl: PendingControl[] = [];
     for (const item of await this.#o.storage.outbound.list(resource)) {
       if (item.kind !== "control-record") continue;
@@ -1987,6 +2047,7 @@ export class SyncClient {
       serverControlSeq: ctx?.serverControlSeq ?? null,
       pendingControl,
       pendingClaim: (await readClaimJournal(this.#o.storage, resource)) !== undefined,
+      serverRefusal: refusal,
     });
   }
 
@@ -2018,13 +2079,18 @@ export class SyncClient {
     resource: ResourceId,
     view: ChainResult | undefined | null,
     verified: ResourceContext["verified"],
+    refusal: ServerRefusal | null = null,
   ): Promise<WriteAccess> {
     if (view?.kind !== "linear")
       return writeAccess(view, this.#o.signer.descriptor.principalId, false, 0);
     const dek = await this.#currentDek(resource, view.state.epoch.epoch);
     const at =
       verified !== null && bytesEqual(verified.head, view.state.head) ? verified.at : this.#o.now();
-    return writeAccess(view, this.#o.signer.descriptor.principalId, dek !== undefined, at);
+    const access = writeAccess(view, this.#o.signer.descriptor.principalId, dek !== undefined, at);
+    // LFCP-02-115: the server refuses us the Resource; the local chain is not the last word.
+    return refusal === null
+      ? access
+      : Object.freeze({ ...access, allowed: false, reason: "server-refused" as const });
   }
 
   /**
@@ -2083,7 +2149,7 @@ export class SyncClient {
     }
     const view = ctx.view ?? (await loadControlChain(storage, R));
     // §3.6, §6: a batch submitted while writing is not allowed writes nothing.
-    const access = await this.#access(R, view, ctx.verified);
+    const access = await this.#access(R, view, ctx.verified, this.#serverRefusal(ctx));
     if (!access.allowed || view?.kind !== "linear") throw new NotWritableError(access);
     const dek = await this.#currentDek(R, view.state.epoch.epoch);
     if (dek === undefined)
@@ -2563,6 +2629,7 @@ export class SyncClient {
     outcome: "started" | "recovered" | "ended",
     reason?: string,
   ): void {
+    ctx.recoveryEnd = outcome === "ended" ? (reason ?? null) : null;
     this.#emit({
       type: "access-recovery",
       resourceId: ctx.binding.resourceId,

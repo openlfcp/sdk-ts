@@ -240,7 +240,7 @@ async function device(
   sync.on((e) => {
     if (e.type === "status") events.push(e.event);
   });
-  sync.open({
+  const binding = {
     resourceId: chain.R,
     applier: new DataUnitApplier({
       storage,
@@ -251,7 +251,10 @@ async function device(
     ...(snapshotPolicy === undefined
       ? {}
       : { snapshot: { codec: TEXT, load: () => {}, current: () => "state" } as never }),
-  });
+  };
+  sync.open(binding);
+  /** The application opens the Resource again (after a refusal). */
+  const reopen = () => sync.open(binding);
   const live = async () => {
     sync.start();
     await settle(200);
@@ -265,7 +268,7 @@ async function device(
     await settle(100);
     await d.sync.idle();
   };
-  const d = { storage, sync, events, model, live, at };
+  const d = { storage, sync, events, model, live, at, reopen };
   return d;
 }
 
@@ -660,5 +663,53 @@ describe("revokeAccess refusals (LFCP-02-060)", () => {
       reason: "control-pending",
     });
     expect(await d.storage.outbound.list(chain.R)).toEqual(before);
+  });
+});
+
+describe("a refusal of the Resource (LFCP-02-115)", () => {
+  it("reports server-refused access, blocked batches and unknown catch-up, and clears on reopen", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(234);
+    serve(server, chain);
+    const onServe = server.onMessage;
+    let refusing = true;
+    server.onMessage = (m, s) => {
+      if (refusing && m.type === "RESOURCE_OPEN") {
+        s.reply(m, "NACK", { code: ERROR_CODE.AUTHORIZATION_FAILED });
+        return [];
+      }
+      return onServe(m, s);
+    };
+    const d = await device(server, chain);
+    await d.sync.commit(chain.R, ["offline"], { operationId: "op-1" });
+    d.sync.start();
+    await settle(200);
+    await d.sync.idle();
+    expect(d.sync.resourceRefusal(chain.R)?.code).toBe("AUTHORIZATION_FAILED");
+    // Recovery did not run: the chain holds nothing above its Genesis to push.
+    const snap = await d.sync.statusSnapshot(chain.R);
+    expect(snap.access).toMatchObject({
+      allowed: false,
+      reason: "server-refused",
+      current: false,
+      serverRefusal: { code: "AUTHORIZATION_FAILED", recovery: "server-current" },
+    });
+    expect(snap.batches.map((b) => b.status)).toEqual(["blocked"]);
+    expect(snap.catchUp.state).toBe("unknown");
+    expect(
+      d.events.some(
+        (e) => e.kind === "batch" && e.operationId === "op-1" && e.status === "blocked",
+      ),
+    ).toBe(true);
+    // The server lets us in again: an explicit open clears the refusal.
+    refusing = false;
+    d.reopen();
+    await settle(200);
+    await d.sync.idle();
+    expect(d.sync.resourceState(chain.R)).toBe("LIVE");
+    const after = await d.sync.statusSnapshot(chain.R);
+    expect(after.access).toMatchObject({ allowed: true, reason: null, serverRefusal: null });
+    expect(after.batches.map((b) => b.status)).toEqual(["accepted"]);
+    expect(after.catchUp.state).toBe("current-at-checkpoint");
   });
 });
