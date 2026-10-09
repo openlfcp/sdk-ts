@@ -15,6 +15,7 @@ import {
   receiptOf,
   SyncClient,
   saveControlChain,
+  TypingCoalescer,
 } from "@openlfcp/client";
 import { type ControlRecordId, dataEpoch, resourceId, toHex } from "@openlfcp/core";
 import {
@@ -282,5 +283,82 @@ describe("SyncClient.canWrite and NOT_WRITABLE (§6, §3.6)", () => {
       controlHead: null,
       verifiedAt: null,
     });
+  });
+});
+
+describe("typing coalesced into one unit per burst (LFCP-02-025)", () => {
+  it("types 1,000 characters one pass per key into a few units, and the Text is exact", async () => {
+    const d = await device();
+    const P = id(50);
+    await d.sync.commit(
+      d.R,
+      [
+        create,
+        {
+          intent: "paragraph.create",
+          id: P,
+          parent: SECTION,
+          after: null,
+          text: "",
+          createdBy: me,
+        },
+      ],
+      { operationId: "setup" },
+    );
+    // The adapter: each pass is planned against the base of its last receipt.
+    const projection = { base: d.profile.replica.revision(), text: "" };
+    const advance = () => {
+      projection.base = d.profile.replica.revision();
+      projection.text = d.profile.replica.snapshot().nodes[P]?.text ?? "";
+    };
+    const clock = { t: 0 };
+    const typing = new TypingCoalescer({
+      commit: (intents, o) => d.sync.commit(d.R, intents, o),
+      onFlushed: (f) => {
+        if (f.kind !== "committed") throw f.error;
+        advance();
+      },
+      now: () => clock.t,
+    });
+    const typed = "the launch plan needs a review of budget and timeline. "
+      .repeat(19)
+      .slice(0, 1000);
+    let units = 0;
+    for (let k = 1; k <= typed.length; k++) {
+      clock.t += 120;
+      // A pause of 2 s every 300 keys ends a burst.
+      if (k % 300 === 0) {
+        clock.t += 2_000;
+        await typing.tick(clock.t);
+      }
+      const r = await typing.submit(
+        "projection-1",
+        [
+          {
+            intent: "text.edit",
+            id: P,
+            base: projection.base,
+            edits: [
+              {
+                index: projection.text.length,
+                deleteCount: 0,
+                insert: typed.slice(projection.text.length, k),
+              },
+            ],
+          },
+        ],
+        { operationId: `key-${k}` },
+      );
+      if (r.kind === "committed") {
+        units += r.receipt.unitIds.length;
+        advance();
+      }
+    }
+    await typing.flush();
+    expect(d.profile.replica.snapshot().nodes[P]?.text).toBe(typed);
+    // 256 characters a unit while typing on, one more unit per burst end.
+    const all = await d.storage.outbound.list(d.R);
+    expect(all.length).toBeLessThanOrEqual(10);
+    expect(units).toBeGreaterThanOrEqual(3);
   });
 });

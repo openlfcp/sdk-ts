@@ -132,6 +132,12 @@ export {
   TERMINAL_RESOURCE_CODES,
 } from "./sync-client.js";
 export {
+  type Flushed,
+  type Submitted,
+  TypingCoalescer,
+  type TypingCoalescerOptions,
+} from "./typing.js";
+export {
   NotWritableError,
   UNKNOWN_ACCESS,
   type WriteAccess,

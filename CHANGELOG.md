@@ -116,6 +116,13 @@ remove or rename any.
   `CommitBinding`. `releaseReceipt` also forgets the batch's status.
   `OutboundQueue.onAck` takes an optional `also` that adds writes to the
   dequeue's transaction.
+- `TypingCoalescer` (LFCP-02-025): one Data Unit per typing burst instead
+  of one per key, in front of `SyncClient.commit`. A pass that only edits
+  Text waits; the next pass on the same base replaces it (it contains its
+  edits). A pass is committed when it holds another intent, leaves the
+  paragraph, reaches 256 characters, after an idle pause of 1.5 s
+  (`tick(now)`), or on `flush()`. A waiting pass has no receipt and is not
+  durable: the adapter's source still holds it.
 
 ## 0.1.3 — 2026-10-08
 
