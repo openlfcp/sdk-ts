@@ -699,16 +699,23 @@ export class SyncClient {
   }
 
   /** The batches of `operations`, reported as they are now. */
-  async #reportBatches(resource: ResourceId, operations: Iterable<string>): Promise<void> {
+  async #reportBatches(
+    resource: ResourceId,
+    operations: Iterable<string>,
+    finals: ReadonlyMap<string, BatchStatus> = new Map(),
+  ): Promise<void> {
     const ctx = this.#resources.get(toHex(resource));
     for (const op of operations) {
-      const b = await batchStatus(
-        this.#o.storage,
-        resource,
-        op,
-        this.#readyDurability,
-        (ctx?.refusal ?? null) !== null,
-      );
+      // A released batch forgotten at its final status: reported with that status.
+      const b =
+        finals.get(op) ??
+        (await batchStatus(
+          this.#o.storage,
+          resource,
+          op,
+          this.#readyDurability,
+          (ctx?.refusal ?? null) !== null,
+        ));
       if (b === undefined) continue;
       ctx?.reported.batches.set(op, b.status);
       this.#emitStatus(resource, { kind: "batch", ...b });
@@ -863,11 +870,16 @@ export class SyncClient {
     units: readonly string[],
     evidence: UnitEvidence,
   ): Promise<ReadonlyMap<string, readonly string[]>> {
-    const { writes, changed } = await recordEvidence(this.#o.storage, resource, units, evidence);
+    const { writes, changed, finals } = await recordEvidence(
+      this.#o.storage,
+      resource,
+      units,
+      evidence,
+    );
     if (writes.length === 0) return changed;
     const r = await this.#o.storage.commit(writes);
     if (!r.ok) throw new Error(`the batch status was not stored: ${r.reason}`);
-    await this.#reportBatches(resource, changed.keys());
+    await this.#reportBatches(resource, changed.keys(), finals);
     return changed;
   }
 
@@ -2416,7 +2428,11 @@ export class SyncClient {
   async #onAck(m: LfcpMessage<"ACK">): Promise<void> {
     if (m.body.requestType === MESSAGE_TYPE.CONTROL_PUT) await this.#adoptAcked(m);
     // §4.1: acceptance is recorded in the dequeue's transaction.
-    const changed: [ResourceId, ReadonlyMap<string, readonly string[]>][] = [];
+    const changed: [
+      ResourceId,
+      ReadonlyMap<string, readonly string[]>,
+      ReadonlyMap<string, BatchStatus>,
+    ][] = [];
     const outcome = await this.#o.outbound.onAck(m, iso(this.#o.now()), async (items, ack) => {
       const byResource = new Map<string, { R: ResourceId; units: string[] }>();
       for (const item of items) {
@@ -2431,11 +2447,11 @@ export class SyncClient {
         const evidence = this.#ackEvidence(R, ack.durability, ack.correlated);
         const r = await recordEvidence(this.#o.storage, R, units, evidence);
         writes.push(...r.writes);
-        if (r.changed.size > 0) changed.push([R, r.changed]);
+        if (r.changed.size > 0) changed.push([R, r.changed, r.finals]);
       }
       return writes;
     });
-    for (const [R, ops] of changed) await this.#reportBatches(R, ops.keys());
+    for (const [R, ops, finals] of changed) await this.#reportBatches(R, ops.keys(), finals);
     this.#emit({ type: "ack", outcome });
     // Our own Control Record was committed: catch up, since the server does not push it back to us.
     if (m.body.requestType === MESSAGE_TYPE.CONTROL_PUT && outcome.acked.length > 0)

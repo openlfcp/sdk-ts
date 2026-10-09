@@ -2,7 +2,7 @@ import { type DataUnitId, dataUnitId, fromHex, type ResourceId, toHex } from "@o
 import { sha256 } from "@openlfcp/crypto";
 import type { LfcpStorage, StorageWrite } from "@openlfcp/storage";
 import { type CborValue, cborMap, encode } from "@openlfcp/wire/cbor";
-import { releaseStatusWrites } from "./batch-status.js";
+import { releaseWrites } from "./batch-status.js";
 
 /**
  * Commit receipts (SDK-SECTIONS-INTEGRATION-01 §3, LFCP-02-025): the
@@ -10,6 +10,12 @@ import { releaseStatusWrites } from "./batch-status.js";
  * the same storage transaction as its Data Units, outbound entries and
  * profile checkpoint (commitOperation). A receipt is kept as a local mark
  * under its Resource and operation ID until the caller releases it.
+ *
+ * Released before its batch is final (accepted or rejected, §4.1), a
+ * receipt is no longer the caller's: receiptOf and receiptsOf no longer
+ * return it. Its batch is still reported (batchStatuses, the status
+ * snapshot) until it is final, and then forgotten; for that the receipt is
+ * kept under a `released-batch:` mark.
  */
 
 /** §3.2: what a committed batch produced. */
@@ -40,6 +46,9 @@ export class OperationIdReusedError extends Error {
 const PREFIX = "receipt:";
 const markKey = (resource: ResourceId, operationId: string) =>
   `${PREFIX}${toHex(resource)}:${operationId}`;
+const RELEASED = "released-batch:";
+const releasedKey = (resource: ResourceId, operationId: string) =>
+  `${RELEASED}${toHex(resource)}:${operationId}`;
 
 /** A plain value as the CBOR data model: objects become maps, absent fields are left out. */
 function cbor(value: unknown, depth = 0): CborValue {
@@ -78,8 +87,8 @@ interface Stored {
   readonly intentsHash: string;
 }
 
-/** The local-mark write that stores `receipt` (for the commit's transaction). */
-export function receiptWrite(resource: ResourceId, receipt: Receipt): StorageWrite {
+/** The receipt as stored in a local mark. */
+function storedReceipt(receipt: Receipt): string {
   const stored: Stored = {
     operationId: receipt.operationId,
     unitIds: receipt.unitIds.map((u) => toHex(u)),
@@ -87,10 +96,15 @@ export function receiptWrite(resource: ResourceId, receipt: Receipt): StorageWri
     modelRevision: receipt.modelRevision,
     intentsHash: receipt.intentsHash,
   };
+  return JSON.stringify(stored);
+}
+
+/** The local-mark write that stores `receipt` (for the commit's transaction). */
+export function receiptWrite(resource: ResourceId, receipt: Receipt): StorageWrite {
   return {
     op: "put-local-mark",
     key: markKey(resource, receipt.operationId),
-    value: JSON.stringify(stored),
+    value: storedReceipt(receipt),
   };
 }
 
@@ -116,6 +130,39 @@ export async function receiptOf(
   return raw === undefined ? undefined : parse(raw);
 }
 
+/** The receipt of a released batch that is not final yet; undefined otherwise. */
+export async function releasedReceiptOf(
+  storage: Pick<LfcpStorage, "localMarks">,
+  resource: ResourceId,
+  operationId: string,
+): Promise<Receipt | undefined> {
+  const raw = await storage.localMarks.get(releasedKey(resource, operationId));
+  return raw === undefined ? undefined : parse(raw);
+}
+
+/** The receipts of a Resource's released batches that are not final yet. */
+export async function releasedReceiptsOf(
+  storage: Pick<LfcpStorage, "localMarks">,
+  resource: ResourceId,
+): Promise<Receipt[]> {
+  return (await storage.localMarks.list(`${RELEASED}${toHex(resource)}:`)).map((m) =>
+    parse(m.value),
+  );
+}
+
+/** Keeps a released receipt for its batch's status (or, with null, forgets it). */
+export function releasedWrite(
+  resource: ResourceId,
+  operationId: string,
+  receipt: Receipt | null,
+): StorageWrite {
+  return {
+    op: "put-local-mark",
+    key: releasedKey(resource, operationId),
+    value: receipt === null ? null : storedReceipt(receipt),
+  };
+}
+
 /** Every receipt of a Resource that is not released yet. */
 export async function receiptsOf(
   storage: Pick<LfcpStorage, "localMarks">,
@@ -124,7 +171,11 @@ export async function receiptsOf(
   return (await storage.localMarks.list(`${PREFIX}${toHex(resource)}:`)).map((m) => parse(m.value));
 }
 
-/** §3.5: forgets a receipt the caller has finished with, and its batch status. */
+/**
+ * §3.5: forgets a receipt the caller has finished with. Its batch status
+ * goes with it when the batch is final (accepted or rejected); otherwise
+ * the batch is still reported until it is final.
+ */
 export async function releaseReceipt(
   storage: Pick<LfcpStorage, "commit" | "localMarks">,
   resource: ResourceId,
@@ -133,7 +184,7 @@ export async function releaseReceipt(
   const receipt = await receiptOf(storage, resource, operationId);
   const r = await storage.commit([
     { op: "put-local-mark", key: markKey(resource, operationId), value: null },
-    ...(receipt === undefined ? [] : releaseStatusWrites(resource, receipt)),
+    ...(receipt === undefined ? [] : await releaseWrites(storage, resource, receipt)),
   ]);
   if (!r.ok) throw new Error(`the receipt was not released: ${r.reason}`);
 }

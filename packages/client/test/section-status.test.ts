@@ -41,6 +41,8 @@ import {
   dekResolver,
   OutboundQueue,
   queueControlRecord,
+  receiptOf,
+  receiptsOf,
   releaseReceipt,
   type StatusEvent,
   SyncClient,
@@ -307,6 +309,54 @@ describe("batch status from server evidence (§4.1)", () => {
     expect(await batchStatus(d.storage, chain.R, "op-1", 2n)).toBeUndefined();
     expect((await d.storage.localMarks.list("batch-status:")).length).toBe(0);
     expect((await d.storage.localMarks.list("receipt-unit:")).length).toBe(0);
+  });
+
+  it("reports a batch released before its acceptance until it is accepted, then forgets it (§3.5)", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(223);
+    const srv = serve(server, chain);
+    const d = await device(server, chain);
+    srv.put = "silent";
+    await d.live();
+    const receipt = await d.sync.commit(chain.R, ["a"], { operationId: "op-1" });
+    await settle(50);
+    // The adapter's journal is done with the operation before the server answered.
+    await releaseReceipt(d.storage, chain.R, "op-1");
+    expect(await receiptOf(d.storage, chain.R, "op-1")).toBeUndefined();
+    expect(await receiptsOf(d.storage, chain.R)).toEqual([]);
+    expect((await d.sync.statusSnapshot(chain.R)).batches).toMatchObject([
+      { operationId: "op-1", status: "pending", acceptedUnitIds: [] },
+    ]);
+    expect(await batchStatus(d.storage, chain.R, "op-1", 2n)).toMatchObject({ status: "pending" });
+    // Accepted later: reported once more, then forgotten.
+    srv.put = "ack";
+    await d.at(60_000);
+    expect(kinds(d.events)).toEqual(["access", "batch:pending", "batch:accepted"]);
+    const last = d.events.at(-1);
+    expect(last?.kind === "batch" && last.acceptedUnitIds.map(toHex)).toEqual(
+      receipt.unitIds.map(toHex),
+    );
+    expect((await d.sync.statusSnapshot(chain.R)).batches).toEqual([]);
+    for (const prefix of ["batch-status:", "receipt-unit:", "released-batch:", "receipt:"])
+      expect(await d.storage.localMarks.list(prefix)).toEqual([]);
+  });
+
+  it("lets a new commit take the operation ID of a released batch not yet accepted", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(224);
+    const srv = serve(server, chain);
+    const d = await device(server, chain);
+    srv.put = "silent";
+    await d.live();
+    await d.sync.commit(chain.R, ["a"], { operationId: "op-1" });
+    await settle(50);
+    await releaseReceipt(d.storage, chain.R, "op-1");
+    const again = await d.sync.commit(chain.R, ["b"], { operationId: "op-1" });
+    expect(await receiptOf(d.storage, chain.R, "op-1")).toEqual(again);
+    const batches = (await d.sync.statusSnapshot(chain.R)).batches;
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.unitIds.map(toHex)).toEqual(again.unitIds.map(toHex));
+    expect(await d.storage.localMarks.list("released-batch:")).toEqual([]);
   });
 
   it("is evidence-unavailable on a server below durability 2, and for an ACK not durable", async () => {

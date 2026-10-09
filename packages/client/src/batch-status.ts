@@ -1,6 +1,13 @@
 import { type DataUnitId, dataUnitId, fromHex, type ResourceId, toHex } from "@openlfcp/core";
 import type { LfcpStorage, StorageWrite } from "@openlfcp/storage";
-import { type Receipt, receiptOf, receiptsOf } from "./receipts.js";
+import {
+  type Receipt,
+  receiptOf,
+  receiptsOf,
+  releasedReceiptOf,
+  releasedReceiptsOf,
+  releasedWrite,
+} from "./receipts.js";
 
 /**
  * The status of a committed batch (SDK-SECTIONS-INTEGRATION-01 §4.1,
@@ -8,7 +15,9 @@ import { type Receipt, receiptOf, receiptsOf } from "./receipts.js";
  * rejected. Kept next to the batch's receipt as a local mark, and written
  * in the same storage transaction as the evidence that changes it (the
  * ACK's dequeue), so a restart never loses an acceptance nor invents one.
- * An index maps each unit of a receipt to its operation.
+ * An index maps each unit of a receipt to its operation. A batch whose
+ * receipt was released before it was final stays here until it is final
+ * (receipts.ts).
  */
 
 /** §4.1. */
@@ -60,6 +69,42 @@ export function receiptIndexWrites(resource: ResourceId, receipt: Receipt): Stor
     key: unitKey(resource, toHex(u)),
     value: receipt.operationId,
   }));
+}
+
+/** Accepted or rejected: nothing more will happen to the batch (§4.1). */
+function isFinal(receipt: Receipt, s: Stored): boolean {
+  return s.rejection !== undefined || receipt.unitIds.every((u) => s.accepted.includes(toHex(u)));
+}
+
+/**
+ * The writes of releasing `receipt` (with its receipt mark's removal): a
+ * final batch's status and index go; a batch not final yet is kept,
+ * reported until it is final.
+ */
+export async function releaseWrites(
+  storage: Pick<LfcpStorage, "localMarks">,
+  resource: ResourceId,
+  receipt: Receipt,
+): Promise<StorageWrite[]> {
+  const s = await stored(storage, resource, receipt.operationId);
+  return isFinal(receipt, s)
+    ? releaseStatusWrites(resource, receipt)
+    : [releasedWrite(resource, receipt.operationId, receipt)];
+}
+
+/**
+ * The writes that forget a released batch still kept for its status, when
+ * a new commit takes its operation ID (the new batch replaces it).
+ */
+export async function replaceReleasedWrites(
+  storage: Pick<LfcpStorage, "localMarks">,
+  resource: ResourceId,
+  operationId: string,
+): Promise<StorageWrite[]> {
+  const released = await releasedReceiptOf(storage, resource, operationId);
+  return released === undefined
+    ? []
+    : [releasedWrite(resource, operationId, null), ...releaseStatusWrites(resource, released)];
 }
 
 /** The writes that forget a released receipt's status and index. */
@@ -133,7 +178,9 @@ export async function batchStatus(
   readyDurability: bigint | null,
   refused = false,
 ): Promise<BatchStatus | undefined> {
-  const receipt = await receiptOf(storage, resource, operationId);
+  const receipt =
+    (await receiptOf(storage, resource, operationId)) ??
+    (await releasedReceiptOf(storage, resource, operationId));
   if (receipt === undefined) return undefined;
   return deriveStatus(
     receipt,
@@ -143,7 +190,7 @@ export async function batchStatus(
   );
 }
 
-/** Every receipt's batch of a Resource, by operation ID. */
+/** Every receipt's batch of a Resource, and every released batch not final yet, by operation ID. */
 export async function batchStatuses(
   storage: Pick<LfcpStorage, "localMarks">,
   resource: ResourceId,
@@ -151,7 +198,12 @@ export async function batchStatuses(
   refused = false,
 ): Promise<BatchStatus[]> {
   const out: BatchStatus[] = [];
-  for (const receipt of await receiptsOf(storage, resource))
+  const held = await receiptsOf(storage, resource);
+  const ids = new Set(held.map((r) => r.operationId));
+  const released = (await releasedReceiptsOf(storage, resource)).filter(
+    (r) => !ids.has(r.operationId),
+  );
+  for (const receipt of [...held, ...released])
     out.push(
       deriveStatus(
         receipt,
@@ -177,7 +229,9 @@ export type UnitEvidence =
 /**
  * The writes recording `evidence` for `units` (hex), and the operations
  * whose stored status changed with the units that changed in each. Units
- * of no receipt are ignored. Pure apart from reading the marks.
+ * of no receipt are ignored. A released batch that becomes final is
+ * forgotten in the same writes; its final status is in `finals`, since it
+ * cannot be read back. Pure apart from reading the marks.
  */
 export async function recordEvidence(
   storage: Pick<LfcpStorage, "localMarks">,
@@ -187,6 +241,7 @@ export async function recordEvidence(
 ): Promise<{
   readonly writes: StorageWrite[];
   readonly changed: ReadonlyMap<string, readonly string[]>;
+  readonly finals: ReadonlyMap<string, BatchStatus>;
 }> {
   const byOperation = new Map<string, string[]>();
   for (const u of new Set(units)) {
@@ -195,6 +250,7 @@ export async function recordEvidence(
   }
   const writes: StorageWrite[] = [];
   const changed = new Map<string, readonly string[]>();
+  const finals = new Map<string, BatchStatus>();
   for (const [op, mine] of byOperation) {
     const s = await stored(storage, resource, op);
     let next: Stored = s;
@@ -224,11 +280,20 @@ export async function recordEvidence(
     }
     if (touched.length === 0) continue;
     changed.set(op, touched);
+    const released =
+      (await receiptOf(storage, resource, op)) === undefined
+        ? await releasedReceiptOf(storage, resource, op)
+        : undefined;
+    if (released !== undefined && isFinal(released, next)) {
+      finals.set(op, deriveStatus(released, next, null));
+      writes.push(releasedWrite(resource, op, null), ...releaseStatusWrites(resource, released));
+      continue;
+    }
     writes.push({
       op: "put-local-mark",
       key: statusKey(resource, op),
       value: JSON.stringify(next),
     });
   }
-  return { writes, changed };
+  return { writes, changed, finals };
 }

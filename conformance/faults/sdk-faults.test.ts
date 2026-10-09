@@ -16,6 +16,7 @@ import {
   NotWritableError,
   OutboundQueue,
   receiptOf,
+  releaseReceipt,
   type StatusEvent,
   SyncClient,
   saveControlChain,
@@ -298,6 +299,24 @@ describe("SDK faults at the durable boundary (LFCP-02-030)", () => {
       expect(second.events.filter((e) => e.kind === "batch" && e.status === "accepted")).toEqual(
         [],
       );
+      await second.close();
+    }));
+
+  it("a batch released by the adapter before its acceptance stays pending across a restart (SI03, §3.5)", () =>
+    inTemp(async (dir) => {
+      const first = await device(dir);
+      await first.sync.commit(first.R, [create, item(12)], { operationId: "op-1" });
+      // The plugin's journal finishes the operation once it is projected.
+      await releaseReceipt(first.storage, first.R, "op-1");
+      await first.close();
+
+      const second = await device(dir);
+      second.sync.start();
+      await new Promise((r) => setTimeout(r, 1_500));
+      expect(await receiptOf(second.storage, second.R, "op-1")).toBeUndefined();
+      expect((await second.sync.statusSnapshot(second.R)).batches).toMatchObject([
+        { operationId: "op-1", status: "pending", acceptedUnitIds: [] },
+      ]);
       await second.close();
     }));
 });
