@@ -64,7 +64,14 @@ import {
  * cannot auto-commit half way.
  */
 
-const VERSION = 1;
+/**
+ * The database version (LFCP-02-029). 1: the LFCP-059 stores (0.1.x).
+ * 2: the same stores; checkpoints may be sealed (LFCP-02-098) and 0.2
+ * records live in local marks. Nothing is converted from 1 to 2: the
+ * version only makes a 0.1.x client, which opens version 1, refuse the
+ * database (VersionError) instead of reading sealed rows as plaintext.
+ */
+export const IDB_VERSION = 2;
 const STORES = [
   "records",
   "heads",
@@ -208,7 +215,10 @@ class HeadMismatch {
   constructor(readonly result: CommitResult) {}
 }
 
-function upgrade(db: IDBDatabase): void {
+/** Brings a database from version `from` to IDB_VERSION, in the version change transaction. */
+function upgrade(db: IDBDatabase, from: number): void {
+  // 1 → 2 adds no store: the stores of version 1 are kept as they are.
+  if (from >= 1) return;
   const plain = (name: Store) => db.createObjectStore(name);
   db.createObjectStore("records").createIndex("r", "r");
   plain("heads");
@@ -247,11 +257,19 @@ export class IdbLfcpStorage implements LfcpStorage {
     const factory = options.indexedDB ?? globalThis.indexedDB;
     if (factory === undefined)
       throw new LfcpError("UNSUPPORTED_VALUE", "IndexedDB is not available in this runtime");
-    const open = factory.open(name, VERSION);
-    open.onupgradeneeded = () => upgrade(open.result);
+    const open = factory.open(name, IDB_VERSION);
+    open.onupgradeneeded = (event) => upgrade(open.result, event.oldVersion);
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
       open.onsuccess = () => resolve(open.result);
-      open.onerror = () => reject(open.error);
+      open.onerror = () =>
+        reject(
+          open.error?.name === "VersionError"
+            ? new LfcpError(
+                "UNSUPPORTED_VALUE",
+                `IndexedDB ${name} was written by a newer client than this one (version ${IDB_VERSION}); it is left as it is`,
+              )
+            : open.error,
+        );
       open.onblocked = () =>
         reject(
           new LfcpError("UNSUPPORTED_VALUE", `IndexedDB ${name} is blocked by another connection`),

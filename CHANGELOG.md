@@ -152,6 +152,13 @@ remove or rename any.
   Resource was not live in this session. An incomplete load never becomes
   a new, empty section (SHARED-SECTIONS-PROFILE-01 §13). The owner still
   creates its new Resource's section offline.
+- `@openlfcp/storage-idb` opens its database at version 2 (`IDB_VERSION`,
+  LFCP-02-029). A 0.1.x database (version 1) is kept as it is, with no
+  store changed. A 0.1.x client then refuses the database (VersionError)
+  instead of reading sealed checkpoints (LFCP-02-098) as plaintext.
+  Downgrading is supported only to a client that knows version 2. A
+  database of a newer client is refused with `UNSUPPORTED_VALUE` and left
+  untouched.
 
 ## 0.1.3 — 2026-10-08
 

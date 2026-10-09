@@ -7,6 +7,7 @@
 export const PACKAGE = "@openlfcp/storage-idb";
 
 export {
+  IDB_VERSION,
   IdbLfcpStorage,
   type IdbLocalState,
   type IdbStorageOptions,
