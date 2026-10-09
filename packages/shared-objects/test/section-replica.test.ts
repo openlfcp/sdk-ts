@@ -751,6 +751,49 @@ describe("SectionReplica: lifecycle (§9)", () => {
     expect(r.tree().tree.map((e) => e.id)).toEqual([T, P, X, Y]);
   });
 
+  it("a concurrent delete and restore is a lifecycle conflict that blocks the branch, not a deletion (§7.6)", () => {
+    const r = built();
+    const save = r.save();
+    const branch = (n: number, intents: SectionIntent[]) => {
+      const w = SectionReplica.fromSave(
+        save,
+        { resource, principal: principalId(new Uint8Array(32).fill(n)) },
+        "local-state",
+      );
+      const before = w.changes().length;
+      for (const i of intents) w.commit([i]);
+      return w.changes().slice(before);
+    };
+    // The deleting branch made more operations first: its value is Automerge's
+    // provisional one (as in schedule seed 2). Both actor orders; no winner either way.
+    for (const [del, res] of [
+      [71, 72],
+      [72, 71],
+    ] as const) {
+      const merged = SectionReplica.fromChanges(
+        [
+          ...r.changes(),
+          ...branch(del, [
+            { intent: "section.set_title", title: "Busy 1" },
+            { intent: "section.set_title", title: "Busy 2" },
+            { intent: "section.set_title", title: "Busy 3" },
+            { intent: "node.delete", id: T },
+          ]),
+          ...branch(res, [{ intent: "node.restore", id: T }]),
+        ],
+        { resource, principal: alice },
+      ).replica;
+      const t = merged.tree();
+      expect(t.classification).toBe("STRUCTURAL_ATTENTION");
+      expect(t.recovery.find((x) => x.id === T)?.code).toBe("LIFECYCLE_CONFLICT");
+      expect(t.recovery.find((x) => x.id === P)?.code).toBe("BLOCKED_PARENT");
+      // No winner: nothing is hidden, and nothing is an edit under a deleted ancestor.
+      expect(t.hidden).toEqual([]);
+      expect(t.retainedConcurrentEdits).toEqual([]);
+      expect(t.tree.map((e) => e.id)).toEqual([X, Y]);
+    }
+  });
+
   it("writes an explicit restore even when the node is already active", () => {
     const r = built();
     const before = r.revision();

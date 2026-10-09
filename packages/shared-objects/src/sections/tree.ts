@@ -12,7 +12,8 @@ import { type SectionValidation, validateSection } from "./schema.js";
  * - every member of a cycle of the selected parent graph is PARENT_CYCLE;
  * - every node under a conflicted, cyclic, invalid or collided node is
  *   BLOCKED_PARENT, to a fixed point;
- * - a deleted node, and every node under one, is hidden;
+ * - a deleted node, and every node under one, is hidden; a node whose
+ *   lifecycle is in conflict is not: its branch is blocked (§7.6);
  * - the tree scans each children list in its merged order and emits a node
  *   only when it is eligible, visible and selects exactly that entry.
  *
@@ -121,7 +122,11 @@ export function deriveTree(
   // One pass over the nodes: selected parent, deletion, conflicts.
   const deleted = new Set<string>();
   for (const id of keys) {
-    if (str(owner(id)?.lifecycle) === "deleted") deleted.add(id);
+    // §7.6: a lifecycle conflict has no winner. It blocks the branch (below)
+    // instead of the provisional value hiding it: the node is not deleted,
+    // and edits under it are not under a deleted ancestor.
+    const lifecycles = new Set(values(owner(id), "lifecycle"));
+    if (lifecycles.size === 1 && lifecycles.has("deleted")) deleted.add(id);
     if (collided.has(id)) continue;
     const n = node(id) as AMap;
     const selected = values(n, "placement");
@@ -137,7 +142,7 @@ export function deriveTree(
         selected.map((p) => ({ placement: p ?? "", parent: parentOf(p) ?? "" })),
       );
     }
-    if (new Set(values(owner(id), "lifecycle")).size > 1) blocked.set(id, "LIFECYCLE_CONFLICT");
+    if (lifecycles.size > 1) blocked.set(id, "LIFECYCLE_CONFLICT");
   }
   for (const id of invalid.keys()) blocked.delete(id);
 
