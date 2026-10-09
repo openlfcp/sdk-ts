@@ -14,6 +14,13 @@ export {
   type ProfileExcludeResult,
   type ProfileUnit,
 } from "./apply.js";
+export {
+  ACCEPTANCE_DURABILITY,
+  type BatchStatus,
+  type BatchStatusName,
+  batchStatus,
+  batchStatuses,
+} from "./batch-status.js";
 export { type CheckpointSource, ProfileCheckpointer } from "./checkpoint.js";
 export { type ClaimJournal, pendingInvitationClaims } from "./claim-journal.js";
 export {
@@ -50,7 +57,9 @@ export {
   resumeInvitationClaim,
 } from "./invite.js";
 export {
+  type AckedItem,
   type AckOutcome,
+  type AckWrites,
   type BlockedItem,
   exponentialBackoff,
   type NackOutcome,
@@ -77,6 +86,7 @@ export {
   OperationIdReusedError,
   type Receipt,
   receiptOf,
+  receiptsOf,
   releaseReceipt,
 } from "./receipts.js";
 export {
@@ -84,6 +94,15 @@ export {
   type ResourcePhaseEvent,
   resourcePhaseTransition,
 } from "./resource-state.js";
+export {
+  type ReceivedFact,
+  type ReceivedState,
+  type ReofferReason,
+  receivedState,
+  type SectionState,
+  type StatusEvent,
+  type StatusSnapshot,
+} from "./section-status.js";
 export { type CreatedSnapshot, type CreateSnapshotOptions, createSnapshot } from "./snapshot.js";
 export {
   adoptStoredDeks,

@@ -145,6 +145,22 @@ export interface AckOutcome {
   readonly correlated: boolean;
 }
 
+/** An item an ACK removed from the queue, for writes that go with its removal. */
+export interface AckedItem {
+  readonly itemId: Hash32;
+  readonly resourceId: ResourceId;
+  readonly kind: OutboundKind;
+}
+
+/**
+ * Writes committed in the same transaction as an ACK's dequeue, from the
+ * items it removed and what the ACK established (e.g. batch acceptance).
+ */
+export type AckWrites = (
+  acked: readonly AckedItem[],
+  ack: { readonly durability: bigint; readonly correlated: boolean },
+) => Promise<readonly StorageWrite[]>;
+
 /** A blocked item as surfaced to the application. */
 export interface BlockedItem {
   readonly itemId: Hash32;
@@ -509,14 +525,16 @@ export class OutboundQueue {
    * An ACK (§59): removes the queued items whose IDs it names (field 1),
    * and records them in the Resource's sync state. Items of the
    * acknowledged message it does not name stay queued. Idempotent: a
-   * repeated ACK, or one for items already gone, changes nothing.
+   * repeated ACK, or one for items already gone, changes nothing. `also`
+   * adds writes to the dequeue's transaction.
    */
-  async onAck(message: LfcpMessage<"ACK">, now: string): Promise<AckOutcome> {
+  async onAck(message: LfcpMessage<"ACK">, now: string, also?: AckWrites): Promise<AckOutcome> {
     const flight = this.#land(message.correlationId);
     const named = message.body.objectIds ?? [];
     const durability = message.body.durable === true ? this.#durability : 0n;
     const requestType = message.body.requestType;
     const acked: Hash32[] = [];
+    const ackedItems: AckedItem[] = [];
     const below: Hash32[] = [];
     const byResource = new Map<string, Hash32[]>();
     for (const id of named) {
@@ -529,6 +547,7 @@ export class OutboundQueue {
         continue;
       }
       acked.push(item.itemId);
+      ackedItems.push({ itemId: item.itemId, resourceId: item.resourceId, kind: item.kind });
       const key = toHex(item.resourceId);
       byResource.set(key, [...(byResource.get(key) ?? []), item.itemId]);
       this.#forget(item.itemId);
@@ -555,6 +574,8 @@ export class OutboundQueue {
         },
       });
     }
+    if (also !== undefined && ackedItems.length > 0)
+      writes.push(...(await also(ackedItems, { durability, correlated: flight !== undefined })));
     await this.#commit(writes);
     const notCovered =
       flight?.itemIds.filter(

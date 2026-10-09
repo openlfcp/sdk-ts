@@ -5,6 +5,8 @@ import {
   type DataEpoch,
   type DataUnitId,
   dataEpoch,
+  dataUnitId,
+  fromHex,
   type Hash32,
   hash32,
   LfcpError,
@@ -63,6 +65,14 @@ import {
   startRecovery,
 } from "./access-recovery.js";
 import type { ApplyOutcome, DataUnitApplier, EpochReconciliation } from "./apply.js";
+import {
+  ACCEPTANCE_DURABILITY,
+  type BatchStatus,
+  batchStatus,
+  batchStatuses,
+  recordEvidence,
+  type UnitEvidence,
+} from "./batch-status.js";
 import type { ProfileCheckpointer } from "./checkpoint.js";
 import { LfcpConnection, type WebSocketFactory } from "./connection.js";
 import { EngineGuard, isEngineTrap, snapshotItem } from "./engine-guard.js";
@@ -76,6 +86,14 @@ import {
   resourcePhaseTransition,
 } from "./resource-state.js";
 import {
+  type ReofferReason,
+  receivedState,
+  type SectionState,
+  type StatusEvent,
+  type StatusEventBody,
+  type StatusSnapshot,
+} from "./section-status.js";
+import {
   adoptStoredDeks,
   commitOperation,
   dekResolver,
@@ -84,6 +102,10 @@ import {
   saveControlConflict,
 } from "./storage.js";
 import { NotWritableError, type WriteAccess, writeAccess } from "./write-access.js";
+
+/** Write access as a comparable key, to report it only when it changed. */
+const accessKey = (a: WriteAccess): string =>
+  `${a.allowed}:${a.reason}:${a.controlHead === null ? "" : toHex(a.controlHead)}`;
 
 /**
  * The client sync session (LFCP-039a): one LFCP connection to a server and
@@ -148,6 +170,8 @@ export interface CommitBinding<T> {
   readonly codec: DataProfileCodec<T>;
   /** Validates and changes the batch on a copy; null when it writes nothing. Throws to refuse it. */
   stage(intents: readonly unknown[]): StagedOperation<T> | null;
+  /** The section's state (SDK-SECTIONS-INTEGRATION-01 §4.3); undefined before there is a section. */
+  section?(): SectionState | undefined;
 }
 
 /** A Resource to synchronize: its Data Profile applier (and optional checkpoints and Snapshots). */
@@ -250,6 +274,8 @@ export type SyncEvent =
       readonly crashed: readonly DataUnitId[];
     }
   | { readonly type: "ack"; readonly outcome: AckOutcome }
+  /** SDK-SECTIONS-INTEGRATION-01 §5: the Resource's status stream (statusSnapshot after a gap). */
+  | { readonly type: "status"; readonly resourceId: ResourceId; readonly event: StatusEvent }
   /** A NACK of an outbound object: stale, equivocation alarm, rejected, repropose, … */
   | { readonly type: "nack"; readonly outcome: NackOutcome }
   /** A refusal or failure that concerns a Resource or the session (codes and reasons, never payloads). */
@@ -377,6 +403,14 @@ interface ResourceContext {
   view: Extract<ChainResult, { kind: "linear" }> | null;
   /** The head and local time of the last Control sync's validation; kept across reconnects. */
   verified: { readonly head: Uint8Array; readonly at: number } | null;
+  /** The first signal of a server's loss not yet followed by an offer (§4.2). */
+  lossReason: ReofferReason | null;
+  /** What the status stream last reported, to report changes only. */
+  reported: {
+    access: string | null;
+    section: SectionState | null;
+    readonly batches: Map<string, BatchStatus["status"]>;
+  };
   /** Records fetched in the current Control round. */
   fetched: Uint8Array[];
   /** The Control sequence the current round must reach. */
@@ -483,6 +517,10 @@ export class SyncClient {
   #maxMessageBytes = 8 * 1024 * 1024;
   /** Serializes message handling: each message is handled after the previous one finished. */
   #queue: Promise<void> = Promise.resolve();
+  /** READY's durability in this session; null without one (§37). */
+  #readyDurability: bigint | null = null;
+  /** The status stream's revision per Resource (hex), in this session (§5). */
+  readonly #statusRevision = new Map<string, number>();
 
   constructor(options: SyncClientOptions) {
     this.#o = options;
@@ -515,6 +553,143 @@ export class SyncClient {
 
   #emit(event: SyncEvent): void {
     for (const l of this.#listeners) l(event);
+  }
+
+  // -------------------------------------------------------------------------
+  // Status (SDK-SECTIONS-INTEGRATION-01 §4, §5; LFCP-02-026)
+
+  #emitStatus(resource: ResourceId, body: StatusEventBody): void {
+    const key = toHex(resource);
+    const revision = (this.#statusRevision.get(key) ?? 0) + 1;
+    this.#statusRevision.set(key, revision);
+    this.#emit({
+      type: "status",
+      resourceId: resource,
+      event: Object.freeze({ ...body, revision }) as StatusEvent,
+    });
+  }
+
+  /**
+   * §5: the complete status of `resource` at the stream's current revision:
+   * every unreleased batch, the received units that wait or were refused,
+   * the section state and write access. Events at or below its revision
+   * are already in it.
+   */
+  async statusSnapshot(resource: ResourceId): Promise<StatusSnapshot> {
+    const ctx = this.#resources.get(toHex(resource));
+    const batches = await batchStatuses(this.#o.storage, resource, this.#readyDurability);
+    const received = await receivedState(this.#o.storage, resource);
+    const access = await this.canWrite(resource);
+    const section = ctx?.binding.commit?.section?.() ?? "unknown";
+    if (ctx !== undefined) {
+      for (const b of batches) ctx.reported.batches.set(b.operationId, b.status);
+      ctx.reported.access = accessKey(access);
+      ctx.reported.section = section === "unknown" ? null : section;
+    }
+    return Object.freeze({
+      revision: this.#statusRevision.get(toHex(resource)) ?? 0,
+      batches: Object.freeze(batches),
+      received,
+      section,
+      access,
+    });
+  }
+
+  /** The batches of `operations`, reported as they are now. */
+  async #reportBatches(resource: ResourceId, operations: Iterable<string>): Promise<void> {
+    const ctx = this.#resources.get(toHex(resource));
+    for (const op of operations) {
+      const b = await batchStatus(this.#o.storage, resource, op, this.#readyDurability);
+      if (b === undefined) continue;
+      ctx?.reported.batches.set(op, b.status);
+      this.#emitStatus(resource, { kind: "batch", ...b });
+    }
+  }
+
+  /** §4.3: a received unit that is held, waits for a dependency, or was refused. */
+  #reportReceived(resource: ResourceId, outcome: ApplyOutcome): void {
+    switch (outcome.kind) {
+      case "profile-held":
+        this.#emitStatus(resource, { kind: "received", fact: "held", unitIds: [outcome.unitId] });
+        return;
+      case "profile-pending":
+      case "held":
+        this.#emitStatus(resource, {
+          kind: "received",
+          fact: "waiting",
+          unitIds: [outcome.unitId],
+        });
+        return;
+      case "profile-rejected":
+        this.#emitStatus(resource, {
+          kind: "received",
+          fact: "refused",
+          unitIds: [outcome.unitId],
+          diagnostic: outcome.message,
+        });
+        return;
+    }
+  }
+
+  /** Batches already reported whose status the session's durability changed (§4.1). */
+  async #refreshBatches(): Promise<void> {
+    for (const ctx of this.#resources.values()) {
+      if (ctx.reported.batches.size === 0) continue;
+      const R = ctx.binding.resourceId;
+      const changed: string[] = [];
+      for (const b of await batchStatuses(this.#o.storage, R, this.#readyDurability)) {
+        const old = ctx.reported.batches.get(b.operationId);
+        if (old !== undefined && old !== b.status) changed.push(b.operationId);
+      }
+      await this.#reportBatches(R, changed);
+    }
+  }
+
+  /** Reports write access when it changed (§5 `access`). */
+  async #refreshAccess(ctx: ResourceContext): Promise<void> {
+    const R = ctx.binding.resourceId;
+    const access = await this.canWrite(R);
+    const key = accessKey(access);
+    if (key === ctx.reported.access) return;
+    ctx.reported.access = key;
+    this.#emitStatus(R, { kind: "access", access });
+  }
+
+  /** Reports the section state when it changed (§5 `section-state`). */
+  #refreshSection(ctx: ResourceContext): void {
+    const state = ctx.binding.commit?.section?.();
+    if (state === undefined || state === ctx.reported.section) return;
+    ctx.reported.section = state;
+    this.#emitStatus(ctx.binding.resourceId, { kind: "section-state", state });
+  }
+
+  /**
+   * §4.1: what an ACK establishes for units of `resource`: acceptance when
+   * it answers our message (correlated), says durable at a READY level of
+   * 2 or more, and comes from a route of the Resource's current route set.
+   */
+  #ackEvidence(resource: ResourceId, durability: bigint, correlated: boolean): UnitEvidence {
+    const route = this.#resources.get(toHex(resource))?.view?.state.route;
+    const onRoute =
+      route !== undefined &&
+      (route.endpoints.some((e) => e.url === this.#o.url) || route.coordinatorUrl === this.#o.url);
+    return correlated && onRoute && durability >= ACCEPTANCE_DURABILITY
+      ? { kind: "accepted" }
+      : { kind: "unconfirmed" };
+  }
+
+  /** Records `evidence` for units (hex) of `resource` and reports the batches it changed. */
+  async #evidence(
+    resource: ResourceId,
+    units: readonly string[],
+    evidence: UnitEvidence,
+  ): Promise<ReadonlyMap<string, readonly string[]>> {
+    const { writes, changed } = await recordEvidence(this.#o.storage, resource, units, evidence);
+    if (writes.length === 0) return changed;
+    const r = await this.#o.storage.commit(writes);
+    if (!r.ok) throw new Error(`the batch status was not stored: ${r.reason}`);
+    await this.#reportBatches(resource, changed.keys());
+    return changed;
   }
 
   #serial(fn: () => Promise<void> | void): void {
@@ -589,6 +764,8 @@ export class SyncClient {
         wanted: true,
         view: null,
         verified: null,
+        lossReason: null,
+        reported: { access: null, section: null, batches: new Map() },
         fetched: [],
         controlTarget: null,
         remoteHave: [],
@@ -820,11 +997,15 @@ export class SyncClient {
       durability: ready.durability,
       maxMessageBytes: ready.maxMessageBytes,
     });
+    this.#readyDurability = ready.durability;
+    await this.#refreshBatches();
     for (const ctx of this.#resources.values()) if (ctx.wanted) await this.#sendOpen(ctx);
   }
 
   async #onClosed(reason: string): Promise<void> {
     this.#emit({ type: "connection", state: "DISCONNECTED", reason });
+    this.#readyDurability = null;
+    await this.#refreshBatches();
     for (const r of this.#requests.values())
       if (r.kind === "host")
         r.reject(new Error(`the connection closed before RESOURCE_HOSTED: ${reason}`));
@@ -889,6 +1070,8 @@ export class SyncClient {
             url: this.#o.url,
             outcome: "hosted",
           });
+          ctx.lossReason ??= "rehost";
+          this.#emitStatus(ctx.binding.resourceId, { kind: "rehost", route: this.#o.url });
           if (ctx.wanted) await this.#sendOpen(ctx);
         }
         return;
@@ -965,9 +1148,21 @@ export class SyncClient {
         }
         if (request !== undefined) {
           this.#done(m);
-          if (request.kind === "offer-data")
-            for (const u of request.units)
-              this.#resources.get(request.resource)?.offering.delete(u.id);
+          if (request.kind === "offer-data") {
+            const ctx = this.#resources.get(request.resource);
+            for (const u of request.units) ctx?.offering.delete(u.id);
+            if (ctx !== undefined) {
+              // §4.2: a re-offered unit of ours is accepted again by this ACK.
+              const named = new Set((m.body.objectIds ?? []).map((id) => toHex(id)));
+              const durability = m.body.durable === true ? (this.#readyDurability ?? 0n) : 0n;
+              const R = ctx.binding.resourceId;
+              await this.#evidence(
+                R,
+                request.units.map((u) => u.id).filter((id) => named.has(id)),
+                this.#ackEvidence(R, durability, true),
+              );
+            }
+          }
           return;
         }
         await this.#onAck(m);
@@ -1239,6 +1434,7 @@ export class SyncClient {
     // DEKs we already hold for epochs the saved chain now has (our own
     // rotation, or a package that came before the row): no request needed.
     await adoptStoredDeks(this.#o.storage, this.#o.secrets, chain);
+    await this.#refreshAccess(ctx);
     const epochsChanged =
       before === null ||
       [...chain.state.epochs.values()].some((e) => {
@@ -1346,6 +1542,7 @@ export class SyncClient {
       }
       await this.#o.storage.commit(writes);
     }
+    await this.#refreshAccess(ctx);
     const missing = await this.#epochsWithoutDek(ctx);
     const current = view.state.epoch.epoch;
     if (missing.some((e) => e === current)) {
@@ -1608,6 +1805,10 @@ export class SyncClient {
       );
       if (!committed) staged?.revert();
       else staged?.committed(receipt.unitIds);
+      if (committed) {
+        await this.#reportBatches(R, [receipt.operationId]);
+        this.#refreshSection(ctx);
+      }
       await this.#flush(ctx);
       return receipt;
     } catch (e) {
@@ -1780,14 +1981,19 @@ export class SyncClient {
       if (outcome.kind === "rejected" && outcome.wireCode === "MISSING_DEPENDENCY")
         needControl = true;
       this.#emit({ type: "unit", resourceId: R, outcome });
+      this.#reportReceived(R, outcome);
       // Held units this one released (§26.2): their outcomes too.
       const released = "released" in outcome ? outcome.released : [];
       for (const r of released) {
         if (r.kind === "applied" || r.kind === "profile-pending") changed = true;
         this.#emit({ type: "unit", resourceId: R, outcome: r });
+        this.#reportReceived(R, r);
       }
     }
-    if (changed) ctx.binding.checkpointer?.noteChange();
+    if (changed) {
+      ctx.binding.checkpointer?.noteChange();
+      this.#refreshSection(ctx);
+    }
     if (needControl) this.#refreshControl(ctx);
     if (
       ctx.state === "DATA_SYNC" &&
@@ -1836,7 +2042,27 @@ export class SyncClient {
 
   async #onAck(m: LfcpMessage<"ACK">): Promise<void> {
     if (m.body.requestType === MESSAGE_TYPE.CONTROL_PUT) await this.#adoptAcked(m);
-    const outcome = await this.#o.outbound.onAck(m, iso(this.#o.now()));
+    // §4.1: acceptance is recorded in the dequeue's transaction.
+    const changed: [ResourceId, ReadonlyMap<string, readonly string[]>][] = [];
+    const outcome = await this.#o.outbound.onAck(m, iso(this.#o.now()), async (items, ack) => {
+      const byResource = new Map<string, { R: ResourceId; units: string[] }>();
+      for (const item of items) {
+        if (item.kind !== "data-unit") continue;
+        const key = toHex(item.resourceId);
+        const entry = byResource.get(key) ?? { R: item.resourceId, units: [] };
+        entry.units.push(toHex(item.itemId));
+        byResource.set(key, entry);
+      }
+      const writes: StorageWrite[] = [];
+      for (const { R, units } of byResource.values()) {
+        const evidence = this.#ackEvidence(R, ack.durability, ack.correlated);
+        const r = await recordEvidence(this.#o.storage, R, units, evidence);
+        writes.push(...r.writes);
+        if (r.changed.size > 0) changed.push([R, r.changed]);
+      }
+      return writes;
+    });
+    for (const [R, ops] of changed) await this.#reportBatches(R, ops.keys());
     this.#emit({ type: "ack", outcome });
     // Our own Control Record was committed: catch up, since the server does not push it back to us.
     if (m.body.requestType === MESSAGE_TYPE.CONTROL_PUT && outcome.acked.length > 0)
@@ -1867,6 +2093,34 @@ export class SyncClient {
 
   async #onNack(m: LfcpMessage<"NACK">): Promise<void> {
     const outcome = await this.#o.outbound.onNack(m, iso(this.#o.now()));
+    // §4.1: a terminal NACK rejects the batch of the unit.
+    if (
+      outcome.kind === "rejected" ||
+      outcome.kind === "stale" ||
+      outcome.kind === "equivocation-alarm"
+    ) {
+      const code =
+        outcome.kind === "rejected"
+          ? outcome.code
+          : outcome.kind === "stale"
+            ? "STALE_DATA_EPOCH"
+            : "ACTOR_EQUIVOCATION";
+      const byResource = new Map<string, { R: ResourceId; units: string[] }>();
+      for (const item of outcome.items) {
+        if (item.kind !== "data-unit") continue;
+        const R = (await this.#o.storage.outbound.get(item.itemId))?.resourceId;
+        if (R === undefined) continue;
+        const entry = byResource.get(toHex(R)) ?? { R, units: [] };
+        entry.units.push(toHex(item.itemId));
+        byResource.set(toHex(R), entry);
+      }
+      for (const { R, units } of byResource.values())
+        await this.#evidence(R, units, { kind: "rejected", code });
+    }
+    if (outcome.kind === "needs-offer") {
+      const ctx = this.#ctx(outcome.resourceId);
+      if (ctx !== undefined) ctx.lossReason ??= "unknown-previous";
+    }
     this.#emit({ type: "nack", outcome });
     if (outcome.kind === "needs-control-sync")
       for (const ctx of this.#resources.values())
@@ -2072,12 +2326,26 @@ export class SyncClient {
           !ctx.offering.has(toHex(u.unitId)),
       );
       sent += units.length;
+      // §4.2: units of our batches the server lost are pending again.
+      const lost = await this.#evidence(
+        R,
+        units.map((u) => toHex(u.unitId)),
+        { kind: "reoffered" },
+      );
+      const again = [...lost.values()].flat();
+      if (again.length > 0)
+        this.#emitStatus(R, {
+          kind: "reoffered",
+          unitIds: Object.freeze(again.map((u) => dataUnitId(fromHex(u)))),
+          reason: ctx.lossReason ?? "have-gap",
+        });
       this.#offerUnits(
         ctx,
         units.map((u) => ({ id: toHex(u.unitId), bytes: u.bytes })),
       );
     }
     await this.#o.outbound.offered(R);
+    ctx.lossReason = null;
     if (sent > 0) await this.#offerKeys(ctx);
     await this.#flush(ctx);
   }

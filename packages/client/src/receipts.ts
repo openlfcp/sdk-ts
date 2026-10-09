@@ -2,6 +2,7 @@ import { type DataUnitId, dataUnitId, fromHex, type ResourceId, toHex } from "@o
 import { sha256 } from "@openlfcp/crypto";
 import type { LfcpStorage, StorageWrite } from "@openlfcp/storage";
 import { type CborValue, cborMap, encode } from "@openlfcp/wire/cbor";
+import { releaseStatusWrites } from "./batch-status.js";
 
 /**
  * Commit receipts (SDK-SECTIONS-INTEGRATION-01 §3, LFCP-02-025): the
@@ -93,14 +94,7 @@ export function receiptWrite(resource: ResourceId, receipt: Receipt): StorageWri
   };
 }
 
-/** §3.4: the receipt of an operation, definitive across restarts; undefined when nothing was committed. */
-export async function receiptOf(
-  storage: Pick<LfcpStorage, "localMarks">,
-  resource: ResourceId,
-  operationId: string,
-): Promise<Receipt | undefined> {
-  const raw = await storage.localMarks.get(markKey(resource, operationId));
-  if (raw === undefined) return undefined;
+const parse = (raw: string): Receipt => {
   const s = JSON.parse(raw) as Stored;
   return Object.freeze({
     operationId: s.operationId,
@@ -110,16 +104,36 @@ export async function receiptOf(
     intentsHash: s.intentsHash,
     durable: true,
   });
+};
+
+/** §3.4: the receipt of an operation, definitive across restarts; undefined when nothing was committed. */
+export async function receiptOf(
+  storage: Pick<LfcpStorage, "localMarks">,
+  resource: ResourceId,
+  operationId: string,
+): Promise<Receipt | undefined> {
+  const raw = await storage.localMarks.get(markKey(resource, operationId));
+  return raw === undefined ? undefined : parse(raw);
 }
 
-/** §3.5: forgets a receipt the caller has finished with. */
+/** Every receipt of a Resource that is not released yet. */
+export async function receiptsOf(
+  storage: Pick<LfcpStorage, "localMarks">,
+  resource: ResourceId,
+): Promise<Receipt[]> {
+  return (await storage.localMarks.list(`${PREFIX}${toHex(resource)}:`)).map((m) => parse(m.value));
+}
+
+/** §3.5: forgets a receipt the caller has finished with, and its batch status. */
 export async function releaseReceipt(
-  storage: Pick<LfcpStorage, "commit">,
+  storage: Pick<LfcpStorage, "commit" | "localMarks">,
   resource: ResourceId,
   operationId: string,
 ): Promise<void> {
+  const receipt = await receiptOf(storage, resource, operationId);
   const r = await storage.commit([
     { op: "put-local-mark", key: markKey(resource, operationId), value: null },
+    ...(receipt === undefined ? [] : releaseStatusWrites(resource, receipt)),
   ]);
   if (!r.ok) throw new Error(`the receipt was not released: ${r.reason}`);
 }

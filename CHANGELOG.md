@@ -96,6 +96,26 @@ remove or rename any.
   while writing is not allowed with `NotWritableError` (`NOT_WRITABLE`,
   §3.6) and writes nothing; it threw `LfcpError` (`UNSUPPORTED_VALUE`)
   for a missing chain or DEK before.
+- Batch status and the status stream (LFCP-02-026,
+  SDK-SECTIONS-INTEGRATION-01 §4–§5) in `SyncClient`. A committed batch
+  is `pending` until every unit is accepted: an ACK that answers our
+  DATA_PUT, says durable, comes from a server whose READY promised
+  durability 2 or more, and is on the Resource's route set. The
+  acceptance is stored with the receipt in the ACK's dequeue transaction,
+  so it survives a restart. Otherwise a batch is `evidence-unavailable`,
+  `rejected` after a terminal NACK (with its code and units), or `saved`
+  when it has no units. Units of a batch the server lost are reported as
+  `reoffered` with the first signal (`unknown-previous`, `have-gap` or
+  `rehost`): the batch is pending again until a new ACK. Received units
+  are reported as `held`, `waiting` or `refused`, with the section state
+  (`ready`, `importing`) and write access. Events come as `status` sync
+  events, with a revision per Resource that grows by one per event;
+  `statusSnapshot(resource)` gives the complete state at a revision. Also
+  new: `batchStatus`, `batchStatuses`, `receiptsOf`,
+  `SectionReplica.sectionState()`, and an optional `section()` on
+  `CommitBinding`. `releaseReceipt` also forgets the batch's status.
+  `OutboundQueue.onAck` takes an optional `also` that adds writes to the
+  dequeue's transaction.
 
 ## 0.1.3 — 2026-10-08
 

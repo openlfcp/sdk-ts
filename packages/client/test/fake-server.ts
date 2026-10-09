@@ -25,6 +25,8 @@ export class FakeServer {
   protocol = "lfcp-1";
   heartbeatMs = 0n;
   maxMessageBytes = 1_000_000n;
+  /** The durability READY advertises (§37). */
+  durability = 2n;
 
   readonly factory: WebSocketFactory = (url, protocols) => {
     const s = new FakeSocket(this, url, [...protocols]);
@@ -89,7 +91,7 @@ export class FakeSocket implements WebSocketLike {
         serverId: new Uint8Array(32).fill(9),
         wireProfiles: [WIRE_PROFILE],
         maxMessageBytes: this.server.maxMessageBytes,
-        durability: 2n,
+        durability: this.server.durability,
         heartbeatMs: this.server.heartbeatMs,
       });
       this.#session = step.session;

@@ -28,6 +28,7 @@ import {
   type SeenUnits,
   validateControlChain,
 } from "@openlfcp/wire";
+import { receiptIndexWrites } from "./batch-status.js";
 import { type CreateDataUnitOptions, type CreatedDataUnit, createDataUnit } from "./data-unit.js";
 import {
   intentsHash,
@@ -507,6 +508,7 @@ export async function commitOperation<T>(
     }
     writes.push(
       receiptWrite(resource, receipt),
+      ...receiptIndexWrites(resource, receipt),
       ...(typeof also === "function" ? also(created) : also),
     );
     const result = await storage.commit(writes);
