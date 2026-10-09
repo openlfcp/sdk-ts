@@ -147,6 +147,7 @@ if (phase === "first") {
     value: undefined,
   });
   writeFileSync(join(dir, "unit.hex"), toHex(unit.unitId));
+  const t0 = Date.now();
   try {
     await applier.receive(view, unit.bytes);
     out.received = "no trap";
@@ -154,6 +155,7 @@ if (phase === "first") {
     out.trap = isEngineTrap(e);
     out.error = describe(e);
   }
+  out.applyMs = Date.now() - t0;
 } else if (phase === "redeliver") {
   const unitHex = readFileSync(join(dir, "unit.hex"), "utf8");
   const stored = await storage.dataUnits.get(Uint8Array.from(Buffer.from(unitHex, "hex")));
@@ -162,6 +164,7 @@ if (phase === "first") {
   out.outcome = { kind: outcome.kind, code: outcome.code };
 } else {
   const unitHex = readFileSync(join(dir, "unit.hex"), "utf8");
+  const t0 = Date.now();
   try {
     const r = await applier.replayStored(view);
     out.crashed = r.crashed.map(toHex);
@@ -172,6 +175,7 @@ if (phase === "first") {
     out.error = describe(e);
   }
   out.unit = unitHex;
+  out.applyMs = Date.now() - t0;
 }
 out.applied = applied;
 out.engineAlive = engineAlive();

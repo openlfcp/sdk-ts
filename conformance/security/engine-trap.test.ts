@@ -18,47 +18,78 @@ import { describe, expect, it } from "vitest";
 
 const child = join(import.meta.dirname, "engine-trap.child.mjs");
 
+/**
+ * One trapping start takes about 20 s of CPU (applyChanges until the trap) and
+ * the test runs alone (its own vitest project, after the others: POST-010).
+ * The bound is generous so that only a stuck child reaches it, and a timeout
+ * says so instead of failing with an empty stderr.
+ */
+const START_TIMEOUT_MS = 300_000;
+
+/** Seconds each start took, reported with any failure. */
+const took: string[] = [];
+
 function start(dir: string, phase: string): Record<string, unknown> {
-  const r = spawnSync(process.execPath, [child, dir, phase], { encoding: "utf8", timeout: 60_000 });
-  if (r.status !== 0) throw new Error(`the ${phase} start failed:\n${r.stderr.slice(-2000)}`);
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, [child, dir, phase], {
+    encoding: "utf8",
+    timeout: START_TIMEOUT_MS,
+  });
+  const seconds = ((Date.now() - t0) / 1000).toFixed(1);
+  took.push(`${phase} ${seconds} s`);
+  const timedOut =
+    (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" ||
+    (r.status === null && r.signal !== null);
+  if (timedOut)
+    throw new Error(
+      `the ${phase} start timed out after ${START_TIMEOUT_MS / 1000} s (signal ${r.signal}); starts so far: ${took.join(", ")}\n${(r.stderr ?? "").slice(-2000)}`,
+    );
+  if (r.status !== 0)
+    throw new Error(
+      `the ${phase} start failed (exit ${r.status}); starts so far: ${took.join(", ")}\n${r.stderr.slice(-2000)}`,
+    );
   const last = r.stdout.trim().split("\n").at(-1) as string;
   return JSON.parse(last) as Record<string, unknown>;
 }
 
 describe("the crash-loop breaker against a real Automerge trap", () => {
-  it("classifies the trap, makes the unit a suspect, then quarantines it", () => {
-    const dir = mkdtempSync(join(tmpdir(), "lfcp-engine-trap-"));
-    try {
-      const first = start(dir, "first");
-      expect(first).toMatchObject({
-        trap: true,
-        error: { name: "RuntimeError" },
-        applied: 1,
-        engineAlive: false,
-      });
-      const marks = first.marks as [string, string][];
-      expect(marks.map(([k]) => k)).toEqual(["applying:units:R"]);
-      const unit = `unit:${(marks[0]?.[1].match(/unit:([0-9a-f]+)/) ?? [])[1]}`;
+  it(
+    "classifies the trap, makes the unit a suspect, then quarantines it",
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), "lfcp-engine-trap-"));
+      try {
+        const first = start(dir, "first");
+        expect(first).toMatchObject({
+          trap: true,
+          error: { name: "RuntimeError" },
+          applied: 1,
+          engineAlive: false,
+        });
+        const marks = first.marks as [string, string][];
+        expect(marks.map(([k]) => k)).toEqual(["applying:units:R"]);
+        const unit = `unit:${(marks[0]?.[1].match(/unit:([0-9a-f]+)/) ?? [])[1]}`;
 
-      const second = start(dir, "restart");
-      expect(second).toMatchObject({ trap: true, applied: 1, engineAlive: false });
-      expect(second.marks).toEqual(
-        expect.arrayContaining([
-          [`suspect:R:${unit}`, "1"],
-          ["applying:units:R", `["${unit}"]`],
-        ]),
-      );
+        const second = start(dir, "restart");
+        expect(second).toMatchObject({ trap: true, applied: 1, engineAlive: false });
+        expect(second.marks).toEqual(
+          expect.arrayContaining([
+            [`suspect:R:${unit}`, "1"],
+            ["applying:units:R", `["${unit}"]`],
+          ]),
+        );
 
-      const third = start(dir, "restart");
-      expect(third).toMatchObject({ applied: 0, engineAlive: true, replayed: [] });
-      expect(third.crashed).toEqual([unit.slice("unit:".length)]);
-      expect(third.marks).toEqual([[`suspect:R:${unit}`, "2"]]);
+        const third = start(dir, "restart");
+        expect(third).toMatchObject({ applied: 0, engineAlive: true, replayed: [] });
+        expect(third.crashed).toEqual([unit.slice("unit:".length)]);
+        expect(third.marks).toEqual([[`suspect:R:${unit}`, "2"]]);
 
-      const again = start(dir, "redeliver");
-      expect(again).toMatchObject({ applied: 0, engineAlive: true });
-      expect((again.outcome as { kind: string }).kind).not.toBe("applied");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 240_000);
+        const again = start(dir, "redeliver");
+        expect(again).toMatchObject({ applied: 0, engineAlive: true });
+        expect((again.outcome as { kind: string }).kind).not.toBe("applied");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    4 * START_TIMEOUT_MS,
+  );
 });
