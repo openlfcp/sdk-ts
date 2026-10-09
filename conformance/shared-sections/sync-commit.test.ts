@@ -12,6 +12,7 @@ import {
   NotWritableError,
   OperationIdReusedError,
   OutboundQueue,
+  queueControlRecord,
   receiptOf,
   SyncClient,
   saveControlChain,
@@ -139,7 +140,23 @@ async function device(opts: DeviceOptions = {}) {
     }),
     commit: profile.commitBinding(me) as CommitBinding<unknown>,
   });
-  return { R, storage, profile, sync, head: view.state.head };
+  /** Signs the owner's next record on the current head, without storing it. */
+  const sign = (body: ControlBody) =>
+    signControlRecord(
+      { resourceId: R, controlSeq: BigInt(records.length), prevControlId: head },
+      body,
+      OWNER,
+    );
+  /** The owner appends a record; the device stores the longer chain. */
+  const extend = async (body: ControlBody) => {
+    const before = head;
+    const id = add(body);
+    const next = validateControlChain(records);
+    if (next.kind !== "linear") throw new Error(next.kind);
+    await saveControlChain(storage, next, before);
+    return id;
+  };
+  return { R, storage, profile, sync, head: view.state.head, sign, extend };
 }
 
 const create: SectionIntent = {
@@ -360,5 +377,82 @@ describe("typing coalesced into one unit per burst (LFCP-02-025)", () => {
     const all = await d.storage.outbound.list(d.R);
     expect(all.length).toBeLessThanOrEqual(10);
     expect(units).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("access with its evidence (LFCP-02-027)", () => {
+  const writer = party(40);
+  const grant = (abilities: bigint[], claimLimit?: bigint): ControlBody => ({
+    type: "CAPABILITY_GRANT",
+    subject: writer.signer.descriptor,
+    abilities,
+    delegable: [],
+    ...(claimLimit === undefined ? {} : { claimLimit }),
+  });
+
+  it("stays a writer through a remaining grant when another is revoked", async () => {
+    let first: ControlRecordId | undefined;
+    const d = await device({
+      as: writer,
+      records: (add) => {
+        first = add(grant([1n, 2n]));
+        add(grant([1n, 2n]));
+      },
+    });
+    expect((await d.sync.accessState(d.R)).paths).toHaveLength(2);
+    await d.extend({ type: "CAPABILITY_REVOKE", grantId: first as ControlRecordId });
+    const a = await d.sync.accessState(d.R);
+    expect(a).toMatchObject({ allowed: true, reason: null, owner: false, controlSeq: 3n });
+    expect(a.abilities).toEqual(["data/read", "data/write"]);
+    expect(a.paths).toHaveLength(1);
+    expect(a.paths[0]).toMatchObject({ source: "grant", delegated: false });
+  });
+
+  it("keeps invitations and pending Control Records apart from access (SI14)", async () => {
+    const d = await device({ records: (add) => add(grant([1n, 11n], 1n)) });
+    const pending = d.sign({ type: "CAPABILITY_REVOKE", grantId: d.head });
+    await queueControlRecord(d.storage, pending.bytes);
+    const a = await d.sync.accessState(d.R);
+    expect(a.owner).toBe(true);
+    expect(a.invitations).toMatchObject([{ claimLimit: 1n, claimsUsed: 0n }]);
+    expect(a.pendingControl).toEqual([{ recordId: pending.recordId, type: "CAPABILITY_REVOKE" }]);
+    // The removal is requested, not committed: the validated chain is unchanged.
+    expect(a.controlSeq).toBe(1n);
+    expect(a.pendingClaim).toBe(false);
+  });
+
+  it("retains queued work and refuses new work once access is revoked offline (SI15)", async () => {
+    let g: ControlRecordId | undefined;
+    const d = await device({
+      as: writer,
+      records: (add) => {
+        g = add(grant([1n, 2n]));
+      },
+    });
+    await d.sync.commit(d.R, [{ ...create, createdBy: writer.signer.descriptor.principalId }], {
+      operationId: "op-1",
+    });
+    const queued = await d.storage.outbound.list(d.R);
+    expect(queued).toHaveLength(1);
+    await d.extend({ type: "CAPABILITY_REVOKE", grantId: g as ControlRecordId });
+    expect(await d.sync.accessState(d.R)).toMatchObject({ allowed: false, reason: "revoked" });
+    // Enforced here, whatever a server would answer: nothing new is written.
+    await expect(
+      d.sync.commit(d.R, [{ intent: "section.set_title", title: "T" }], { operationId: "op-2" }),
+    ).rejects.toMatchObject({ code: "NOT_WRITABLE" });
+    // The queued unit and its receipt stay: no reset as repair.
+    expect(await d.storage.outbound.list(d.R)).toEqual(queued);
+    expect(await receiptOf(d.storage, d.R, "op-1")).toBeDefined();
+  });
+
+  it("is read-only for a reader with a loaded replica, and freshness is unknown offline (SI18)", async () => {
+    const d = await device({ as: writer, records: (add) => add(grant([1n])) });
+    expect(await d.sync.accessState(d.R)).toMatchObject({
+      allowed: false,
+      reason: "read-only",
+      abilities: ["data/read"],
+      serverControlSeq: null,
+      current: null,
+    });
   });
 });

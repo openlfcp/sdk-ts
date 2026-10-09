@@ -2,6 +2,7 @@ import {
   actorSequence,
   bytesEqual,
   type ControlRecordId,
+  controlRecordId,
   type DataEpoch,
   type DataUnitId,
   dataEpoch,
@@ -34,6 +35,7 @@ import {
   canonicalFrontierToCbor,
   createMessage,
   type DataProfileCodec,
+  decodeControlRecord,
   ERROR_CODE,
   type HaveVector,
   hasSequence,
@@ -74,6 +76,7 @@ import {
   type UnitEvidence,
 } from "./batch-status.js";
 import type { ProfileCheckpointer } from "./checkpoint.js";
+import { readClaimJournal } from "./claim-journal.js";
 import { LfcpConnection, type WebSocketFactory } from "./connection.js";
 import { EngineGuard, isEngineTrap, snapshotItem } from "./engine-guard.js";
 import type { AckOutcome, NackOutcome, OutboundQueue, StaleOutboundUnit } from "./outbound.js";
@@ -101,11 +104,20 @@ import {
   saveControlChain,
   saveControlConflict,
 } from "./storage.js";
-import { NotWritableError, type WriteAccess, writeAccess } from "./write-access.js";
+import {
+  type AccessState,
+  accessState,
+  NotWritableError,
+  type PendingControl,
+  type WriteAccess,
+  writeAccess,
+} from "./write-access.js";
 
-/** Write access as a comparable key, to report it only when it changed. */
-const accessKey = (a: WriteAccess): string =>
-  `${a.allowed}:${a.reason}:${a.controlHead === null ? "" : toHex(a.controlHead)}`;
+/** Access as a comparable key, to report it only when it changed (verifiedAt aside). */
+const accessKey = (a: AccessState): string =>
+  JSON.stringify({ ...a, verifiedAt: null }, (_, v) =>
+    typeof v === "bigint" ? `${v}` : v instanceof Uint8Array ? toHex(v) : v,
+  );
 
 /**
  * The client sync session (LFCP-039a): one LFCP connection to a server and
@@ -403,6 +415,8 @@ interface ResourceContext {
   view: Extract<ChainResult, { kind: "linear" }> | null;
   /** The head and local time of the last Control sync's validation; kept across reconnects. */
   verified: { readonly head: Uint8Array; readonly at: number } | null;
+  /** The highest Control sequence the server reported in this session (LFCP-02-027). */
+  serverControlSeq: bigint | null;
   /** The first signal of a server's loss not yet followed by an offer (§4.2). */
   lossReason: ReofferReason | null;
   /** What the status stream last reported, to report changes only. */
@@ -579,7 +593,7 @@ export class SyncClient {
     const ctx = this.#resources.get(toHex(resource));
     const batches = await batchStatuses(this.#o.storage, resource, this.#readyDurability);
     const received = await receivedState(this.#o.storage, resource);
-    const access = await this.canWrite(resource);
+    const access = await this.accessState(resource);
     const section = ctx?.binding.commit?.section?.() ?? "unknown";
     if (ctx !== undefined) {
       for (const b of batches) ctx.reported.batches.set(b.operationId, b.status);
@@ -648,7 +662,7 @@ export class SyncClient {
   /** Reports write access when it changed (§5 `access`). */
   async #refreshAccess(ctx: ResourceContext): Promise<void> {
     const R = ctx.binding.resourceId;
-    const access = await this.canWrite(R);
+    const access = await this.accessState(R);
     const key = accessKey(access);
     if (key === ctx.reported.access) return;
     ctx.reported.access = key;
@@ -764,6 +778,7 @@ export class SyncClient {
         wanted: true,
         view: null,
         verified: null,
+        serverControlSeq: null,
         lossReason: null,
         reported: { access: null, section: null, batches: new Map() },
         fetched: [],
@@ -1087,6 +1102,7 @@ export class SyncClient {
           this.#recoveryEvent(ctx, "recovered");
         }
         this.#move(ctx, "OPENED");
+        await this.#noteServerHeads(ctx, m.body.heads);
         // §68.1, §88 step 6: what the server lacks goes first, Control Records before units.
         await this.#offerControl(ctx, m.body.heads);
         await this.#offerData(ctx);
@@ -1096,6 +1112,7 @@ export class SyncClient {
       case "CONTROL_HAVE": {
         const ctx = this.#ctx(m.body.resourceId);
         this.#done(m);
+        if (ctx !== undefined) await this.#noteServerHeads(ctx, m.body.heads);
         if (ctx !== undefined && ctx.state === "LIVE")
           await this.#onControlHeads(ctx, m.body.heads);
         return;
@@ -1745,6 +1762,48 @@ export class SyncClient {
     const ctx = this.#resources.get(toHex(resource));
     const view = ctx?.view ?? (await loadControlChain(this.#o.storage, resource));
     return this.#access(resource, view, ctx?.verified ?? null);
+  }
+
+  /**
+   * LFCP-02-027: write access with its evidence: the Control sequence it
+   * was validated at against the highest one a server reported in this
+   * session (a stale view is not current), the effective abilities and
+   * the active grant paths giving them, and apart from them the
+   * invitations we issued, our Control Records not yet committed (SI14)
+   * and an unsettled invitation claim of ours.
+   */
+  async accessState(resource: ResourceId): Promise<AccessState> {
+    const ctx = this.#resources.get(toHex(resource));
+    const view = ctx?.view ?? (await loadControlChain(this.#o.storage, resource));
+    const write = await this.#access(resource, view, ctx?.verified ?? null);
+    const pendingControl: PendingControl[] = [];
+    for (const item of await this.#o.storage.outbound.list(resource)) {
+      if (item.kind !== "control-record") continue;
+      const record = decodeControlRecord(item.bytes);
+      pendingControl.push(
+        Object.freeze({ recordId: controlRecordId(record.signed.id), type: record.body.type }),
+      );
+    }
+    const dek =
+      view?.kind === "linear" &&
+      (await dekResolver(this.#o.storage, this.#o.secrets, resource)(view.state.epoch.epoch)) !==
+        undefined;
+    return accessState(view, this.#o.signer.descriptor.principalId, dek, write.verifiedAt ?? 0, {
+      serverControlSeq: ctx?.serverControlSeq ?? null,
+      pendingControl,
+      pendingClaim: (await readClaimJournal(this.#o.storage, resource)) !== undefined,
+    });
+  }
+
+  /** Records the highest Control sequence a server reported, and reports access if it changed. */
+  async #noteServerHeads(
+    ctx: ResourceContext,
+    heads: readonly { readonly seq: bigint }[],
+  ): Promise<void> {
+    const seq = heads.reduce<bigint | null>((m, h) => (m === null || h.seq > m ? h.seq : m), null);
+    if (seq === null || (ctx.serverControlSeq !== null && seq <= ctx.serverControlSeq)) return;
+    ctx.serverControlSeq = seq;
+    await this.#refreshAccess(ctx);
   }
 
   async #access(

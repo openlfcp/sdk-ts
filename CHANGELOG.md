@@ -123,6 +123,16 @@ remove or rename any.
   paragraph, reaches 256 characters, after an idle pause of 1.5 s
   (`tick(now)`), or on `flush()`. A waiting pass has no receipt and is not
   durable: the adapter's source still holds it.
+- `SyncClient.accessState(resource)` (LFCP-02-027): write access with its
+  evidence. It includes `controlSeq` against the highest `serverControlSeq`
+  a server reported in this session, with `current` false while the
+  validated chain is behind. It also gives the effective `abilities` and
+  the active grant `paths` that confer them. Apart from access, it lists
+  the `invitations` we issued, our Control Records not committed yet
+  (`pendingControl`) and an unsettled invitation claim (`pendingClaim`).
+  The status stream's `access` event and `statusSnapshot().access` carry
+  it, and an access event follows a server head that leaves the chain
+  behind. A grant whose parent was revoked now counts as revoked.
 
 ## 0.1.3 — 2026-10-08
 

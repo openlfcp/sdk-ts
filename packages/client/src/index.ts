@@ -138,7 +138,13 @@ export {
   type TypingCoalescerOptions,
 } from "./typing.js";
 export {
+  type AccessContext,
+  type AccessState,
+  accessState,
+  type GrantPath,
+  type IssuedInvitation,
   NotWritableError,
+  type PendingControl,
   UNKNOWN_ACCESS,
   type WriteAccess,
   type WriteDeniedReason,

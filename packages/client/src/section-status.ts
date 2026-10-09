@@ -1,7 +1,7 @@
 import type { DataUnitId, ResourceId } from "@openlfcp/core";
 import type { LfcpStorage } from "@openlfcp/storage";
 import type { BatchStatus } from "./batch-status.js";
-import type { WriteAccess } from "./write-access.js";
+import type { AccessState } from "./write-access.js";
 
 /**
  * The status stream of a Resource (SDK-SECTIONS-INTEGRATION-01 §4, §5,
@@ -39,7 +39,7 @@ export type StatusEvent = { readonly revision: number } & (
       readonly diagnostic?: string;
     }
   | { readonly kind: "section-state"; readonly state: SectionState }
-  | { readonly kind: "access"; readonly access: WriteAccess }
+  | { readonly kind: "access"; readonly access: AccessState }
   /** The Resource was hosted again on this route (§41.1). */
   | { readonly kind: "rehost"; readonly route: string }
 );
@@ -65,7 +65,7 @@ export interface StatusSnapshot {
   readonly received: ReceivedState;
   /** Unknown without a section binding, or before the section exists. */
   readonly section: SectionState | "unknown";
-  readonly access: WriteAccess;
+  readonly access: AccessState;
 }
 
 /**

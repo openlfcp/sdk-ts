@@ -96,7 +96,7 @@ function chainFor(seed: number, url = URL) {
     if (r.kind !== "linear") throw new Error(r.kind);
     return r;
   };
-  return { R, records, ids, view };
+  return { R, records, ids, view, add };
 }
 
 /**
@@ -168,10 +168,17 @@ function serve(server: FakeServer, chain: ReturnType<typeof chainFor>) {
 }
 
 /** OWNER's device with a commit binding over the text profile. */
-async function device(server: FakeServer, chain: ReturnType<typeof chainFor>) {
+async function device(
+  server: FakeServer,
+  chain: ReturnType<typeof chainFor>,
+  /** How many of the chain's records the device knows (default all). */
+  known = chain.records.length,
+) {
   const storage = new InMemoryLfcpStorage();
   const secrets = new InMemorySecretStore();
-  await saveControlChain(storage, chain.view(), null);
+  const view = validateControlChain(chain.records.slice(0, known));
+  if (view.kind !== "linear") throw new Error(view.kind);
+  await saveControlChain(storage, view, null);
   await secrets.put(dekSecretRef(chain.R, dataEpoch(0n)), exportSecretKeyBytes(DEK0));
   const e0 = (await storage.control.epochs(chain.R))[0] as EpochRow;
   await storage.commit([
@@ -530,5 +537,27 @@ describe("the loss signal's reason (§4.2)", () => {
     expect(tail[2]?.kind === "reoffered" && tail[2].unitIds.map(toHex)).toEqual(
       receipt.unitIds.map(toHex),
     );
+  });
+});
+
+describe("Control freshness (LFCP-02-027)", () => {
+  it("reports access as not current while the chain is behind the server, then current", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(230);
+    chain.add({
+      type: "CAPABILITY_GRANT",
+      subject: party(40).signer.descriptor,
+      abilities: [1n],
+      delegable: [],
+    });
+    serve(server, chain);
+    const d = await device(server, chain, 1);
+    await d.live();
+    const access = d.events.flatMap((e) => (e.kind === "access" ? [e.access] : []));
+    expect(access.map((a) => [a.controlSeq, a.serverControlSeq, a.current])).toEqual([
+      [0n, 1n, false],
+      [1n, 1n, true],
+    ]);
+    expect(access[1]?.verifiedAt).not.toBeNull();
   });
 });
