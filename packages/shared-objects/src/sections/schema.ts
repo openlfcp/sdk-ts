@@ -127,16 +127,28 @@ const first = (problems: readonly SectionProblem[]): SectionProblem | undefined 
 
 const ref = (base: string, key: string) => `${base}/${pointerToken(key)}`;
 
-/** Reads a document through the backend, at its current state (no heads: a historical read is far slower). */
+/**
+ * Reads a document through the backend, at its current state (no heads: a
+ * historical read is far slower). One validation asks for most fields more
+ * than once (present? then its values, then the one string); each answer is
+ * kept for the pass, which runs on one unchanging document.
+ */
 class Reader {
   readonly #backend: ReturnType<typeof A.getBackend>;
+  readonly #values = new Map<string, Value[]>();
 
   constructor(doc: A.Doc<unknown>) {
     this.#backend = A.getBackend(doc);
   }
 
   all(obj: string, prop: string | number): Value[] {
-    return this.#backend.getAll(obj, prop) as Value[];
+    const key = `${obj}\u0000${prop}`;
+    let values = this.#values.get(key);
+    if (values === undefined) {
+      values = this.#backend.getAll(obj, prop) as Value[];
+      this.#values.set(key, values);
+    }
+    return values;
   }
 
   keys(obj: string): string[] {
@@ -290,8 +302,32 @@ class Fields {
 const isNodeKind = (s: string): s is NodeKind => (NODE_KINDS as readonly string[]).includes(s);
 const LIFECYCLES = new Set(["active", "deleted"]);
 
-/** Validates a section document (§3, §4, §14.2). Reads only; the document is unchanged. */
+/** Validations by document object, and the latest few by heads (a clone has the heads of its source). */
+const byDoc = new WeakMap<object, SectionValidation>();
+const byHeads = new Map<string, SectionValidation>();
+const HEADS_KEPT = 8;
+
+/**
+ * Validates a section document (§3, §4, §14.2). Reads only; the document is
+ * unchanged. A document's heads determine its content, so a validation is
+ * computed once per heads: committing and then reading one revision (or a
+ * clone of it) validates it once.
+ */
 export function validateSection(doc: A.Doc<unknown>): SectionValidation {
+  const known = byDoc.get(doc);
+  if (known !== undefined) return known;
+  const heads = A.getHeads(doc).slice().sort().join(",");
+  let v = byHeads.get(heads);
+  if (v === undefined) {
+    v = computeValidation(doc);
+    byHeads.set(heads, v);
+    if (byHeads.size > HEADS_KEPT) byHeads.delete(byHeads.keys().next().value as string);
+  }
+  byDoc.set(doc, v);
+  return v;
+}
+
+function computeValidation(doc: A.Doc<unknown>): SectionValidation {
   const r = new Reader(doc);
   const root = new Fields(r, "_root", "", "the root");
   const rootProblems: SectionProblem[] = [];

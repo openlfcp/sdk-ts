@@ -476,3 +476,21 @@ describe("SectionDocument", () => {
     );
   });
 });
+
+describe("validation per revision", () => {
+  it("validates one revision once, a clone of it included, and the next revision anew", () => {
+    const doc = section();
+    const v = validateSection(doc);
+    expect(validateSection(doc)).toBe(v);
+    expect(validateSection(A.clone(doc))).toBe(v);
+    expect(v.nodes.size).toBe(0);
+    const next = A.change(doc, { time: 0 }, (d) => {
+      d.nodes[PARA].text = S("scalar");
+    });
+    const w = validateSection(next);
+    expect(w).not.toBe(v);
+    expect(w.nodes.get(PARA)?.diagnostic).toBe("INVALID_FIELD_TYPE");
+    // The earlier revision keeps its own result.
+    expect(validateSection(doc)).toBe(v);
+  });
+});
