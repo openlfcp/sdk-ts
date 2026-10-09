@@ -100,6 +100,8 @@ export interface SectionsStagedOperation {
 export interface SectionsCommitBinding {
   readonly codec: SectionsCodec;
   stage(intents: readonly unknown[]): SectionsStagedOperation | null;
+  /** SDK-SECTIONS-INTEGRATION-01 §4.3: ready or importing; undefined before section.create. */
+  section(): "ready" | "importing" | undefined;
 }
 
 /** SDK-SECTIONS-INTEGRATION-01 §5 nodes-changed: what changed, and why. */
@@ -185,6 +187,7 @@ export class SharedSectionsDataProfile {
     const codec = this.codecFor({ resourceId: this.#replica.resource, actor: principal });
     return {
       codec,
+      section: () => this.#replica.sectionState(),
       stage: (intents) => {
         const staged = this.#replica.stage(intents as readonly SectionIntent[]);
         if (staged === null) return null;

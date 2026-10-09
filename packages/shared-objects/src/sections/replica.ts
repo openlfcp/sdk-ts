@@ -452,6 +452,18 @@ export class SectionReplica {
     return this.actorSeq >= this.#minSeq;
   }
 
+  /**
+   * §12.1: "ready" once the section's `ready` is written, "importing"
+   * before, undefined while the document has no section. Reads one
+   * register; validate() tells whether the section is valid.
+   */
+  sectionState(): "ready" | "importing" | undefined {
+    const section = (this.#doc as AMap).section;
+    if (section === null || typeof section !== "object" || A.isImmutableString(section))
+      return undefined;
+    return (section as AMap).ready === true ? "ready" : "importing";
+  }
+
   /** Whether the document holds the change with this hex hash. */
   hasChange(hash: string): boolean {
     return A.hasHeads(this.#doc, [hash]);

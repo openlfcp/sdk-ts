@@ -370,6 +370,16 @@ describe("SectionReplica: refusals before commit (SDK-SECTIONS-INTEGRATION-01 §
     ).toBe("INVALID_PARENT");
   });
 
+  it("tells an importing section from a ready one (§12.1)", () => {
+    const r = SectionReplica.empty({ resource, principal: alice });
+    expect(r.sectionState()).toBeUndefined();
+    r.commit([{ ...create, ready: false }]);
+    expect(r.sectionState()).toBe("importing");
+    r.commit([{ intent: "section.mark_ready" }]);
+    expect(r.sectionState()).toBe("ready");
+    expect(built().sectionState()).toBe("ready");
+  });
+
   it("refuses a write before section.create, and another writer during an import", () => {
     const empty = SectionReplica.empty({ resource, principal: alice });
     expect(refusal(() => empty.commit(content)).code).toBe("SECTION_INVALID");
