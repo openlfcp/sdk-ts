@@ -10,7 +10,9 @@ import {
   type CheckedChange,
   checkChange,
   frameChange,
+  frameSnapshot,
   unframeChange,
+  unframeSnapshot,
 } from "../admission/framing.js";
 import { type SectionIntent, SectionReplica, type SectionSnapshot } from "./replica.js";
 import { deriveSectionActorId, SECTIONS_PROFILE_ID } from "./values.js";
@@ -43,6 +45,20 @@ export interface SectionsCodec {
   readonly dataProfile: string;
   encode(change: CheckedChange): Uint8Array;
   decode(plaintext: Uint8Array): CheckedChange;
+}
+
+/** The Snapshot codec: a full save framed as SOP §13 frames it (structurally DataProfileCodec). */
+export interface SectionsSnapshotCodec {
+  readonly dataProfile: string;
+  encode(save: Uint8Array): Uint8Array;
+  decode(plaintext: Uint8Array): Uint8Array;
+}
+
+/** The Snapshot binding of a sync client (structurally the client's SnapshotBinding). */
+export interface SectionsSnapshotBinding {
+  readonly codec: SectionsSnapshotCodec;
+  load(save: Uint8Array): void;
+  current(): Uint8Array;
 }
 
 /** The persisted state (structurally the storage ProfileCheckpoint). */
@@ -386,6 +402,51 @@ export class SharedSectionsDataProfile {
 
   pendingUnits(): DataUnitId[] {
     return [...this.#pending.values()].map((b) => b.unitId);
+  }
+
+  /** The Snapshot codec (SOP §13): the full save, framed. */
+  snapshotCodec(): SectionsSnapshotCodec {
+    return {
+      dataProfile: SECTIONS_PROFILE_ID,
+      encode: (save) => frameSnapshot(save),
+      decode: (plaintext) => unframeSnapshot(plaintext),
+    };
+  }
+
+  /** The state to publish as a Snapshot: the replica's full save. */
+  snapshotState(): Uint8Array {
+    return this.#replica.save();
+  }
+
+  /**
+   * Loads a received Snapshot's full save (SOP §13, §14; LFCP-02-028):
+   * every change it holds passes the section admission (§14.1), so a
+   * Snapshot holding a refused change is rejected and nothing changes;
+   * this replica's changes, local work the Snapshot lacks included, are
+   * kept on top. Buffered units whose dependencies it brings are merged.
+   * Returns the nodes that changed and the units merged from the buffer.
+   */
+  loadSnapshot(save: Uint8Array): {
+    readonly nodeIds: readonly string[];
+    readonly merged: readonly DataUnitId[];
+  } {
+    const before = fingerprints(this.#replica.snapshot());
+    this.#replica = this.#replica.mergeSave(save);
+    const merged = [...this.#offer(false).merged];
+    const nodeIds = changed(before, fingerprints(this.#replica.snapshot()));
+    this.#emit(nodeIds, "remote");
+    return Object.freeze({ nodeIds: Object.freeze(nodeIds), merged: Object.freeze(merged) });
+  }
+
+  /** The binding through which a sync client loads and publishes Snapshots. */
+  snapshotBinding(): SectionsSnapshotBinding {
+    return {
+      codec: this.snapshotCodec(),
+      load: (save) => {
+        this.loadSnapshot(save);
+      },
+      current: () => this.snapshotState(),
+    };
   }
 
   /** Forgets the whole state, keeping the §9 sequence (SNAP-EP). */

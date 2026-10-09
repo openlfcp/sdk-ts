@@ -21,6 +21,8 @@ export {
   type SectionsCommitBinding,
   type SectionsExcludeResult,
   type SectionsNodesChanged,
+  type SectionsSnapshotBinding,
+  type SectionsSnapshotCodec,
   type SectionsStagedOperation,
   type SectionsUnit,
   SharedSectionsDataProfile,

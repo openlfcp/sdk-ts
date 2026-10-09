@@ -424,6 +424,11 @@ function values(map: AMap, key: string): unknown[] {
   return c === undefined ? [map[key]] : Object.values(c);
 }
 
+/** PROFILE_INVALID for a Snapshot, with the diagnostic of what refused it. */
+function snapshotRefused(diagnostic: string, message: string): LfcpError {
+  return Object.assign(new LfcpError("PROFILE_INVALID", message), { diagnostic });
+}
+
 export class SectionReplica {
   readonly resource: ResourceId;
   /** The §2 Automerge actor ID. */
@@ -486,6 +491,46 @@ export class SectionReplica {
       principal: this.#principal,
       minSeq: this.writable ? 0 : this.#minSeq,
     });
+  }
+
+  /**
+   * This replica merged with a received Snapshot's full save (SOP §13,
+   * §14): every change the save holds is admitted as if received one by
+   * one (the SOP checks and A1–A5, §14.1), on an empty replica of this
+   * actor, so a Snapshot that holds a change admission refuses is
+   * rejected; then this replica's own changes follow, so local work the
+   * Snapshot lacks is kept. The §9 sequence carries over. Throws
+   * PROFILE_INVALID (with the refused change's diagnostic, or
+   * INVALID_AUTOMERGE_BYTES) and keeps this replica unchanged.
+   */
+  mergeSave(save: Uint8Array, limits: SnapshotLimits = SNAPSHOT_LIMITS_FLOOR): SectionReplica {
+    const opts = {
+      resource: this.resource,
+      principal: this.#principal,
+      minSeq: Math.max(this.#minSeq, this.actorSeq),
+    };
+    const image = SectionReplica.fromSave(save, opts, limits);
+    const merged = SectionReplica.empty(opts);
+    const r = merged.receiveChanges(image.changes());
+    const refused = r.refused.find((x) => !x.held) ?? r.refused[0];
+    if (refused !== undefined)
+      throw snapshotRefused(
+        refused.diagnostic,
+        `the Snapshot holds a change admission refuses: ${refused.message}`,
+      );
+    if (r.waiting.length > 0)
+      throw snapshotRefused(
+        "INVALID_AUTOMERGE_BYTES",
+        "the Snapshot holds a change whose dependency it lacks",
+      );
+    const own = merged.receiveChanges(this.changes());
+    const lost = own.refused[0];
+    if (lost !== undefined)
+      throw snapshotRefused(
+        lost.diagnostic,
+        `local state does not merge with the Snapshot: ${lost.message}`,
+      );
+    return merged;
   }
 
   /** An empty replica of the same actor that keeps the §9 sequence (SNAP-EP reset). */

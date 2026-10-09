@@ -133,6 +133,14 @@ remove or rename any.
   The status stream's `access` event and `statusSnapshot().access` carry
   it, and an access event follows a server head that leaves the chain
   behind. A grant whose parent was revoked now counts as revoked.
+- Section Snapshots (LFCP-02-028): `SharedSectionsDataProfile`
+  `snapshotCodec()`, `snapshotState()`, `loadSnapshot(save)` and
+  `snapshotBinding()` for `SyncClient`. A received Snapshot is loaded
+  through the section admission, change by change, on an empty replica
+  (`SectionReplica.mergeSave`). A Snapshot holding a change admission
+  refuses is rejected with that diagnostic, and nothing changes. The
+  replica's own changes, including local work the Snapshot lacks, are
+  kept on top, and the §9 sequence carries over.
 
 ## 0.1.3 — 2026-10-08
 
