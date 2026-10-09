@@ -8,8 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { openSpec } from "../spec.mjs";
 import { runCase } from "./adapter.mjs";
-
-const CORPUS = "test-vectors/shared-sections-01/SHARED-SECTIONS-TEST-VECTORS-01.json";
+import { readSectionsCorpus } from "./corpus-format.mjs";
 
 interface Case {
   readonly id: string;
@@ -19,7 +18,7 @@ interface Case {
   readonly after_merge: readonly unknown[];
   readonly expected: Readonly<Record<string, unknown>>;
 }
-const suite = openSpec().readJson(CORPUS) as {
+const suite = readSectionsCorpus(openSpec()) as {
   readonly profile: string;
   readonly identities: unknown;
   readonly cases: readonly Case[];

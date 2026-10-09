@@ -27,8 +27,7 @@ import {
 } from "@openlfcp/shared-objects/sections";
 import { describe, expect, it } from "vitest";
 import { openSpec } from "../spec.mjs";
-
-const CORPUS = "test-vectors/shared-sections-01/SHARED-SECTIONS-TEST-VECTORS-01.json";
+import { readSectionsCorpus } from "./corpus-format.mjs";
 
 interface Bytes {
   readonly base64: string;
@@ -79,7 +78,7 @@ interface Suite {
   readonly cases: readonly Case[];
 }
 
-const suite = openSpec().readJson(CORPUS) as Suite;
+const suite = readSectionsCorpus(openSpec()) as Suite;
 const resource = resourceId(fromHex(suite.identities.resource_hex));
 const principal = (name: string) =>
   principalId(fromHex((suite.identities.actors[name] as { principal_hex: string }).principal_hex));

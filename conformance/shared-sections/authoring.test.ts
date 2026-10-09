@@ -26,8 +26,7 @@ import { createTask } from "@openlfcp/shared-objects";
 import { type SectionIntent, SectionReplica } from "@openlfcp/shared-objects/sections";
 import { describe, expect, it } from "vitest";
 import { openSpec } from "../spec.mjs";
-
-const CORPUS = "test-vectors/shared-sections-01/SHARED-SECTIONS-TEST-VECTORS-01.json";
+import { readSectionsCorpus } from "./corpus-format.mjs";
 
 interface Bytes {
   readonly base64: string;
@@ -60,7 +59,7 @@ interface State {
   objects: Record<string, { title: string; created_by: string }>;
 }
 
-const suite = openSpec().readJson(CORPUS) as Suite;
+const suite = readSectionsCorpus(openSpec()) as Suite;
 const bytes = (b: Bytes) => Uint8Array.from(atob(b.base64), (c) => c.charCodeAt(0));
 const kase = (id: string) => suite.cases.find((c) => c.id === id) as Case;
 const ids = suite.identities.ids as Record<string, string>;
