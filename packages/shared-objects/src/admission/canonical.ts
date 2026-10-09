@@ -29,6 +29,8 @@ export interface ParsedOp {
   readonly action: number;
   /** Predecessor IDs "counter@actorhex", in order. */
   readonly pred: readonly string[];
+  /** The value's type, the low 4 bits of its metadata (8: a counter). */
+  readonly valueType: number;
 }
 
 /** A change read from its bytes (§11.3), without the engine. */
@@ -585,7 +587,16 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
       pred.push(`${ctr}@${id}`);
       anyPred = true;
     }
-    ops.push(Object.freeze({ obj, key, insert: ins, action: act, pred: Object.freeze(pred) }));
+    ops.push(
+      Object.freeze({
+        obj,
+        key,
+        insert: ins,
+        action: act,
+        pred: Object.freeze(pred),
+        valueType: valueTypes[i] as number,
+      }),
+    );
   }
 
   // Rule 3: each column present exactly when the table says.

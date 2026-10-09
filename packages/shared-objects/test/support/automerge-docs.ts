@@ -17,8 +17,14 @@ export function rng(seed: number): () => number {
   };
 }
 
-/** `count` merged documents, each from a different seed. */
-export function documents(count: number): Doc[] {
+/**
+ * `count` merged documents, each from a different seed. Without `marks`,
+ * the mark edits are skipped (the seeds draw the same edits otherwise):
+ * SHARED-OBJECTS-PROFILE-01 §11.4 R9 refuses marks, which a writer of the
+ * profile never makes.
+ */
+export function documents(count: number, options: { readonly marks?: boolean } = {}): Doc[] {
+  const marks = options.marks ?? true;
   const out: Doc[] = [];
   for (let n = 0; n < count; n++) {
     const r = rng(n + 7);
@@ -43,9 +49,10 @@ export function documents(count: number): Doc[] {
           (d.list as unknown[])[1] = `set${i}`;
         else if (op < 0.55) (d.count as A.Counter).increment(i - 5);
         else if (op < 0.65) A.splice(d as never, ["text"], 0, 0, `t${i}`);
-        else if (op < 0.7)
-          A.mark(d as never, ["text"], { start: 0, end: 2, expand: "both" }, "bold", true);
-        else if (op < 0.75) d[k] = new Uint8Array([i, 0, 255]);
+        else if (op < 0.7) {
+          if (marks)
+            A.mark(d as never, ["text"], { start: 0, end: 2, expand: "both" }, "bold", true);
+        } else if (op < 0.75) d[k] = new Uint8Array([i, 0, 255]);
         else if (op < 0.8) d[k] = new Date(1_700_000_000_000 + i);
         else if (op < 0.85) d[k] = new A.Uint(2 ** 40 + i);
         else if (k in objects) delete objects[k];

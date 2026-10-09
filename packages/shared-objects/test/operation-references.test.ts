@@ -8,7 +8,7 @@ import { SharedObjectsReplica } from "../src/replica.js";
 import { ACTOR, type Doc, documents, OTHER } from "./support/automerge-docs.js";
 
 // SHARED-OBJECTS-PROFILE-01 §11.4 (SPEC-PATCH-10, ADR 0010): the operation
-// reference rules R1-R7 against a change's causal history, on Automerge's
+// reference rules R1-R9 against a change's causal history, on Automerge's
 // own changes (no false refusal) and on crafted ones. The spec's corpus
 // (references, SS57, SS58) runs in conformance/.
 
@@ -42,7 +42,8 @@ function base(): Doc {
 
 describe("§11.4 operation references", () => {
   it("every change of a document refers only to its history (no false refusal)", () => {
-    for (const doc of documents(6)) {
+    // Marks are left out: R9 refuses them, and a writer of the profile never makes one.
+    for (const doc of documents(6, { marks: false })) {
       const h = new ReferenceHistory();
       // getAllChanges is in causal order.
       for (const bytes of A.getAllChanges(doc)) {
@@ -51,6 +52,34 @@ describe("§11.4 operation references", () => {
         h.add(A.decodeChange(bytes).hash, parsed);
       }
     }
+  });
+
+  it("R9: Automerge's own mark is refused; R8: its own increments of a counter are not", () => {
+    let doc: Doc = A.change(A.init({ actor: ACTOR }), (d: Record<string, unknown>) => {
+      d.text = "hello";
+      d.count = new A.Counter(0);
+    });
+    const h = historyOf(doc);
+    const inc = next(doc, (d) => (d.count as A.Counter).increment(2));
+    expect(h.check(checkCanonicalChange(inc))).toBeNull();
+    const mark = next(doc, (d) =>
+      A.mark(d as never, ["text"], { start: 0, end: 2, expand: "both" }, "bold", true),
+    );
+    expect(h.check(checkCanonicalChange(mark))).toBe("R9");
+    // Two concurrent counters merged: an increment names both puts (R8 allows it).
+    const other: Doc = A.change(A.clone(doc, { actor: OTHER }), (d: Record<string, unknown>) => {
+      d.count = new A.Counter(5);
+    });
+    doc = A.merge(
+      A.change(A.clone(doc), (d: Record<string, unknown>) => {
+        d.count = new A.Counter(1);
+      }),
+      other,
+    );
+    const merged = historyOf(doc);
+    const both = next(doc, (d) => (d.count as A.Counter).increment(1));
+    expect(checkCanonicalChange(both).ops.at(-1)?.pred.length).toBe(2);
+    expect(merged.check(checkCanonicalChange(both))).toBeNull();
   });
 
   it("R2, R6, R7: a wrong start op, a predecessor on another key, a deletion without one", () => {

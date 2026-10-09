@@ -25,6 +25,8 @@ interface Target {
   readonly del: boolean;
   /** The object an operation makes (0 map, 2 list, 4 text, 6 table), else null. */
   readonly make: number | null;
+  /** A put (action 1) of a counter value (value type 8): what an increment may name (R8). */
+  readonly counterPut: boolean;
 }
 
 interface Entry {
@@ -37,7 +39,7 @@ interface Entry {
 }
 
 /** A §11.4 rule a change breaks. */
-export type ReferenceRule = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7";
+export type ReferenceRule = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "R9";
 
 const MAKE = new Set([0, 2, 4, 6]);
 const MAP_LIKE = new Set([0, 6]);
@@ -55,6 +57,7 @@ const targetOf = (op: ParsedOp, id: string): Target => ({
   insert: op.insert,
   del: op.action === 3,
   make: MAKE.has(op.action) ? op.action : null,
+  counterPut: op.action === 1 && op.valueType === 8,
 });
 
 function splitId(id: string): { ctr: number; actor: string } {
@@ -157,6 +160,8 @@ export class ReferenceHistory {
     };
     for (const [i, op] of change.ops.entries()) {
       const id = `${change.startOp + i}@${change.actor}`;
+      // R9: no operation is a mark.
+      if (op.action === 7) return "R9";
       // R3: the root, or an object an operation made; its key form.
       let sequence: boolean;
       if (op.obj === "_root") sequence = false;
@@ -184,6 +189,10 @@ export class ReferenceHistory {
       }
       // R7: a deletion has a predecessor.
       if (op.action === 3 && op.pred.length === 0) return "R7";
+      // R8: an increment names at least one put of a counter, and only such puts (R6 put
+      // them on the same object and key).
+      if (op.action === 5 && (op.pred.length === 0 || op.pred.some((p) => !target(p)?.counterPut)))
+        return "R8";
       own.push(targetOf(op, id));
     }
     return null;
