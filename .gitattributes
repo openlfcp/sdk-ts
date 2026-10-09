@@ -1,0 +1,2 @@
+# Byte-exact fixtures: never normalized (LFCP-02-029).
+conformance/upgrade/fixtures/** -text

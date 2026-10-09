@@ -197,11 +197,38 @@ sending) and restarts it on the same SQLite database, and checks what
 survives a restart: the Control head, keys, held and quarantined units,
 the replica checkpoint with replay and G-EP7, and Snapshot sequences.
 
+`conformance/upgrade/` (LFCP-02-029) opens storage the released 0.1.3 SDK
+wrote, SQLite with file secrets and IndexedDB, with this SDK (see
+[Local storage upgrades](#local-storage-upgrades)). The fixtures in
+`fixtures/0.1.3/` were made by `make-fixture-0.1.3.mjs` with the v0.1.3
+build; the test never runs old code.
+
 The run prints the suite, baseline tag and commit, and writes a summary
 to `conformance/.results/` (gitignored). A failure names the vector ID
 and check. For bytes it shows the first differing offset and the hex
 around it on both sides; for a negative it shows the expected code and
 the actual one, or "unexpected success".
+
+## Local storage upgrades
+
+Opening a store is its upgrade: SQLite migrates one schema version per
+transaction (`SCHEMA_VERSION`), and IndexedDB upgrades in its
+version-change transaction (`IDB_VERSION`). Sealing local state at rest
+(LFCP-02-098) runs as a resumable job recorded in the store. Nothing is
+reset: Control Chains, key references, actor sequences, the exact queued
+Data Units and profile checkpoints are kept, and each Resource is
+dispatched by its own Genesis profile, so a shared section can be added
+beside legacy Shared Objects Resources without converting any.
+
+| Store written by | Opened by 0.1.x | Opened by this SDK |
+| --- | --- | --- |
+| 0.1.x (SQLite schema 3, IndexedDB version 1) | yes | yes, upgraded in place |
+| this SDK (SQLite schema 4, IndexedDB version 2) | refused: "newer than this code", VersionError | yes |
+| a newer SDK | refused | refused, `UNSUPPORTED_VALUE`, left untouched |
+
+So an application that downgrades must go to a release that knows these
+versions. An older one does not open the store at all. It never reads
+sealed state as plaintext and never writes into it.
 
 ## Consuming from sibling repos
 

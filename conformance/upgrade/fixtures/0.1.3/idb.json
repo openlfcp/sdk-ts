@@ -1,0 +1,326 @@
+{
+  "name": "legacy",
+  "version": 1,
+  "stores": {
+    "checkpoints": [
+      [
+        "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+        {
+          "resourceId": {
+            "$bytes": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f"
+          },
+          "dataProfile": "org.openlfcp.shared-objects.v1",
+          "state": {
+            "$bytes": "856f4a830f1a690500a3040120ce11cf51509dfa051e556b0cdb08b85ee118d377266fb95d3d7616f6b00ffa7c01f548154c55d7b5feead6802d06e6a7281c5465e33e7cb264c18bb0c805cbca1a080102030213042302352a4004430356020c010402061590012102230d3401420f5617579901800106810102830102030003017d030b0103007d0c70726f66696c652e696e69740b7461736b2e6372656174650f7461736b2e7365745f7374617475737f0002017e0001030700030c0000037f020b04760a657874656e73696f6e73076f626a656374730770726f66696c652430313932653461302d303030302d373030302d383030302d3030303030303030303031300961737369676e6565730a637265617465645f62790a657874656e73696f6e73026964096c6966656379636c65087072696f7269747902067374617475737d0474616773057469746c6504747970650f007f03027f7f0307017e047d02010f02007f0102007e010005017f00020102007fe60302007dd60500c60402667b46b60100b601466f72672e6f70656e6c6663702e7368617265642d6f626a656374732e7631703a36306f4c5258474167425f713641744a6971464a5474634d584a3873377468672d594f54557a734e70334d30313932653461302d303030302d373030302d383030302d3030303030303030303031306163746976656e6f726d616c746f646f696e5f70726f67726573734c6567616379207461736b7461736b0a007f0104007f007f0f02"
+          },
+          "actorSeq": 3,
+          "units": [
+            {
+              "unitId": {
+                "$bytes": "25b66a6f208b99dc1f3671e92b64cf512b67294b7236bef7e230c40cadb93bb3"
+              },
+              "ref": "2278361b16cb7c4bff31af0f0de40a317d3d00940d0b10457622ead8b6cf0970"
+            },
+            {
+              "unitId": {
+                "$bytes": "c154923ab5486551a5be4c7b38fd2230312808b5cdcdaee3e4775c91a01636df"
+              },
+              "ref": "bbefa5432fb61be6e38a4ebe96e1e7ee7eb2401ba5c48f913e182f631d2003de"
+            },
+            {
+              "unitId": {
+                "$bytes": "dd49609fd4c7db1be9b0292b766f1408480ef529d364954af5899a056359d045"
+              },
+              "ref": "f548154c55d7b5feead6802d06e6a7281c5465e33e7cb264c18bb0c805cbca1a"
+            }
+          ]
+        }
+      ]
+    ],
+    "conflicts": [],
+    "counters": [
+      [
+        "actor:f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f:eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773",
+        {
+          "$bigint": "3"
+        }
+      ],
+      ["order:outbound", 3]
+    ],
+    "epochs": [
+      [
+        "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f:00000000000000000000",
+        {
+          "r": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+          "row": {
+            "epoch": {
+              "$bigint": "0"
+            },
+            "dekCommitment": {
+              "$bytes": "579d740e42e53530688483736aab37ae42a74cb61d1157405275d115ba2adaf0"
+            },
+            "openedBy": {
+              "$bytes": "02bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba"
+            },
+            "closedBy": null,
+            "dekRef": "lfcp-secret:resource-dek:f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f.0"
+          }
+        }
+      ]
+    ],
+    "heads": [
+      [
+        "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+        {
+          "head": {
+            "$bytes": "02bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba"
+          },
+          "controlSeq": {
+            "$bigint": "0"
+          }
+        }
+      ]
+    ],
+    "keyPackages": [],
+    "meta": [],
+    "outbound": [
+      [
+        "25b66a6f208b99dc1f3671e92b64cf512b67294b7236bef7e230c40cadb93bb3",
+        {
+          "r": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+          "n": 2,
+          "row": {
+            "itemId": {
+              "$bytes": "25b66a6f208b99dc1f3671e92b64cf512b67294b7236bef7e230c40cadb93bb3"
+            },
+            "resourceId": {
+              "$bytes": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f"
+            },
+            "kind": "data-unit",
+            "bytes": {
+              "$bytes": "845826a20127045820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773a059021fa7005820f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f0100025820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da7730302045820c154923ab5486551a5be4c7b38fd2230312808b5cdcdaee3e4775c91a01636df05582002bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba0659018a3f10102f7c58eea1570f8a02c243d1b228711b65dc57126e7624a927ac14095aa9a9f3cf855a327df0aad718499698c0a6a6a145b8f58d612d149702ce5128f3fa9243665bb35aaf5d82f6482b239c6bae8ad5d7424beee23e53ae7f7c3594b509af5afd52980f54048364a7fddce7e8f041b3ff30d325658a08f43bc16a5d8c0f7a32578803b0edf331d6e07b9f101039c16b1ea52a75a475e2e8cd00da2b560a4c713d9a433c2786b4990948ae9149ec404551e959130527bda4782c4c66114c76b7e67a1c1defa6061354e5c33914294a26469fff4d4be493ffc38a7e879bb21c241cd69cafdd4f87208b15e87c38980961f138bcc93cc96b21539ce8ef9327d7bd2f0a16642b3a2746e74bb2aa40d7acf51e86494eb966b568f8d0d918f87ef74a2172819efaaeb6659329aaa7b3d8f1ba5880c6b36772e345d61d877ec52d3a9a8d117d16dd2ad3eeffdb77dc23dde68c2dd64a944ff1376dc6ef2b4c75340029a0b2d23c6ac8533c314d73b8efdf1c9baa3c2c36b21552fafb1abf2b4d6610b98cb04cf652ff6c584026fcbdd07d5c2e9d9575cab16b1fe93b66354a3b18cf21f77b67b4e6517499f15d94206bfb80cfb0272f4961749f9a09d8dbee29d01562c676075336c0b9ba04"
+            },
+            "attempts": 0,
+            "lastAttempt": null,
+            "nextAttempt": null,
+            "blocked": null
+          }
+        }
+      ],
+      [
+        "c154923ab5486551a5be4c7b38fd2230312808b5cdcdaee3e4775c91a01636df",
+        {
+          "r": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+          "n": 1,
+          "row": {
+            "itemId": {
+              "$bytes": "c154923ab5486551a5be4c7b38fd2230312808b5cdcdaee3e4775c91a01636df"
+            },
+            "resourceId": {
+              "$bytes": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f"
+            },
+            "kind": "data-unit",
+            "bytes": {
+              "$bytes": "845826a20127045820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773a0590118a7005820f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f0100025820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773030104f605582002bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba0658a5fd3ea065756d662939865baac866f0da17573054e48882ec051932ca8857bd3e9166d9b14feba23113ee2ce597bc226e11aef9d8cc5a985605422cc60c2b4eb8a277e488940816a47a96468c62ffab9c1f92a805e984f7b73ea7da815fce6795ca37b5b6a6fc99202ae6c3dc3ecac6335bc5e99b1e905051f15c9bdc85ed9773d5f92256556757a80d5e8585695a1325e6132cfd358886c8603a84923469ff2425ad9680585840941704f559c882e245e1b8b5d4d13c475f8885e22f390109b2cbb8a1b472ffe3dfa4d3aeb0f5325932293867a09fa6d317584d05cc9fb3b007f7604f8ed7800a"
+            },
+            "attempts": 0,
+            "lastAttempt": null,
+            "nextAttempt": null,
+            "blocked": null
+          }
+        }
+      ],
+      [
+        "dd49609fd4c7db1be9b0292b766f1408480ef529d364954af5899a056359d045",
+        {
+          "r": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+          "n": 3,
+          "row": {
+            "itemId": {
+              "$bytes": "dd49609fd4c7db1be9b0292b766f1408480ef529d364954af5899a056359d045"
+            },
+            "resourceId": {
+              "$bytes": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f"
+            },
+            "kind": "data-unit",
+            "bytes": {
+              "$bytes": "845826a20127045820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773a0590141a7005820f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f0100025820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773030304582025b66a6f208b99dc1f3671e92b64cf512b67294b7236bef7e230c40cadb93bb305582002bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba0658adcbdc0a34f1d1495222e770e7335584f93f04c57ed3ca1b7eac4a6e9580d3ecd83943112bc35569ae46d369602860457f74f6029290ebcae788b10ff7367c782327c99d31faea67537be938810e3a936c4b157374f56f2d6e72054d1bd328999b7eaa2e3dc41da26b2ed856ba9bca81837b8d35a2d81e675343863792860f96922976120221c76d4458b60352848a73466b07241e5e7e999be83976798dcd3f24a027f31f5a0c46fadbfe821d49584079a218ebda8d38a59e0fdfae04a272b3d8a5013372b74c122e6b4503c2ad81c27c1e266dd33bfb39190381e72587220c10ea32f6b69c97dd03415c3064c1850b"
+            },
+            "attempts": 0,
+            "lastAttempt": null,
+            "nextAttempt": null,
+            "blocked": null
+          }
+        }
+      ]
+    ],
+    "records": [
+      [
+        "02bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba",
+        {
+          "r": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+          "row": {
+            "recordId": {
+              "$bytes": "02bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba"
+            },
+            "resourceId": {
+              "$bytes": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f"
+            },
+            "controlSeq": {
+              "$bigint": "0"
+            },
+            "prevControlId": null,
+            "bytes": {
+              "$bytes": "845826a20127045820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773a0590133a6005820f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f010002f60300045820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da77305a500781e6f72672e6f70656e6c6663702e7368617265642d6f626a656374732e763101a3005820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da77301582079b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad0496640258205714769d116bf76436ae74bc793d2c30ad1903c59ac5273805c7e2698b410c36025820579d740e42e53530688483736aab37ae42a74cb61d1157405275d115ba2adaf00381a2007677733a2f2f3132372e302e302e313a312f76312f77730100047677733a2f2f3132372e302e302e313a312f76312f77735840409227e84327d6a5b8083639f1ca66b102e883da94f95bd3cdf17d446335b4f6685fd54b52c2ee93f97179a7fafe17dc8f5d31d981918e1e2a03917f8518f90b"
+            }
+          }
+        }
+      ]
+    ],
+    "resources": [],
+    "routes": [
+      [
+        "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+        {
+          "routeVersion": {
+            "$bigint": "0"
+          },
+          "endpoints": [
+            {
+              "url": "ws://127.0.0.1:1/v1/ws",
+              "priority": {
+                "$bigint": "0"
+              }
+            }
+          ],
+          "coordinatorUrl": "ws://127.0.0.1:1/v1/ws",
+          "source": {
+            "$bytes": "02bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba"
+          }
+        }
+      ]
+    ],
+    "snapshots": [],
+    "syncStates": [],
+    "units": [
+      [
+        "25b66a6f208b99dc1f3671e92b64cf512b67294b7236bef7e230c40cadb93bb3",
+        {
+          "r": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+          "a": "eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773",
+          "s": "00000000000000000002",
+          "st": "merged",
+          "row": {
+            "unitId": {
+              "$bytes": "25b66a6f208b99dc1f3671e92b64cf512b67294b7236bef7e230c40cadb93bb3"
+            },
+            "resourceId": {
+              "$bytes": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f"
+            },
+            "dataEpoch": {
+              "$bigint": "0"
+            },
+            "actor": {
+              "$bytes": "eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773"
+            },
+            "actorSeq": {
+              "$bigint": "2"
+            },
+            "prevDataUnitId": {
+              "$bytes": "c154923ab5486551a5be4c7b38fd2230312808b5cdcdaee3e4775c91a01636df"
+            },
+            "controlHead": {
+              "$bytes": "02bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba"
+            },
+            "bytes": {
+              "$bytes": "845826a20127045820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773a059021fa7005820f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f0100025820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da7730302045820c154923ab5486551a5be4c7b38fd2230312808b5cdcdaee3e4775c91a01636df05582002bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba0659018a3f10102f7c58eea1570f8a02c243d1b228711b65dc57126e7624a927ac14095aa9a9f3cf855a327df0aad718499698c0a6a6a145b8f58d612d149702ce5128f3fa9243665bb35aaf5d82f6482b239c6bae8ad5d7424beee23e53ae7f7c3594b509af5afd52980f54048364a7fddce7e8f041b3ff30d325658a08f43bc16a5d8c0f7a32578803b0edf331d6e07b9f101039c16b1ea52a75a475e2e8cd00da2b560a4c713d9a433c2786b4990948ae9149ec404551e959130527bda4782c4c66114c76b7e67a1c1defa6061354e5c33914294a26469fff4d4be493ffc38a7e879bb21c241cd69cafdd4f87208b15e87c38980961f138bcc93cc96b21539ce8ef9327d7bd2f0a16642b3a2746e74bb2aa40d7acf51e86494eb966b568f8d0d918f87ef74a2172819efaaeb6659329aaa7b3d8f1ba5880c6b36772e345d61d877ec52d3a9a8d117d16dd2ad3eeffdb77dc23dde68c2dd64a944ff1376dc6ef2b4c75340029a0b2d23c6ac8533c314d73b8efdf1c9baa3c2c36b21552fafb1abf2b4d6610b98cb04cf652ff6c584026fcbdd07d5c2e9d9575cab16b1fe93b66354a3b18cf21f77b67b4e6517499f15d94206bfb80cfb0272f4961749f9a09d8dbee29d01562c676075336c0b9ba04"
+            },
+            "status": "merged",
+            "detail": "local",
+            "accepted": true
+          }
+        }
+      ],
+      [
+        "c154923ab5486551a5be4c7b38fd2230312808b5cdcdaee3e4775c91a01636df",
+        {
+          "r": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+          "a": "eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773",
+          "s": "00000000000000000001",
+          "st": "merged",
+          "row": {
+            "unitId": {
+              "$bytes": "c154923ab5486551a5be4c7b38fd2230312808b5cdcdaee3e4775c91a01636df"
+            },
+            "resourceId": {
+              "$bytes": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f"
+            },
+            "dataEpoch": {
+              "$bigint": "0"
+            },
+            "actor": {
+              "$bytes": "eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773"
+            },
+            "actorSeq": {
+              "$bigint": "1"
+            },
+            "prevDataUnitId": null,
+            "controlHead": {
+              "$bytes": "02bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba"
+            },
+            "bytes": {
+              "$bytes": "845826a20127045820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773a0590118a7005820f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f0100025820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773030104f605582002bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba0658a5fd3ea065756d662939865baac866f0da17573054e48882ec051932ca8857bd3e9166d9b14feba23113ee2ce597bc226e11aef9d8cc5a985605422cc60c2b4eb8a277e488940816a47a96468c62ffab9c1f92a805e984f7b73ea7da815fce6795ca37b5b6a6fc99202ae6c3dc3ecac6335bc5e99b1e905051f15c9bdc85ed9773d5f92256556757a80d5e8585695a1325e6132cfd358886c8603a84923469ff2425ad9680585840941704f559c882e245e1b8b5d4d13c475f8885e22f390109b2cbb8a1b472ffe3dfa4d3aeb0f5325932293867a09fa6d317584d05cc9fb3b007f7604f8ed7800a"
+            },
+            "status": "merged",
+            "detail": "local",
+            "accepted": true
+          }
+        }
+      ],
+      [
+        "dd49609fd4c7db1be9b0292b766f1408480ef529d364954af5899a056359d045",
+        {
+          "r": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+          "a": "eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773",
+          "s": "00000000000000000003",
+          "st": "merged",
+          "row": {
+            "unitId": {
+              "$bytes": "dd49609fd4c7db1be9b0292b766f1408480ef529d364954af5899a056359d045"
+            },
+            "resourceId": {
+              "$bytes": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f"
+            },
+            "dataEpoch": {
+              "$bigint": "0"
+            },
+            "actor": {
+              "$bytes": "eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773"
+            },
+            "actorSeq": {
+              "$bigint": "3"
+            },
+            "prevDataUnitId": {
+              "$bytes": "25b66a6f208b99dc1f3671e92b64cf512b67294b7236bef7e230c40cadb93bb3"
+            },
+            "controlHead": {
+              "$bytes": "02bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba"
+            },
+            "bytes": {
+              "$bytes": "845826a20127045820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773a0590141a7005820f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f0100025820eb4a0b457180801feae80b498aa1494ed70c5c9f2ceed860f98393533b0da773030304582025b66a6f208b99dc1f3671e92b64cf512b67294b7236bef7e230c40cadb93bb305582002bb616009dd64535e1ddc005bd89001159b157d56ef9affb1cec37ea43465ba0658adcbdc0a34f1d1495222e770e7335584f93f04c57ed3ca1b7eac4a6e9580d3ecd83943112bc35569ae46d369602860457f74f6029290ebcae788b10ff7367c782327c99d31faea67537be938810e3a936c4b157374f56f2d6e72054d1bd328999b7eaa2e3dc41da26b2ed856ba9bca81837b8d35a2d81e675343863792860f96922976120221c76d4458b60352848a73466b07241e5e7e999be83976798dcd3f24a027f31f5a0c46fadbfe821d49584079a218ebda8d38a59e0fdfae04a272b3d8a5013372b74c122e6b4503c2ad81c27c1e266dd33bfb39190381e72587220c10ea32f6b69c97dd03415c3064c1850b"
+            },
+            "status": "merged",
+            "detail": "local",
+            "accepted": true
+          }
+        }
+      ]
+    ]
+  },
+  "secrets": [
+    [
+      "lfcp-secret:resource-dek:f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f.0",
+      "969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5"
+    ]
+  ]
+}

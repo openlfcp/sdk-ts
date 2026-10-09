@@ -159,6 +159,13 @@ remove or rename any.
   Downgrading is supported only to a client that knows version 2. A
   database of a newer client is refused with `UNSUPPORTED_VALUE` and left
   untouched.
+- `conformance/upgrade/` (LFCP-02-029): storage written by the 0.1.3 SDK
+  (SQLite with file secrets, and IndexedDB) opened by this one. The three
+  queued edits, their exact bytes, the actor sequence, the key reference
+  and the model are kept, sealed at rest or not, and the next edit
+  continues the sequence. A section Resource is added beside it with its
+  own profile and actor. A 0.1.x client then refuses the store. README
+  "Local storage upgrades" gives the version matrix.
 
 ## 0.1.3 — 2026-10-08
 
