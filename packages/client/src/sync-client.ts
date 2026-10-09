@@ -1,5 +1,6 @@
 import {
   actorSequence,
+  bytesEqual,
   type ControlRecordId,
   type DataEpoch,
   type DataUnitId,
@@ -82,6 +83,7 @@ import {
   saveControlChain,
   saveControlConflict,
 } from "./storage.js";
+import { NotWritableError, type WriteAccess, writeAccess } from "./write-access.js";
 
 /**
  * The client sync session (LFCP-039a): one LFCP connection to a server and
@@ -373,6 +375,8 @@ interface ResourceContext {
   wanted: boolean;
   /** The validated linear chain, once Control sync completed. */
   view: Extract<ChainResult, { kind: "linear" }> | null;
+  /** The head and local time of the last Control sync's validation; kept across reconnects. */
+  verified: { readonly head: Uint8Array; readonly at: number } | null;
   /** Records fetched in the current Control round. */
   fetched: Uint8Array[];
   /** The Control sequence the current round must reach. */
@@ -584,6 +588,7 @@ export class SyncClient {
         state: "CLOSED",
         wanted: true,
         view: null,
+        verified: null,
         fetched: [],
         controlTarget: null,
         remoteHave: [],
@@ -1230,6 +1235,7 @@ export class SyncClient {
     const R = ctx.binding.resourceId;
     const before = previous ?? ctx.view;
     ctx.view = chain;
+    ctx.verified = { head: chain.state.head, at: this.#o.now() };
     // DEKs we already hold for epochs the saved chain now has (our own
     // rotation, or a package that came before the row): no request needed.
     await adoptStoredDeks(this.#o.storage, this.#o.secrets, chain);
@@ -1531,6 +1537,36 @@ export class SyncClient {
     );
   }
 
+  /**
+   * SDK-SECTIONS-INTEGRATION-01 §6: whether this client may commit to
+   * `resource`, from the validated Control state only: the chain of the
+   * last Control sync, or the stored chain validated now. `verifiedAt` is
+   * the local time of that validation (the last sync's when the stored
+   * chain is still at its head). Unknown without a validated chain.
+   */
+  async canWrite(resource: ResourceId): Promise<WriteAccess> {
+    const ctx = this.#resources.get(toHex(resource));
+    const view = ctx?.view ?? (await loadControlChain(this.#o.storage, resource));
+    return this.#access(resource, view, ctx?.verified ?? null);
+  }
+
+  async #access(
+    resource: ResourceId,
+    view: ChainResult | undefined | null,
+    verified: ResourceContext["verified"],
+  ): Promise<WriteAccess> {
+    if (view?.kind !== "linear")
+      return writeAccess(view, this.#o.signer.descriptor.principalId, false, 0);
+    const dek = await dekResolver(
+      this.#o.storage,
+      this.#o.secrets,
+      resource,
+    )(view.state.epoch.epoch);
+    const at =
+      verified !== null && bytesEqual(verified.head, view.state.head) ? verified.at : this.#o.now();
+    return writeAccess(view, this.#o.signer.descriptor.principalId, dek !== undefined, at);
+  }
+
   async #commit(
     ctx: ResourceContext,
     binding: CommitBinding<unknown>,
@@ -1546,10 +1582,11 @@ export class SyncClient {
       return known;
     }
     const view = ctx.view ?? (await loadControlChain(storage, R));
-    if (view === undefined || view.kind !== "linear")
-      throw new LfcpError("UNSUPPORTED_VALUE", "the Resource's Control Chain is not usable");
+    // §3.6, §6: a batch submitted while writing is not allowed writes nothing.
+    const access = await this.#access(R, view, ctx.verified);
+    if (!access.allowed || view?.kind !== "linear") throw new NotWritableError(access);
     const dek = await dekResolver(storage, this.#o.secrets, R)(view.state.epoch.epoch);
-    if (dek === undefined) throw new LfcpError("UNSUPPORTED_VALUE", "no DEK for the current epoch");
+    if (dek === undefined) throw new NotWritableError(access);
     const staged = binding.stage(intents);
     staged?.apply();
     try {

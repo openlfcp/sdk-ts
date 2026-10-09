@@ -88,6 +88,14 @@ remove or rename any.
   register's concurrent values, tags and assignees), so a renderer of SOP
   Tasks works on section Tasks unchanged. Both replicas share one
   implementation.
+- `SyncClient.canWrite(resource)` (SDK-SECTIONS-INTEGRATION-01 §6):
+  `{ allowed, reason, controlHead, verifiedAt }` from the validated Control
+  state only: `data/write` and the current epoch's DEK allow writing;
+  otherwise `read-only`, `revoked`, `not-member`, `key-unavailable`, or
+  `unknown` without a validated chain. `SyncClient.commit` refuses a batch
+  while writing is not allowed with `NotWritableError` (`NOT_WRITABLE`,
+  §3.6) and writes nothing; it threw `LfcpError` (`UNSUPPORTED_VALUE`)
+  for a missing chain or DEK before.
 
 ## 0.1.3 — 2026-10-08
 

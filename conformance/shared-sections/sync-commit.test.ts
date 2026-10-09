@@ -9,6 +9,7 @@ import {
   type DataProfileHandler,
   DataUnitApplier,
   dekResolver,
+  NotWritableError,
   OperationIdReusedError,
   OutboundQueue,
   receiptOf,
@@ -56,7 +57,26 @@ const id = (n: number) => `0192e4a0-0000-7000-8000-${n.toString(16).padStart(12,
 const SECTION = id(1);
 const me = OWNER.descriptor.principalId;
 
-async function device() {
+/** Another principal, for the §6 access cases. */
+const party = (seed: number) => {
+  const key = importSigningKey(bytes32(seed));
+  const agreement = importAgreementKey(bytes32(seed + 100));
+  return { signer: { key, descriptor: principalDescriptorFromKeys(key, agreement) }, agreement };
+};
+
+interface DeviceOptions {
+  /** The client's principal; the owner by default. */
+  readonly as?: ReturnType<typeof party>;
+  /** Records the owner appends after Genesis, given the IDs so far. */
+  readonly records?: (add: (body: ControlBody) => ControlRecordId) => void;
+  /** Whether the current epoch's DEK is in the SecretStore (default true). */
+  readonly dek?: boolean;
+  readonly now?: () => number;
+}
+
+async function device(opts: DeviceOptions = {}) {
+  const who = opts.as ?? { signer: OWNER, agreement: AGREEMENT };
+  const me = who.signer.descriptor.principalId;
   const R = resourceId(bytes32(200));
   const records: Uint8Array[] = [];
   let head: ControlRecordId | null = null;
@@ -68,6 +88,7 @@ async function device() {
     );
     records.push(s.bytes);
     head = s.recordId;
+    return s.recordId;
   };
   add({
     type: "GENESIS",
@@ -77,12 +98,14 @@ async function device() {
     endpoints: [{ url: "ws://127.0.0.1:1/v1/ws", priority: 0n }],
     coordinatorUrl: "ws://127.0.0.1:1/v1/ws",
   });
+  opts.records?.(add);
   const view = validateControlChain(records);
   if (view.kind !== "linear") throw new Error(view.kind);
   const storage = new InMemoryLfcpStorage();
   const secrets = new InMemorySecretStore();
   await saveControlChain(storage, view, null);
-  await secrets.put(dekSecretRef(R, dataEpoch(0n)), exportSecretKeyBytes(DEK0));
+  if (opts.dek !== false)
+    await secrets.put(dekSecretRef(R, dataEpoch(0n)), exportSecretKeyBytes(DEK0));
   const e0 = (await storage.control.epochs(R))[0] as EpochRow;
   await storage.commit([
     { op: "put-epoch", resourceId: R, epoch: { ...e0, dekRef: dekSecretRef(R, dataEpoch(0n)) } },
@@ -99,12 +122,12 @@ async function device() {
   };
   const sync = new SyncClient({
     url: "ws://127.0.0.1:1/v1/ws",
-    signer: OWNER,
-    agreement: AGREEMENT,
+    signer: who.signer,
+    agreement: who.agreement,
     storage,
     secrets,
     outbound: new OutboundQueue({ storage }),
-    now: () => 0,
+    now: opts.now ?? (() => 0),
   });
   sync.open({
     resourceId: R,
@@ -115,7 +138,7 @@ async function device() {
     }),
     commit: profile.commitBinding(me) as CommitBinding<unknown>,
   });
-  return { R, storage, profile, sync };
+  return { R, storage, profile, sync, head: view.state.head };
 }
 
 const create: SectionIntent = {
@@ -177,5 +200,87 @@ describe("SyncClient.commit with shared sections (§3.1)", () => {
     ).rejects.toMatchObject({ code: "UNKNOWN_NODE" });
     expect(d.profile.replica.revision()).toBe(before);
     expect(await receiptOf(d.storage, d.R, "op-2")).toBeUndefined();
+  });
+});
+
+describe("SyncClient.canWrite and NOT_WRITABLE (§6, §3.6)", () => {
+  const reader = party(30);
+  const writer = party(40);
+  const grant = (subject: ReturnType<typeof party>, abilities: bigint[]): ControlBody => ({
+    type: "CAPABILITY_GRANT",
+    subject: subject.signer.descriptor,
+    abilities,
+    delegable: [],
+  });
+
+  it("allows the owner, at the validated head and the time of validation", async () => {
+    const d = await device({ now: () => 1_234 });
+    expect(await d.sync.canWrite(d.R)).toEqual({
+      allowed: true,
+      reason: null,
+      controlHead: d.head,
+      verifiedAt: 1_234,
+    });
+  });
+
+  it("allows a member granted data/write", async () => {
+    const d = await device({ as: writer, records: (add) => add(grant(writer, [1n, 2n])) });
+    expect(await d.sync.canWrite(d.R)).toMatchObject({ allowed: true, reason: null });
+  });
+
+  it("refuses a read-only member's batch with NOT_WRITABLE and writes nothing", async () => {
+    const d = await device({ as: reader, records: (add) => add(grant(reader, [1n])) });
+    const access = await d.sync.canWrite(d.R);
+    expect(access).toEqual({
+      allowed: false,
+      reason: "read-only",
+      controlHead: d.head,
+      verifiedAt: 0,
+    });
+    const before = d.profile.replica.revision();
+    const refused = d.sync.commit(d.R, [create], { operationId: "op-1" });
+    await expect(refused).rejects.toBeInstanceOf(NotWritableError);
+    await expect(refused).rejects.toMatchObject({ code: "NOT_WRITABLE", access });
+    expect(d.profile.replica.revision()).toBe(before);
+    expect(await receiptOf(d.storage, d.R, "op-1")).toBeUndefined();
+    expect(await d.storage.outbound.list(d.R)).toEqual([]);
+  });
+
+  it("tells a revoked member from one never granted", async () => {
+    const revoked = await device({
+      as: writer,
+      records: (add) => add({ type: "CAPABILITY_REVOKE", grantId: add(grant(writer, [1n, 2n])) }),
+    });
+    expect(await revoked.sync.canWrite(revoked.R)).toMatchObject({
+      allowed: false,
+      reason: "revoked",
+    });
+    const stranger = await device({ as: writer });
+    expect(await stranger.sync.canWrite(stranger.R)).toMatchObject({
+      allowed: false,
+      reason: "not-member",
+    });
+  });
+
+  it("refuses a writer without the current epoch's DEK", async () => {
+    const d = await device({ dek: false });
+    expect(await d.sync.canWrite(d.R)).toMatchObject({
+      allowed: false,
+      reason: "key-unavailable",
+      controlHead: d.head,
+    });
+    await expect(d.sync.commit(d.R, [create], { operationId: "op-1" })).rejects.toMatchObject({
+      code: "NOT_WRITABLE",
+    });
+  });
+
+  it("is unknown without a validated chain", async () => {
+    const d = await device();
+    expect(await d.sync.canWrite(resourceId(bytes32(201)))).toEqual({
+      allowed: false,
+      reason: "unknown",
+      controlHead: null,
+      verifiedAt: null,
+    });
   });
 });

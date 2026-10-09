@@ -112,3 +112,10 @@ export {
   startSyncDriver,
   TERMINAL_RESOURCE_CODES,
 } from "./sync-client.js";
+export {
+  NotWritableError,
+  UNKNOWN_ACCESS,
+  type WriteAccess,
+  type WriteDeniedReason,
+  writeAccess,
+} from "./write-access.js";
