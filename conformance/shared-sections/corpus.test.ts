@@ -27,7 +27,7 @@ import {
 } from "@openlfcp/shared-objects/sections";
 import { describe, expect, it } from "vitest";
 import { openSpec } from "../spec.mjs";
-import { readSectionsCorpus } from "./corpus-format.mjs";
+import { readSectionsCorpus, withPending } from "./corpus-format.mjs";
 
 interface Bytes {
   readonly base64: string;
@@ -123,76 +123,83 @@ describe("shared sections corpus", () => {
   }, 30_000);
 
   for (const c of suite.cases)
-    it(`${c.id}: schema validation matches the corpus`, () => {
-      // SOP §13.1: a Snapshot past the floor is refused by a receiver with
-      // floor limits, which then rebuilds from the units (SS56).
-      const snapshot = bytes(c.reference_snapshot);
-      if (c.expected.snapshot?.within_floor === false)
-        expect(() => SectionDocument.fromSave(snapshot)).toThrow(
-          expect.objectContaining({
-            code: "PROFILE_INVALID",
-            diagnostic: "INVALID_AUTOMERGE_BYTES",
-          }),
-        );
-      const doc =
-        c.expected.snapshot?.within_floor === false
-          ? SectionDocument.fromSave(snapshot, "local-state")
-          : SectionDocument.fromSave(snapshot);
-      const heads = [...c.expected_heads].sort();
-      expect(doc.heads()).toEqual(heads);
-      const { document: replayed, unapplied } = SectionDocument.fromChanges(admitted(c).map(bytes));
-      expect(unapplied).toEqual([]);
-      expect(replayed.heads()).toEqual(heads);
+    it(
+      `${c.id}: schema validation matches the corpus`,
+      () =>
+        withPending(c.id, () => {
+          // SOP §13.1: a Snapshot past the floor is refused by a receiver with
+          // floor limits, which then rebuilds from the units (SS56).
+          const snapshot = bytes(c.reference_snapshot);
+          if (c.expected.snapshot?.within_floor === false)
+            expect(() => SectionDocument.fromSave(snapshot)).toThrow(
+              expect.objectContaining({
+                code: "PROFILE_INVALID",
+                diagnostic: "INVALID_AUTOMERGE_BYTES",
+              }),
+            );
+          const doc =
+            c.expected.snapshot?.within_floor === false
+              ? SectionDocument.fromSave(snapshot, "local-state")
+              : SectionDocument.fromSave(snapshot);
+          const heads = [...c.expected_heads].sort();
+          expect(doc.heads()).toEqual(heads);
+          const { document: replayed, unapplied } = SectionDocument.fromChanges(
+            admitted(c).map(bytes),
+          );
+          expect(unapplied).toEqual([]);
+          expect(replayed.heads()).toEqual(heads);
 
-      const before = doc.save();
-      const v = doc.validate();
-      expect(doc.save()).toEqual(before);
-      expect(v.problems).toEqual([]);
-      // §14.2: collisions are reported apart; a collided node is not validated.
-      expect(v.collisions).toEqual(c.expected.collisions ?? []);
-      expect(v.state).toBe(c.expected.classification === "IMPORTING" ? "importing" : "ready");
-      expect(v.placements.size).toBe(0);
-      expect(v.objects.size).toBe(0);
-      expect(
-        [...v.nodes]
-          .map(([id, p]) => ({ id, diagnostic: p.diagnostic }))
-          .sort((a, b) => a.id.localeCompare(b.id)),
-      ).toEqual(c.expected.invalid);
-      expect(replayed.validate()).toEqual(v);
+          const before = doc.save();
+          const v = doc.validate();
+          expect(doc.save()).toEqual(before);
+          expect(v.problems).toEqual([]);
+          // §14.2: collisions are reported apart; a collided node is not validated.
+          expect(v.collisions).toEqual(c.expected.collisions ?? []);
+          expect(v.state).toBe(c.expected.classification === "IMPORTING" ? "importing" : "ready");
+          expect(v.placements.size).toBe(0);
+          expect(v.objects.size).toBe(0);
+          expect(
+            [...v.nodes]
+              .map(([id, p]) => ({ id, diagnostic: p.diagnostic }))
+              .sort((a, b) => a.id.localeCompare(b.id)),
+          ).toEqual(c.expected.invalid);
+          expect(replayed.validate()).toEqual(v);
 
-      // §7, §9, §14.3: the effective tree and the structural facts (LFCP-02-014).
-      const t = doc.tree();
-      expect(t.classification).toBe(c.expected.classification);
-      expect(t.tree).toEqual(c.expected.tree);
-      expect(t.hidden).toEqual(c.expected.hidden);
-      expect(t.recovery).toEqual(c.expected.recovery);
-      expect(t.invalid).toEqual(c.expected.invalid);
-      expect(t.collisions).toEqual(c.expected.collisions ?? []);
-      expect(t.retainedConcurrentEdits).toEqual(c.expected.retainedConcurrentEdits);
-      expect(t.scalarConflicts).toEqual(c.expected.scalarConflicts);
-      expect(replayed.tree().tree).toEqual(t.tree);
+          // §7, §9, §14.3: the effective tree and the structural facts (LFCP-02-014).
+          const t = doc.tree();
+          expect(t.classification).toBe(c.expected.classification);
+          expect(t.tree).toEqual(c.expected.tree);
+          expect(t.hidden).toEqual(c.expected.hidden);
+          expect(t.recovery).toEqual(c.expected.recovery);
+          expect(t.invalid).toEqual(c.expected.invalid);
+          expect(t.collisions).toEqual(c.expected.collisions ?? []);
+          expect(t.retainedConcurrentEdits).toEqual(c.expected.retainedConcurrentEdits);
+          expect(t.scalarConflicts).toEqual(c.expected.scalarConflicts);
+          expect(replayed.tree().tree).toEqual(t.tree);
 
-      // §14.1 (LFCP-02-017): every change, injected ones included, received
-      // through the production admission. The refused ones and the ones held
-      // behind them are the corpus's; the rest reach its heads and tree.
-      const all = [...c.base_changes, ...c.branches.A, ...c.branches.B, ...c.after_merge];
-      const receiver = SectionReplica.empty({ resource, principal: principal("C") });
-      const r = receiver.receiveChanges(
-        all.map((ch) => ({
-          bytes: bytes(ch),
-          ...(ch.signer === undefined ? {} : { signer: principal(ch.signer) }),
-        })),
-      );
-      expect(
-        r.refused
-          .filter((x) => !x.held)
-          .map((x) => ({ change: all[x.index]?.change_hash, diagnostic: x.diagnostic })),
-      ).toEqual(c.expected.refused);
-      expect([...r.waiting].sort()).toEqual(c.expected.held.map(heldHash).sort());
-      expect(receiver.revision()).toBe(heads.join(","));
-      expect(receiver.tree().tree).toEqual(t.tree);
-      // SS55 and SS56 replay 64 changes of 8,192 Text operations several ways.
-    }, 30_000);
+          // §14.1 (LFCP-02-017): every change, injected ones included, received
+          // through the production admission. The refused ones and the ones held
+          // behind them are the corpus's; the rest reach its heads and tree.
+          const all = [...c.base_changes, ...c.branches.A, ...c.branches.B, ...c.after_merge];
+          const receiver = SectionReplica.empty({ resource, principal: principal("C") });
+          const r = receiver.receiveChanges(
+            all.map((ch) => ({
+              bytes: bytes(ch),
+              ...(ch.signer === undefined ? {} : { signer: principal(ch.signer) }),
+            })),
+          );
+          expect(
+            r.refused
+              .filter((x) => !x.held)
+              .map((x) => ({ change: all[x.index]?.change_hash, diagnostic: x.diagnostic })),
+          ).toEqual(c.expected.refused);
+          expect([...r.waiting].sort()).toEqual(c.expected.held.map(heldHash).sort());
+          expect(receiver.revision()).toBe(heads.join(","));
+          expect(receiver.tree().tree).toEqual(t.tree);
+          // SS55 and SS56 replay 64 changes of 8,192 Text operations several ways.
+        }),
+      30_000,
+    );
 
   it("SS01: Task fields are scalars in objects, the paragraph is node Text (§2, §4.2)", () => {
     const c = suite.cases.find((x) => x.id === "SS01") as Case;

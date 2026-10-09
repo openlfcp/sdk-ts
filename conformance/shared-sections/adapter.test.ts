@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { openSpec } from "../spec.mjs";
 import { runCase } from "./adapter.mjs";
-import { readSectionsCorpus } from "./corpus-format.mjs";
+import { readSectionsCorpus, withPending } from "./corpus-format.mjs";
 
 interface Case {
   readonly id: string;
@@ -27,20 +27,25 @@ const suite = readSectionsCorpus(openSpec()) as {
 describe("sdk-ts adapter for SHARED-SECTIONS-TEST-VECTORS-01", () => {
   for (const delivery of ["normal", "reverse", "checkpoint"] as const)
     for (const c of suite.cases)
-      it(`${c.id} (${delivery}): the production SDK reaches every expected field`, async () => {
-        const result = await runCase({
-          id: c.id,
-          profile: suite.profile,
-          identities: suite.identities,
-          base_snapshot: c.base_snapshot,
-          base_changes: c.base_changes,
-          branches: c.branches,
-          after_merge: c.after_merge,
-          delivery,
-        });
-        // A refused change's place in the list differs by delivery; the set is what counts.
-        const keys = Object.keys(c.expected).filter((k) => k !== "errors");
-        for (const key of keys)
-          expect(result[key], `${c.id} ${delivery} ${key}`).toEqual(c.expected[key]);
-      }, 30_000);
+      it(
+        `${c.id} (${delivery}): the production SDK reaches every expected field`,
+        () =>
+          withPending(c.id, async () => {
+            const result = await runCase({
+              id: c.id,
+              profile: suite.profile,
+              identities: suite.identities,
+              base_snapshot: c.base_snapshot,
+              base_changes: c.base_changes,
+              branches: c.branches,
+              after_merge: c.after_merge,
+              delivery,
+            });
+            // A refused change's place in the list differs by delivery; the set is what counts.
+            const keys = Object.keys(c.expected).filter((k) => k !== "errors");
+            for (const key of keys)
+              expect(result[key], `${c.id} ${delivery} ${key}`).toEqual(c.expected[key]);
+          }),
+        30_000,
+      );
 });

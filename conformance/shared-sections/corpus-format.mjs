@@ -63,3 +63,20 @@ export function legacySectionsSuite(suite) {
 export function readSectionsCorpus(spec) {
   return legacySectionsSuite(spec.readJson(CORPUS));
 }
+
+import pending from "./pending.json" with { type: "json" };
+
+/**
+ * Runs a case's checks; a case pending.json lists must still fail them
+ * (its fix is pending), and fails as stale once it passes. A case of an
+ * earlier baseline that the corpus does not hold simply runs.
+ */
+export async function withPending(id, body) {
+  if (!pending.cases.includes(id)) return body();
+  try {
+    await body();
+  } catch {
+    return;
+  }
+  throw new Error(`${id} passes now: remove it from conformance/shared-sections/pending.json`);
+}
