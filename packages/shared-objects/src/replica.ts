@@ -11,6 +11,7 @@ import {
   type CheckedChange,
   checkChange,
   checkSaveHeader,
+  parsedOf,
   unframeChange,
   unframeSnapshot,
 } from "./automerge-bytes.js";
@@ -25,6 +26,7 @@ import {
 const MAKE_ACTIONS: ReadonlySet<string> = new Set(["makeMap", "makeList", "makeText", "makeTable"]);
 
 import { ProfileInvalidError } from "./profile-invalid.js";
+import { type ReferenceHistory, referenceHistoryOf } from "./references.js";
 import { ProfileError, parseTask, type Task, type TaskIntent } from "./task.js";
 import {
   firstPerField,
@@ -105,6 +107,13 @@ export function resolveFieldConflict(
     throw new LfcpError("UNSUPPORTED_VALUE", `only a date field can be cleared (§36)`);
   return Object.freeze({ intent: "task.resolve_field_conflict", id, field, value });
 }
+
+/** §11.4: a refusal for a change whose operations refer outside its causal history. */
+const referenceError = (rule: string): ProfileInvalidError =>
+  new ProfileInvalidError(
+    "INVALID_AUTOMERGE_BYTES",
+    `the change's operations refer outside its causal history (§11.4 ${rule})`,
+  );
 
 /** §21: two concurrent objects under one Object ID: OBJECT_ID_COLLISION, a profile error of its own, not PROFILE_INVALID. */
 export class ObjectIdCollisionError extends LfcpError {
@@ -582,6 +591,8 @@ export class SharedObjectsReplica {
   readonly #actor: string;
   readonly #minSeq: number;
   #doc: Doc;
+  /** §11.4: the document's changes as references read them; null to build again from the document. */
+  #refs: ReferenceHistory | null = null;
   /** Highest sequence seen per actor (hex). */
   readonly #seqs = new Map<string, number>();
   /** §11.2: known object depths (object ID → depth below the root), filled as objects appear. */
@@ -1031,6 +1042,7 @@ export class SharedObjectsReplica {
         A.init({ actor: this.#actor }),
         A.getAllChanges(next).filter((c) => A.decodeChange(c).hash !== hash),
       )[0];
+      this.#refs = null;
       throw new LfcpError(
         "CHANGE_TOO_LARGE",
         `the transaction "${message}" is larger than one change may be (§11.1: ${(e as Error).message}); split it into several (§12)`,
@@ -1042,6 +1054,7 @@ export class SharedObjectsReplica {
         `actor sequence ${checked.seq} after ${this.actorSeq} (§9)`,
       );
     this.#doc = next;
+    this.#refs?.add(checked.hash, parsedOf(checked));
     this.#noteSeq(checked.actor, checked.seq);
     for (const [id, d] of created) this.#depths.set(id, d);
     return Object.freeze({
@@ -1141,6 +1154,12 @@ export class SharedObjectsReplica {
         });
         continue;
       } else {
+        // §11.4: the operations refer only to the change's causal history.
+        const rule = this.#references().check(parsedOf(c));
+        if (rule !== null) {
+          refused.push({ change: c, error: referenceError(rule) });
+          continue;
+        }
         // §11.2: the depths of the objects it creates, given the document and the batch so far.
         let created: Map<string, number>;
         try {
@@ -1151,6 +1170,7 @@ export class SharedObjectsReplica {
         }
         for (const [id, d] of created) batchDepths.set(id, d);
         seqs.set(c.actor, c.seq);
+        this.#references().add(c.hash, parsedOf(c));
         admitted.push(c);
       }
       for (const child of children.get(c.hash) ?? []) {
@@ -1169,6 +1189,8 @@ export class SharedObjectsReplica {
         for (const [id, d] of batchDepths) this.#depths.set(id, d);
       } else {
         this.#doc = batch.restored;
+        // The index already holds the batch: build it again from the restored document.
+        this.#refs = null;
         applied = [];
         for (const c of admitted) {
           try {
@@ -1194,6 +1216,12 @@ export class SharedObjectsReplica {
       refused: Object.freeze(refused),
       objects: Object.freeze(applied.length > 0 ? this.#objectChanges(before, "remote") : []),
     });
+  }
+
+  /** The reference index of the document (§11.4), built once and kept with it. */
+  #references(): ReferenceHistory {
+    this.#refs ??= referenceHistoryOf(this.#doc);
+    return this.#refs;
   }
 
   #receive(change: CheckedChange): ReceiveResult {
@@ -1229,12 +1257,16 @@ export class SharedObjectsReplica {
         "INVALID_AUTOMERGE_BYTES",
         `actor ${change.actor} sequence ${change.seq} skips sequence ${(this.#seqs.get(change.actor) ?? 0) + 1} (§14.1)`,
       );
+    // §11.4: the operations refer only to the change's causal history.
+    const rule = this.#references().check(parsedOf(change));
+    if (rule !== null) throw referenceError(rule);
     // §11.2: no object deeper than MAX_DOCUMENT_DEPTH, before the engine.
     const created = this.#createdDepths(change, new Map());
     const before = A.getHeads(this.#doc);
     const applied = applyChecked(this.#doc, change.bytes);
     if ("error" in applied) {
       this.#doc = applied.restored;
+      this.#refs = null;
       throw new ProfileInvalidError(
         "INVALID_AUTOMERGE_BYTES",
         `Automerge rejected the change (§11): ${applied.error.message}`,
@@ -1242,6 +1274,7 @@ export class SharedObjectsReplica {
     }
     const next = applied.next;
     this.#doc = next;
+    this.#refs?.add(change.hash, parsedOf(change));
     this.#noteSeq(change.actor, change.seq);
     for (const [id, d] of created) this.#depths.set(id, d);
     return Object.freeze({
