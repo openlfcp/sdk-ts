@@ -4,6 +4,31 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.1.4 — 2026-10-09
+
+A patch release of the 0.1 line with the admission of SPEC-PATCH-10
+(ADR 0010), at `mvp-0.1-baseline.10`. No API is removed or renamed.
+
+### Fixed
+
+- A received change that is not in its canonical encoding is refused
+  before the engine (SHARED-OBJECTS-PROFILE-01 §11.3), with
+  `PROFILE_INVALID` / `INVALID_AUTOMERGE_BYTES`: `checkChange` reads the
+  change by the format's rules. Automerge 3.5.0 accepted such changes and
+  could then write a document that does not load again.
+- A received change whose operations refer outside its causal history is
+  refused before the engine (§11.4, rules R1 to R7), in the batch and the
+  single receive paths. A refused change leaves a document that still
+  saves and loads.
+
+### Changed
+
+- `spec.lock` pins `mvp-0.1-baseline.10`; the conformance run checks the
+  canonical and references cases of the Automerge reference corpus.
+- The release workflow skips the dry run of an already published version
+  and runs on Node.js 24; the engine-trap test runs alone with named
+  timeouts.
+
 ## 0.1.3 — 2026-10-08
 
 0.1.2 was published without build output; 0.1.3 is the same code. The

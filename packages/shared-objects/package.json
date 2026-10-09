@@ -1,6 +1,6 @@
 {
   "name": "@openlfcp/shared-objects",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "SHARED-OBJECTS-PROFILE-01 (org.openlfcp.shared-objects.v1) implementation.",
   "keywords": [
     "openlfcp",
