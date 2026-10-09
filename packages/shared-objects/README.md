@@ -20,7 +20,7 @@ reaches the replica (§95). The replica has no Markdown or editor concepts.
 
 Part of the OpenLFCP TypeScript SDK, which implements the OpenLFCP MVP 0.1
 subset of [LFCP-WIRE-01](https://github.com/openlfcp/spec/blob/main/wire/LFCP-WIRE-01.md)
-at `mvp-0.1-baseline.9`, not every deferred WIRE-01 feature. It does not
+at `mvp-0.1-baseline.10`, not every deferred WIRE-01 feature. It does not
 claim full LFCP-WIRE-01 conformance. This is the MVP 0.1 release
 (`0.1.3`, npm dist-tag `latest`). Until 1.0, minor versions may change APIs.
 

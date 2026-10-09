@@ -1,0 +1,6 @@
+{
+  "suite": "SHARED-OBJECTS-AUTOMERGE-REFERENCE-01: canonical, references",
+  "note": "Cases of the corpus's canonical (SHARED-OBJECTS-PROFILE-01 §11.3) and references (§11.4) sections that the sdk-ts admission does not decide as expected yet. They are run and must still fail; remove an entry when the fix lands (a pending case that passes fails as stale).",
+  "task": "none: the admission decides every case (0.1.4)",
+  "cases": []
+}
