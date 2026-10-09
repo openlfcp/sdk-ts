@@ -262,8 +262,11 @@ async function device(
   return d;
 }
 
+/** The events' kinds (batches with their status), catch-up aside. */
 const kinds = (events: readonly StatusEvent[]) =>
-  events.map((e) => (e.kind === "batch" ? `batch:${e.status}` : e.kind));
+  events
+    .filter((e) => e.kind !== "catch-up")
+    .map((e) => (e.kind === "batch" ? `batch:${e.status}` : e.kind));
 
 describe("batch status from server evidence (§4.1)", () => {
   it("is pending until a correlated durable ACK accepts every unit", async () => {
@@ -288,7 +291,7 @@ describe("batch status from server evidence (§4.1)", () => {
     expect(b?.acceptedUnitIds.map(toHex)).toEqual(receipt.unitIds.map(toHex));
     expect(kinds(d.events)).toEqual(["access", "batch:pending", "batch:accepted"]);
     // Revisions count every event of the Resource from 1.
-    expect(d.events.map((e) => e.revision)).toEqual([1, 2, 3]);
+    expect(d.events.map((e) => e.revision)).toEqual(d.events.map((_, i) => i + 1));
     // Released, the batch and its status are gone.
     await releaseReceipt(d.storage, chain.R, "op-1");
     expect(await batchStatus(d.storage, chain.R, "op-1", 2n)).toBeUndefined();
@@ -531,7 +534,8 @@ describe("the loss signal's reason (§4.2)", () => {
     await d.at(1_000);
     await d.at(1_001);
     expect(d.sync.resourceState(chain.R)).toBe("LIVE");
-    const tail = d.events.slice(d.events.findIndex((e) => e.kind === "rehost"));
+    const status = d.events.filter((e) => e.kind !== "catch-up");
+    const tail = status.slice(status.findIndex((e) => e.kind === "rehost"));
     expect(kinds(tail)).toEqual(["rehost", "batch:pending", "reoffered", "batch:accepted"]);
     expect(tail[2]).toMatchObject({ kind: "reoffered", reason: "rehost" });
     expect(tail[2]?.kind === "reoffered" && tail[2].unitIds.map(toHex)).toEqual(
@@ -559,5 +563,41 @@ describe("Control freshness (LFCP-02-027)", () => {
       [1n, 1n, true],
     ]);
     expect(access[1]?.verifiedAt).not.toBeNull();
+  });
+});
+
+describe("catch-up (LFCP-02-028)", () => {
+  it("is current at a checkpoint only once live, and stays so offline as of that check", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(231);
+    serve(server, chain);
+    const d = await device(server, chain);
+    expect((await d.sync.statusSnapshot(chain.R)).catchUp).toEqual({
+      state: "not-started",
+      checkedAt: null,
+    });
+    await d.at(5_000);
+    await d.live();
+    const catchUp = () =>
+      d.events.flatMap((e) => (e.kind === "catch-up" ? [[e.state, e.checkedAt]] : []));
+    expect(catchUp()).toEqual([
+      ["receiving", null],
+      ["current-at-checkpoint", 5_000],
+    ]);
+    server.current.drop();
+    await settle(50);
+    await d.sync.idle();
+    // Offline: still current as of the last check, no new event.
+    expect(catchUp()).toHaveLength(2);
+    expect((await d.sync.statusSnapshot(chain.R)).catchUp).toEqual({
+      state: "current-at-checkpoint",
+      checkedAt: 5_000,
+    });
+    await d.at(7_000);
+    await d.at(7_001);
+    expect(catchUp().slice(2)).toEqual([
+      ["receiving", 5_000],
+      ["current-at-checkpoint", 7_000],
+    ]);
   });
 });

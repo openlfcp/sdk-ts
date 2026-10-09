@@ -89,6 +89,7 @@ import {
   resourcePhaseTransition,
 } from "./resource-state.js";
 import {
+  type CatchUp,
   type ReofferReason,
   receivedState,
   type SectionState,
@@ -419,8 +420,11 @@ interface ResourceContext {
   serverControlSeq: bigint | null;
   /** The first signal of a server's loss not yet followed by an offer (§4.2). */
   lossReason: ReofferReason | null;
+  /** The local time the Resource was last LIVE in this session (LFCP-02-028). */
+  liveAt: number | null;
   /** What the status stream last reported, to report changes only. */
   reported: {
+    catchUp: CatchUp | null;
     access: string | null;
     section: SectionState | null;
     readonly batches: Map<string, BatchStatus["status"]>;
@@ -599,6 +603,7 @@ export class SyncClient {
       for (const b of batches) ctx.reported.batches.set(b.operationId, b.status);
       ctx.reported.access = accessKey(access);
       ctx.reported.section = section === "unknown" ? null : section;
+      ctx.reported.catchUp = this.#catchUp(ctx);
     }
     return Object.freeze({
       revision: this.#statusRevision.get(toHex(resource)) ?? 0,
@@ -606,6 +611,10 @@ export class SyncClient {
       received,
       section,
       access,
+      catchUp: Object.freeze({
+        state: ctx === undefined ? "not-started" : this.#catchUp(ctx),
+        checkedAt: ctx?.liveAt ?? null,
+      }),
     });
   }
 
@@ -667,6 +676,36 @@ export class SyncClient {
     if (key === ctx.reported.access) return;
     ctx.reported.access = key;
     this.#emitStatus(R, { kind: "access", access });
+  }
+
+  /** LFCP-02-028: the catch-up fact of a Resource from its phase. */
+  #catchUp(ctx: ResourceContext): CatchUp {
+    switch (ctx.state) {
+      case "LIVE":
+        return "current-at-checkpoint";
+      case "OPENING":
+      case "CONTROL_SYNC":
+      case "KEY_SYNC":
+      case "DATA_SYNC":
+        return "receiving";
+      case "KEY_BLOCKED":
+      case "CONTROL_CONFLICT":
+        return "unknown";
+      case "CLOSED":
+        return ctx.liveAt === null ? "not-started" : "current-at-checkpoint";
+    }
+  }
+
+  /** Reports the catch-up fact when it changed. */
+  #reportCatchUp(ctx: ResourceContext): void {
+    const state = this.#catchUp(ctx);
+    if (state === ctx.reported.catchUp) return;
+    ctx.reported.catchUp = state;
+    this.#emitStatus(ctx.binding.resourceId, {
+      kind: "catch-up",
+      state,
+      checkedAt: ctx.liveAt,
+    });
   }
 
   /** Reports the section state when it changed (§5 `section-state`). */
@@ -779,8 +818,9 @@ export class SyncClient {
         view: null,
         verified: null,
         serverControlSeq: null,
+        liveAt: null,
         lossReason: null,
-        reported: { access: null, section: null, batches: new Map() },
+        reported: { catchUp: null, access: null, section: null, batches: new Map() },
         fetched: [],
         controlTarget: null,
         remoteHave: [],
@@ -985,6 +1025,8 @@ export class SyncClient {
       ctx.recoveryAttempts = 0;
     }
     this.#emit({ type: "resource-state", resourceId: ctx.binding.resourceId, state: next });
+    if (next === "LIVE") ctx.liveAt = this.#o.now();
+    this.#reportCatchUp(ctx);
     if (next === "LIVE" && ctx.controlStale) {
       ctx.controlStale = false;
       this.#refreshControl(ctx);

@@ -141,6 +141,11 @@ remove or rename any.
   refuses is rejected with that diagnostic, and nothing changes. The
   replica's own changes, including local work the Snapshot lacks, are
   kept on top, and the §9 sequence carries over.
+- A `catch-up` fact in the status stream and `statusSnapshot().catchUp`
+  (LFCP-02-028). It is `receiving` while Control, keys and units are
+  fetched, and `current-at-checkpoint` only once the Resource is live,
+  with `checkedAt`. It stays so offline, as of that check. It is
+  `unknown` while a Control conflict or a missing key blocks the catch-up.
 
 ## 0.1.3 — 2026-10-08
 

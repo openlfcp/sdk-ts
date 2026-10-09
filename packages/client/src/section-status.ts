@@ -16,6 +16,15 @@ export type ReofferReason = "unknown-previous" | "have-gap" | "rehost";
 /** §4.3: what became of a unit received from others. */
 export type ReceivedFact = "held" | "waiting" | "refused";
 
+/**
+ * LFCP-02-028: how far this session caught up with the Resource.
+ * "current-at-checkpoint" only once the Resource was live (Control, keys
+ * and every offered unit received and applied), at `checkedAt`; it stays
+ * so offline, as of that check. "unknown" while a Control conflict or a
+ * missing key blocks the catch-up.
+ */
+export type CatchUp = "not-started" | "receiving" | "current-at-checkpoint" | "unknown";
+
 /** §4.3: a section without `ready` is importing. */
 export type SectionState = "ready" | "importing";
 
@@ -40,6 +49,12 @@ export type StatusEvent = { readonly revision: number } & (
     }
   | { readonly kind: "section-state"; readonly state: SectionState }
   | { readonly kind: "access"; readonly access: AccessState }
+  | {
+      readonly kind: "catch-up";
+      readonly state: CatchUp;
+      /** The local time the Resource was last live; null before. */
+      readonly checkedAt: number | null;
+    }
   /** The Resource was hosted again on this route (§41.1). */
   | { readonly kind: "rehost"; readonly route: string }
 );
@@ -66,6 +81,7 @@ export interface StatusSnapshot {
   /** Unknown without a section binding, or before the section exists. */
   readonly section: SectionState | "unknown";
   readonly access: AccessState;
+  readonly catchUp: { readonly state: CatchUp; readonly checkedAt: number | null };
 }
 
 /**

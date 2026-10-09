@@ -95,6 +95,7 @@ export {
   resourcePhaseTransition,
 } from "./resource-state.js";
 export {
+  type CatchUp,
   type ReceivedFact,
   type ReceivedState,
   type ReofferReason,
