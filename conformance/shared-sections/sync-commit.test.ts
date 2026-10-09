@@ -26,7 +26,7 @@ import {
   importResourceDEK,
   importSigningKey,
 } from "@openlfcp/crypto";
-import { createTask } from "@openlfcp/shared-objects";
+import { assign, createTask } from "@openlfcp/shared-objects";
 import {
   SECTIONS_PROFILE_ID,
   type SectionIntent,
@@ -443,6 +443,38 @@ describe("access with its evidence (LFCP-02-027)", () => {
     // The queued unit and its receipt stay: no reset as repair.
     expect(await d.storage.outbound.list(d.R)).toEqual(queued);
     expect(await receiptOf(d.storage, d.R, "op-1")).toBeDefined();
+  });
+
+  it("grants nothing to an assignee copied into a section Task (CM12)", async () => {
+    const d = await device();
+    const task = createTask({ id: id(1000) as never, title: "Review", createdBy: me }).task;
+    await d.sync.commit(
+      d.R,
+      [
+        create,
+        { intent: "task.create_in_section", task, parent: SECTION, after: null },
+        assign(task, writer.signer.descriptor.principalId).intent,
+      ],
+      { operationId: "op-1" },
+    );
+    expect(d.profile.replica.task(task.id)?.assignees).toHaveLength(1);
+    // No Control Record is made or queued: no automatic grant, no fabricated participant.
+    const a = await d.sync.accessState(d.R);
+    expect(a).toMatchObject({ controlSeq: 0n, pendingControl: [], invitations: [] });
+    expect((await d.storage.outbound.list(d.R)).every((item) => item.kind === "data-unit")).toBe(
+      true,
+    );
+    // The assignee, on the same validated chain, is not a member and cannot write.
+    const w = await device({ as: writer });
+    expect(await w.sync.accessState(w.R)).toMatchObject({
+      allowed: false,
+      reason: "not-member",
+      abilities: [],
+      paths: [],
+    });
+    await expect(w.sync.commit(w.R, [create], { operationId: "op-1" })).rejects.toMatchObject({
+      code: "NOT_WRITABLE",
+    });
   });
 
   it("is read-only for a reader with a loaded replica, and freshness is unknown offline (SI18)", async () => {
