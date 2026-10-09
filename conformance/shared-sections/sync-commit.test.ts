@@ -113,33 +113,48 @@ async function device(opts: DeviceOptions = {}) {
     { op: "put-epoch", resourceId: R, epoch: { ...e0, dekRef: dekSecretRef(R, dataEpoch(0n)) } },
   ]);
 
+  /** A client of the device's stores with `profile` (a restart builds a new one). */
+  const connect = (profile: SharedSectionsDataProfile) => {
+    const handler: DataProfileHandler<unknown> = {
+      dataProfile: profile.dataProfile,
+      codecFor: (u) => profile.codecFor(u) as never,
+      apply: (u, v) => profile.apply(u, v as never),
+      exclude: (ids) => profile.exclude(ids),
+    };
+    const sync = new SyncClient({
+      url: "ws://127.0.0.1:1/v1/ws",
+      signer: who.signer,
+      agreement: who.agreement,
+      storage,
+      secrets,
+      outbound: new OutboundQueue({ storage }),
+      now: opts.now ?? (() => 0),
+    });
+    sync.open({
+      resourceId: R,
+      applier: new DataUnitApplier({
+        storage,
+        dek: dekResolver(storage, secrets, R),
+        handlers: [handler],
+      }),
+      commit: profile.commitBinding(me) as CommitBinding<unknown>,
+    });
+    return sync;
+  };
   const profile = new SharedSectionsDataProfile(
     SectionReplica.empty({ resource: R, principal: me }),
   );
-  const handler: DataProfileHandler<unknown> = {
-    dataProfile: profile.dataProfile,
-    codecFor: (u) => profile.codecFor(u) as never,
-    apply: (u, v) => profile.apply(u, v as never),
-    exclude: (ids) => profile.exclude(ids),
+  const sync = connect(profile);
+  /** A restart: the profile from its stored checkpoint, a new client on the same stores. */
+  const restart = async () => {
+    const checkpoint = await storage.profileState.checkpoint(R);
+    if (checkpoint === undefined) throw new Error("no checkpoint");
+    const restored = SharedSectionsDataProfile.restore(checkpoint as never, {
+      resource: R,
+      principal: me,
+    });
+    return { profile: restored, sync: connect(restored) };
   };
-  const sync = new SyncClient({
-    url: "ws://127.0.0.1:1/v1/ws",
-    signer: who.signer,
-    agreement: who.agreement,
-    storage,
-    secrets,
-    outbound: new OutboundQueue({ storage }),
-    now: opts.now ?? (() => 0),
-  });
-  sync.open({
-    resourceId: R,
-    applier: new DataUnitApplier({
-      storage,
-      dek: dekResolver(storage, secrets, R),
-      handlers: [handler],
-    }),
-    commit: profile.commitBinding(me) as CommitBinding<unknown>,
-  });
   /** Signs the owner's next record on the current head, without storing it. */
   const sign = (body: ControlBody) =>
     signControlRecord(
@@ -156,7 +171,7 @@ async function device(opts: DeviceOptions = {}) {
     await saveControlChain(storage, next, before);
     return id;
   };
-  return { R, storage, profile, sync, head: view.state.head, sign, extend };
+  return { R, storage, profile, sync, head: view.state.head, sign, extend, restart };
 }
 
 const create: SectionIntent = {
@@ -486,5 +501,38 @@ describe("access with its evidence (LFCP-02-027)", () => {
       serverControlSeq: null,
       current: null,
     });
+  });
+});
+
+describe("restart with pending section work (LFCP-02-028)", () => {
+  it("keeps the queue and receipts, and continues both sequences", async () => {
+    const d = await device();
+    await d.sync.commit(d.R, [create, ...tasks(2)], { operationId: "op-1" });
+    await d.sync.commit(d.R, tasks(1, 2000), { operationId: "op-2" });
+    const queued = await d.storage.outbound.list(d.R);
+    const revision = d.profile.replica.revision();
+    const actorSeq = d.profile.replica.actorSeq;
+
+    const after = await d.restart();
+    // The model is the checkpoint: nothing pending was lost or reset.
+    expect(after.profile.replica.revision()).toBe(revision);
+    expect(await d.storage.outbound.list(d.R)).toEqual(queued);
+    expect((await after.sync.statusSnapshot(d.R)).batches.map((b) => b.status)).toEqual([
+      "pending",
+      "pending",
+    ]);
+    // The next commit continues the Automerge actor and the Data Unit sequence.
+    const r = await after.sync.commit(d.R, tasks(1, 3000), { operationId: "op-3" });
+    expect(after.profile.replica.actorSeq).toBe(actorSeq + 1);
+    const units = await Promise.all(
+      [...queued.map((q) => q.itemId), ...r.unitIds].map((u) =>
+        d.storage.dataUnits.get(u as never),
+      ),
+    );
+    const seqs = units.map((u) => u?.actorSeq);
+    expect(seqs).toEqual(
+      [...seqs].sort((a, b) => (a === b ? 0 : (a as bigint) < (b as bigint) ? -1 : 1)),
+    );
+    expect(new Set(seqs.map(String)).size).toBe(seqs.length);
   });
 });

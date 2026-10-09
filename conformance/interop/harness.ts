@@ -4,6 +4,7 @@
 // helpers to create, host and share a Resource. Synthetic keys only.
 
 import {
+  type CommitBinding,
   createQueuedDataUnit,
   DataUnitApplier,
   dekResolver,
@@ -37,9 +38,9 @@ import {
 import {
   checkChange,
   type LocalChange,
-  PROFILE_ID,
   type SharedObjectsDataProfile,
 } from "@openlfcp/shared-objects";
+import type { SharedSectionsDataProfile } from "@openlfcp/shared-objects/sections";
 import {
   dekSecretRef,
   type EpochRow,
@@ -90,11 +91,16 @@ export async function waitFor(
   throw new Error(`timed out waiting for ${what}`);
 }
 
-export interface SideOptions {
+/** The Data Profile of a side: Shared Objects, or Shared Sections (LFCP-02-028). */
+export type SideProfile = SharedObjectsDataProfile | SharedSectionsDataProfile;
+
+export interface SideOptions<P extends SideProfile = SharedObjectsDataProfile> {
   readonly url: string;
   readonly resource: ResourceId;
   readonly who: Party;
-  readonly profile: SharedObjectsDataProfile;
+  readonly profile: P;
+  /** Commit batches with receipts (SyncClient.commit), e.g. a section's commitBinding. */
+  readonly commit?: CommitBinding<unknown>;
   /** Defaults to in-memory storage and secrets. */
   readonly storage?: LfcpStorage;
   readonly secrets?: SecretStore;
@@ -107,21 +113,22 @@ export interface SideOptions {
 }
 
 /** One client: storage, secrets, replica, applier, queue, sync session and its driver. */
-export class Side {
+export class Side<P extends SideProfile = SharedObjectsDataProfile> {
   readonly storage: LfcpStorage;
   readonly secrets: SecretStore;
   readonly outbound: OutboundQueue;
   readonly events: SyncEvent[] = [];
-  readonly profile: SharedObjectsDataProfile;
+  readonly profile: P;
   readonly applier: DataUnitApplier;
   readonly checkpointer: ProfileCheckpointer | undefined;
   readonly client: SyncClient;
   readonly resource: ResourceId;
   readonly who: Party;
   readonly #snapshots: boolean;
+  readonly #commit: CommitBinding<unknown> | undefined;
   #stopDriver: (() => void) | null = null;
 
-  constructor(o: SideOptions) {
+  constructor(o: SideOptions<P>) {
     this.resource = o.resource;
     this.who = o.who;
     this.storage = o.storage ?? new InMemoryLfcpStorage();
@@ -129,6 +136,7 @@ export class Side {
     this.outbound = new OutboundQueue({ storage: this.storage });
     this.profile = o.profile;
     this.#snapshots = o.snapshots ?? true;
+    this.#commit = o.commit;
     const profile = this.profile;
     this.applier = new DataUnitApplier({
       storage: this.storage,
@@ -193,6 +201,7 @@ export class Side {
       applier: this.applier,
       ...(this.checkpointer === undefined ? {} : { checkpointer: this.checkpointer }),
       ...(snapshot === undefined ? {} : { snapshot: snapshot as SnapshotBinding<unknown> }),
+      ...(this.#commit === undefined ? {} : { commit: this.#commit }),
     });
   }
 
@@ -218,7 +227,8 @@ export class Side {
         profile: profile.codecFor({ resourceId: this.resource, actor: this.me }),
         // previous: the SDK's default, the latest own unit still accepted (§26.2, G-DP1-GAP).
         value: checkChange(local.change),
-        onCreated: (created, value) => profile.recordLocal(created.unitId, value),
+        onCreated: (created, value) =>
+          (profile as SharedObjectsDataProfile).recordLocal(created.unitId, value),
       },
       () => (checkpointer === undefined ? [] : [checkpointer.write()]),
     );
@@ -251,13 +261,13 @@ export class Side {
 }
 
 /** A new Resource of `owner` coordinated at `url`: its Genesis, stored with the DEK on `side`. */
-export async function createResource(side: Side, url: string, dek: ResourceDEK) {
+export async function createResource(side: Side<SideProfile>, url: string, dek: ResourceDEK) {
   const R = side.resource;
   const genesis = signControlRecord(
     { resourceId: R, controlSeq: 0n, prevControlId: null },
     {
       type: "GENESIS",
-      dataProfile: PROFILE_ID,
+      dataProfile: side.profile.dataProfile,
       owner: side.who.signer.descriptor,
       dekCommitment: dekCommitment(R, dataEpoch(0n), dek),
       endpoints: [{ url, priority: 0n }],
@@ -274,7 +284,11 @@ export async function createResource(side: Side, url: string, dek: ResourceDEK) 
 }
 
 /** Stores a DEK the side holds (secret first, then the epoch's reference). */
-export async function storeDek(side: Side, epoch: bigint, dek: ResourceDEK): Promise<void> {
+export async function storeDek(
+  side: Side<SideProfile>,
+  epoch: bigint,
+  dek: ResourceDEK,
+): Promise<void> {
   const ref = dekSecretRef(side.resource, dataEpoch(epoch));
   await side.secrets.put(ref, exportSecretKeyBytes(dek));
   const row = (await side.storage.control.epochs(side.resource)).find(
@@ -287,7 +301,7 @@ export async function storeDek(side: Side, epoch: bigint, dek: ResourceDEK): Pro
 
 /** OWNER grants `who` data/read + data/write on the current head and sends it the epoch-0 DEK. */
 export async function grantAndKey(
-  owner: Side,
+  owner: Side<SideProfile>,
   who: Party,
   dek: ResourceDEK,
 ): Promise<ControlRecordId> {
