@@ -72,7 +72,7 @@ describe("§11.3 the canonical encoding", () => {
       }
       accepted++;
       // The checksum (bytes 4-8) is the framing's to verify.
-      expect(Buffer.from(again.subarray(8)).equals(Buffer.from(bytes.subarray(8)))).toBe(true);
+      expect([...again.subarray(8)]).toEqual([...bytes.subarray(8)]);
     }
     expect(refused).toBeGreaterThan(1000);
     expect(accepted).toBeGreaterThan(0);
