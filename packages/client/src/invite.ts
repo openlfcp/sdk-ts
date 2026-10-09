@@ -2,6 +2,7 @@ import {
   bytesEqual,
   type ControlRecordId,
   type DataEpoch,
+  fromHex,
   type Hash32,
   hash32,
   LfcpError,
@@ -39,6 +40,13 @@ import {
   verifyInvitationSecret,
   verifyKeyPackage,
 } from "@openlfcp/wire";
+import {
+  type ClaimJournal,
+  clearClaimJournal,
+  journaledDeks,
+  readClaimJournal,
+  writeClaimJournal,
+} from "./claim-journal.js";
 import { LfcpConnection, type WebSocketFactory } from "./connection.js";
 import { queueControlRecord, queueKeyPackage } from "./queue.js";
 import { loadControlChain, saveControlChain } from "./storage.js";
@@ -222,8 +230,13 @@ export interface AcceptInvitationOptions {
   readonly link: InvitationLink | string;
   /** The claimant: receives the grant and later synchronizes as itself. */
   readonly claimant: { readonly signer: Signer; readonly agreement: AgreementKeyPair };
-  /** The claimant's storage and secrets: on "claimed" they hold the chain and the DEK. */
-  readonly storage: Pick<LfcpStorage, "control" | "commit">;
+  /**
+   * The claimant's storage and secrets: on "claimed" they hold the chain and
+   * the DEK. While a claim is in flight they also hold its journal
+   * (LFCP-02-110): a lost answer is then resolved by sending the same claim
+   * again, never by spending the invitation twice.
+   */
+  readonly storage: Pick<LfcpStorage, "control" | "commit" | "localMarks">;
   readonly secrets: SecretStore;
   /** Abilities to claim; default the grant's, without invite/claim unless it is delegable (§18.1 rule 4). */
   readonly abilities?: readonly bigint[];
@@ -272,6 +285,12 @@ export type AcceptedInvitation =
       readonly epochs: readonly DataEpoch[];
       /** The CONTROL_PUT answers in order, e.g. ["ACK"] or ["CONTROL_HEAD_MISMATCH", "ACK"]. */
       readonly attempts: readonly string[];
+      /**
+       * True when an earlier attempt's claim, whose answer was lost, turned
+       * out to be committed: it was sent again from its journal (§47) and
+       * acknowledged as already committed (LFCP-02-110).
+       */
+      readonly resumed: boolean;
     }
   | {
       /** The coordinator refused the claim, e.g. AUTHORIZATION_FAILED: the invitation is used up. */
@@ -486,6 +505,17 @@ export async function acceptInvitation(
     // §73: the Invitation Principal authenticates and opens the Resource.
     progress("connecting");
     await s.connect();
+    // LFCP-02-110: a claim of this link whose answer was lost is settled first.
+    const journal = await readClaimJournal(options.storage, R);
+    if (
+      journal !== undefined &&
+      journal.invitationGrantId === toHex(invitation.grantId) &&
+      journal.claimant === toHex(options.claimant.signer.descriptor.principalId)
+    ) {
+      progress("claiming-capability", 1);
+      const settled = await settleJournal(s, options, R, journal);
+      if (settled !== "not-committed") return settled;
+    }
     progress("validating-invitation");
     const heads = await openAsInvitee(s, R, invitation.grantId);
     if (heads.length !== 1)
@@ -558,6 +588,25 @@ export async function acceptInvitation(
         },
         claimSigner,
       );
+      // The journal before the claim: a lost answer is resolved from it.
+      await writeClaimJournal(
+        options.storage,
+        options.secrets,
+        R,
+        {
+          v: 1,
+          resourceId: toHex(R),
+          invitationGrantId: toHex(invitation.grantId),
+          claimant: toHex(options.claimant.signer.descriptor.principalId),
+          claim: toHex(claim.bytes),
+          expectedHead: toHex(chain.state.head),
+          chain: chain.records.map((r) => toHex(r.signed.bytes)),
+          epochs: [...deks.keys()],
+          abilities: abilities.map(String),
+        },
+        deks,
+        exportSecretKeyBytes,
+      );
       const answer = await s.request(
         createMessage("CONTROL_PUT", {
           resourceId: R,
@@ -575,6 +624,7 @@ export async function acceptInvitation(
         if (claimed.kind !== "linear")
           fail("INVALID_CONTROL_CHAIN", "the acknowledged claim does not validate locally");
         await persist(options, claimed as Linear, deks);
+        await clearClaimJournal(options.storage, R);
         return Object.freeze({
           kind: "claimed",
           resourceId: R,
@@ -582,6 +632,7 @@ export async function acceptInvitation(
           abilities: Object.freeze([...abilities]),
           epochs: Object.freeze([...deks.keys()].map((e) => BigInt(e) as DataEpoch)),
           attempts: Object.freeze(attempts),
+          resumed: false,
         });
       }
       if (answer.type !== "NACK")
@@ -590,13 +641,20 @@ export async function acceptInvitation(
       attempts.push(code);
       const head = answer.body.details;
       // One refresh after a lost race (§73); the coordinator's next answer is final.
-      if (code !== "CONTROL_HEAD_MISMATCH" || attempts.length > 1 || !(head instanceof Uint8Array))
+      if (
+        code !== "CONTROL_HEAD_MISMATCH" ||
+        attempts.length > 1 ||
+        !(head instanceof Uint8Array)
+      ) {
+        // A refused claim was not committed: nothing to resume.
+        await clearClaimJournal(options.storage, R);
         return Object.freeze({
           kind: "refused",
           resourceId: R,
           code,
           attempts: Object.freeze(attempts),
         });
+      }
       chain = await fetchChain(
         s,
         R,
@@ -613,9 +671,122 @@ export async function acceptInvitation(
   }
 }
 
+/**
+ * LFCP-02-110: sends a journaled claim again. A coordinator answers a
+ * record it has already committed with the same ACK (§47, §70): then the
+ * claim landed before and the claimant joins from the journal. Any other
+ * answer means it was not committed: a moved head lets the caller claim
+ * anew ("not-committed"); another refusal is final. A transport stop
+ * throws Unavailable and keeps the journal.
+ */
+async function settleJournal(
+  s: ClaimSession,
+  options: Pick<AcceptInvitationOptions, "storage" | "secrets">,
+  R: ResourceId,
+  journal: ClaimJournal,
+): Promise<AcceptedInvitation | "not-committed"> {
+  const claim = fromHex(journal.claim);
+  const answer = await s.request(
+    createMessage("CONTROL_PUT", {
+      resourceId: R,
+      expectedHead: fromHex(journal.expectedHead) as ControlRecordId,
+      record: claim,
+    }),
+    "the CONTROL_PUT answer",
+  )();
+  if (answer.type === "ACK") {
+    const claimed = validateControlChain([...journal.chain.map(fromHex), claim]);
+    if (claimed.kind !== "linear")
+      fail("INVALID_CONTROL_CHAIN", "the journaled claim does not validate locally");
+    const deks = await journaledDeks(options.secrets, R, journal);
+    await persist(options, claimed as Linear, deks);
+    await clearClaimJournal(options.storage, R);
+    return Object.freeze({
+      kind: "claimed",
+      resourceId: R,
+      grantId: (claimed as Linear).state.head,
+      abilities: Object.freeze(journal.abilities.map((a) => BigInt(a))),
+      epochs: Object.freeze([...deks.keys()].map((e) => BigInt(e) as DataEpoch)),
+      attempts: Object.freeze(["ACK"]),
+      resumed: true,
+    });
+  }
+  if (answer.type !== "NACK") throw new Unavailable(`CONTROL_PUT was answered with ${answer.type}`);
+  await clearClaimJournal(options.storage, R);
+  const code = codeName(answer.body.code);
+  if (code === "CONTROL_HEAD_MISMATCH") return "not-committed";
+  return Object.freeze({
+    kind: "refused",
+    resourceId: R,
+    code,
+    attempts: Object.freeze([code]),
+  });
+}
+
+export interface ResumeInvitationClaimOptions {
+  /** The Resource of a journaled claim (pendingInvitationClaims). */
+  readonly resourceId: ResourceId;
+  /** The claimant: the session authenticates as it (§84: any session may upload a record). */
+  readonly claimant: { readonly signer: Signer };
+  readonly storage: Pick<LfcpStorage, "control" | "commit" | "localMarks">;
+  readonly secrets: SecretStore;
+  /** The coordinator's endpoint. */
+  readonly url: string;
+  readonly now: () => number;
+  readonly webSocket?: WebSocketFactory;
+  readonly timeout?: Promise<unknown>;
+}
+
+/**
+ * Settles a journaled claim without its link, e.g. after a restart
+ * (LFCP-02-110): "claimed" when the claim had landed; "not-claimed" when it
+ * had not (the journal is removed, and the link, still unused, can be
+ * accepted again); "refused" for another refusal; "unavailable" keeps the
+ * journal for a later try; "none" when no claim is journaled.
+ */
+export async function resumeInvitationClaim(
+  options: ResumeInvitationClaimOptions,
+): Promise<
+  AcceptedInvitation | { readonly kind: "not-claimed" | "none"; readonly resourceId: ResourceId }
+> {
+  const R = options.resourceId;
+  const journal = await readClaimJournal(options.storage, R);
+  if (journal === undefined) return Object.freeze({ kind: "none", resourceId: R });
+  const s = new ClaimSession(
+    {
+      url: options.url,
+      signer: options.claimant.signer,
+      now: options.now,
+      ...(options.webSocket === undefined ? {} : { webSocket: options.webSocket }),
+    },
+    options.timeout ?? NEVER,
+  );
+  try {
+    await s.connect();
+    const settled = await settleJournal(s, options, R, journal);
+    return settled === "not-committed"
+      ? Object.freeze({ kind: "not-claimed", resourceId: R })
+      : settled;
+  } catch (e) {
+    if (e instanceof Unavailable)
+      return Object.freeze({ kind: "unavailable", resourceId: R, reason: e.message });
+    throw e;
+  } finally {
+    s.close();
+  }
+}
+
+/** Gives up a journaled claim (the user declined to retry it): its journal is removed. */
+export async function abandonInvitationClaim(
+  storage: Pick<LfcpStorage, "commit">,
+  resource: ResourceId,
+): Promise<void> {
+  await clearClaimJournal(storage as Pick<LfcpStorage, "commit" | "localMarks">, resource);
+}
+
 /** The claimant's storage: the chain with its grant, then each DEK before the row that names it (LFCP-034). */
 async function persist(
-  options: AcceptInvitationOptions,
+  options: Pick<AcceptInvitationOptions, "storage" | "secrets">,
   chain: Linear,
   deks: ReadonlyMap<string, ResourceDEK>,
 ): Promise<void> {

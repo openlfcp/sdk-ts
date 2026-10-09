@@ -15,6 +15,7 @@ export {
   type ProfileUnit,
 } from "./apply.js";
 export { type CheckpointSource, ProfileCheckpointer } from "./checkpoint.js";
+export { type ClaimJournal, pendingInvitationClaims } from "./claim-journal.js";
 export {
   type ConnectionEvents,
   type ConnectionOptions,
@@ -38,12 +39,15 @@ export {
   type AcceptInvitationOptions,
   type AcceptInvitationProgress,
   type AcceptInvitationStage,
+  abandonInvitationClaim,
   acceptInvitation,
   type CreatedInvitation,
   type CreateInvitationOptions,
   createInvitation,
   DEFAULT_INVITATION_ABILITIES,
   InvitationLink,
+  type ResumeInvitationClaimOptions,
+  resumeInvitationClaim,
 } from "./invite.js";
 export {
   type AckOutcome,
