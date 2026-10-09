@@ -129,8 +129,13 @@ export async function runCase(input) {
     // One entry per change: a duplicate unit of a refused change is refused again.
     refused: received.refused
       .filter((x) => !x.held)
-      // Bytes the SDK refused before decoding have no hash from it: the case's record names it.
-      .map((x) => ({ change: x.hash ?? records[x.index]?.change_hash, diagnostic: x.diagnostic }))
+      // The SDK names a refused change it never decoded by the hash of its bytes (SOP §11.1);
+      // bytes that are not one readable change chunk, a compressed one included, have no name.
+      .map((x) =>
+        x.hash === undefined
+          ? { diagnostic: x.diagnostic }
+          : { change: x.hash, diagnostic: x.diagnostic },
+      )
       .filter((x, i, all) => all.findIndex((y) => y.change === x.change) === i),
     held: [...received.waiting].sort(),
     snapshot: snapshotCounts(replica.save()),

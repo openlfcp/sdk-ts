@@ -12,6 +12,7 @@ import {
   checkChange,
   checkSaveHeader,
   parsedOf,
+  refusedChangeHash,
 } from "../admission/framing.js";
 import {
   checkChangeExpansion,
@@ -334,7 +335,11 @@ export interface SectionUnit {
 export interface SectionRefusal {
   /** Its position in the received list. */
   readonly index: number;
-  /** Its change hash; undefined when the SOP checks refused the bytes, which are then never decoded. */
+  /**
+   * Its change hash. A change the SOP checks refused is never decoded: its
+   * hash is read from its bytes (SHA-256 of the chunk from the type byte),
+   * and is undefined only when the bytes are not one readable change chunk.
+   */
   readonly hash: string | undefined;
   /** The §14.1 diagnostic (SOP §74.1 for the inherited checks), or ACTOR_EQUIVOCATION when held. */
   readonly diagnostic: string;
@@ -610,8 +615,8 @@ export class SectionReplica {
       try {
         c = checkChange(unit.bytes);
       } catch (e) {
-        // Never decoded again, not even for its hash: the checks refused to expand it.
-        refused.push(refusal(index, undefined, e, false));
+        // Never decoded: a change refused by the checks is named from its bytes only.
+        refused.push(refusal(index, refusedChangeHash(unit.bytes, e), e, false));
         return;
       }
       if (

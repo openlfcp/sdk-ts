@@ -53,7 +53,8 @@ interface Case {
     /** SOP §13.1: whether the reference snapshot is within the floor (SS55, SS56). */
     readonly snapshot?: { readonly rows: number; readonly within_floor: boolean };
     readonly invalid: readonly { readonly id: string; readonly diagnostic: string }[];
-    readonly refused: readonly { readonly change: string; readonly diagnostic: string }[];
+    /** §14.1: a refused change is named only when it is one readable type 1 change chunk. */
+    readonly refused: readonly { readonly change?: string; readonly diagnostic: string }[];
     readonly held: readonly (string | { readonly change: string })[];
     readonly tree: readonly { id: string; parent: string; depth: number; kind: string }[];
     readonly hidden: readonly string[];
@@ -87,14 +88,18 @@ const load = (c: Case) => SectionDocument.fromSave(bytes(c.reference_snapshot));
 const heldHash = (h: string | { readonly change: string }) =>
   typeof h === "string" ? h : h.change;
 
-/** The case's admitted changes: all but the refused ones and those held behind them. */
+/**
+ * The case's admitted changes: all but the refused ones and those held
+ * behind them. A refused change the corpus does not name (§14.1: not one
+ * readable type 1 change chunk, SS44's compressed one) is never admitted.
+ */
 function admitted(c: Case): Change[] {
   const out = new Set([
-    ...c.expected.refused.map((r) => r.change),
+    ...c.expected.refused.flatMap((r) => (r.change === undefined ? [] : [r.change])),
     ...c.expected.held.map(heldHash),
   ]);
   return [...c.base_changes, ...c.branches.A, ...c.branches.B, ...c.after_merge].filter(
-    (ch) => !out.has(ch.change_hash),
+    (ch) => !out.has(ch.change_hash) && bytes(ch)[8] === 1,
   );
 }
 
@@ -191,7 +196,12 @@ describe("shared sections corpus", () => {
           expect(
             r.refused
               .filter((x) => !x.held)
-              .map((x) => ({ change: all[x.index]?.change_hash, diagnostic: x.diagnostic })),
+              // The SDK's own name for each refused change (§14.1), none for an unnamed one.
+              .map((x) =>
+                x.hash === undefined
+                  ? { diagnostic: x.diagnostic }
+                  : { change: x.hash, diagnostic: x.diagnostic },
+              ),
           ).toEqual(c.expected.refused);
           expect([...r.waiting].sort()).toEqual(c.expected.held.map(heldHash).sort());
           expect(receiver.revision()).toBe(heads.join(","));
