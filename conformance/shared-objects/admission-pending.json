@@ -1,24 +1,5 @@
 {
   "suite": "SHARED-OBJECTS-AUTOMERGE-REFERENCE-01: canonical, references",
   "note": "Cases of the corpus's canonical (SHARED-OBJECTS-PROFILE-01 §11.3) and references (§11.4) sections that the sdk-ts admission does not decide as expected yet. They are run and must still fail; remove an entry when the fix lands (a pending case that passes fails as stale).",
-  "task": "F3-F4 in sdk-ts: §11.4 operation references at admission",
-  "cases": [
-    "REF-R1-previous-not-in-history",
-    "REF-R2-start-past-history",
-    "REF-R2-start-reuses-counter",
-    "REF-R2-empty-F3c",
-    "REF-R3-not-an-object",
-    "REF-R3-property-on-list",
-    "REF-R4-insert-into-map",
-    "REF-R4-insert-with-pred",
-    "REF-R4-after-a-put",
-    "REF-R4-after-other-list",
-    "REF-R5-put-on-head",
-    "REF-R6-other-key-F4",
-    "REF-R6-missing",
-    "REF-R6-later-in-change",
-    "REF-R6-other-element-F3b",
-    "REF-R6-concurrent",
-    "REF-R7-delete-without-pred-F3d"
-  ]
+  "cases": []
 }

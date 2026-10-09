@@ -8,6 +8,7 @@
  * - limits (§11.1, §11.2, §13.1): the exact change expansion limits, the
  *   document depth bound, the Snapshot limits with their floor;
  * - the canonical change encoding (§11.3), by the format's properties;
+ * - operation references (§11.4) against the change's causal history;
  * - actor binding (§8), with the profile's domain;
  * - sequence admission (§14.1): duplicates, dependencies, the sequence
  *   check, and holding a change whose actor and sequence another change
@@ -40,6 +41,7 @@ export {
   SNAPSHOT_LIMITS_FLOOR,
   type SnapshotLimits,
 } from "./limits.js";
+export { ReferenceHistory, type ReferenceRule } from "./references.js";
 export {
   admitBatch,
   admitChange,

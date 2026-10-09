@@ -11,6 +11,7 @@ import {
   type CheckedChange,
   checkChange,
   checkSaveHeader,
+  parsedOf,
   unframeChange,
   unframeSnapshot,
 } from "./admission/framing.js";
@@ -20,6 +21,7 @@ import {
   SNAPSHOT_LIMITS_FLOOR,
   type SnapshotLimits,
 } from "./admission/limits.js";
+import { type ReferenceHistory, referenceHistoryOf } from "./admission/references.js";
 import { admitBatch, admitChange, type DocumentSequences } from "./admission/sequence.js";
 
 /** The decoded actions that create an object (§11.2). */
@@ -721,6 +723,8 @@ export class SharedObjectsReplica {
    * at the view's heads, so the state before a change cannot be asked later.
    */
   readonly #conflicted = new Map<string, readonly string[]>();
+  /** §11.4: the document's changes as references read them; null to build again from the document. */
+  #refs: ReferenceHistory | null = null;
 
   private constructor(doc: Doc, opts: ReplicaOptions) {
     this.resource = opts.resource;
@@ -742,9 +746,11 @@ export class SharedObjectsReplica {
    */
   /** The document as the admission module reads it (§14.1). */
   #sequences(): DocumentSequences {
+    this.#refs ??= referenceHistoryOf(this.#doc);
     return {
       hasChange: (hash) => A.hasHeads(this.#doc, [hash]),
       latestSeq: (actor) => this.#seqs.get(actor) ?? 0,
+      references: this.#refs,
     };
   }
 
@@ -1090,6 +1096,7 @@ export class SharedObjectsReplica {
         A.init({ actor: this.#actor }),
         A.getAllChanges(next).filter((c) => A.decodeChange(c).hash !== hash),
       )[0];
+      this.#refs = null;
       throw new LfcpError(
         "CHANGE_TOO_LARGE",
         `the transaction "${message}" is larger than one change may be (§11.1: ${(e as Error).message}); split it into several (§12)`,
@@ -1102,6 +1109,7 @@ export class SharedObjectsReplica {
       );
     this.#doc = next;
     this.#noteSeq(checked.actor, checked.seq);
+    this.#refs?.add(checked.hash, parsedOf(checked));
     for (const [id, d] of created) this.#depths.set(id, d);
     return Object.freeze({
       intent: message,
@@ -1168,6 +1176,8 @@ export class SharedObjectsReplica {
         for (const [id, d] of batchDepths) this.#depths.set(id, d);
       } else {
         this.#doc = batch.restored;
+        // The index already holds the batch (admitBatch adds what it admits).
+        this.#refs = null;
         applied = [];
         for (const c of admitted) {
           try {
@@ -1216,6 +1226,7 @@ export class SharedObjectsReplica {
     const applied = applyChecked(this.#doc, change.bytes);
     if ("error" in applied) {
       this.#doc = applied.restored;
+      this.#refs = null;
       throw new ProfileInvalidError(
         "INVALID_AUTOMERGE_BYTES",
         `Automerge rejected the change (§11): ${applied.error.message}`,
@@ -1224,6 +1235,7 @@ export class SharedObjectsReplica {
     const next = applied.next;
     this.#doc = next;
     this.#noteSeq(change.actor, change.seq);
+    this.#refs?.add(change.hash, parsedOf(change));
     for (const [id, d] of created) this.#depths.set(id, d);
     return Object.freeze({
       status: "applied",

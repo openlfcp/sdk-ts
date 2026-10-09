@@ -1,6 +1,7 @@
 import { LfcpError } from "@openlfcp/core";
 import { ProfileInvalidError } from "../profile-invalid.js";
-import type { CheckedChange } from "./framing.js";
+import { type CheckedChange, parsedOf } from "./framing.js";
+import type { ReferenceHistory } from "./references.js";
 
 /**
  * SHARED-OBJECTS-PROFILE-01 §14.1, the sequence admission, for any profile
@@ -16,6 +17,23 @@ export interface DocumentSequences {
   hasChange(hash: string): boolean;
   /** The actor's latest sequence number in the document; 0 when it has none. */
   latestSeq(actor: string): number;
+  /**
+   * The document's changes as §11.4 reads them. When given, a change whose
+   * operations refer outside its causal history is refused; admitBatch adds
+   * the changes it admits (the caller rebuilds it if the engine then fails).
+   */
+  readonly references?: ReferenceHistory;
+}
+
+/** §11.4: a refusal for a change whose operations refer outside its history, or null. */
+function referenceRefusal(c: CheckedChange, doc: DocumentSequences): ProfileInvalidError | null {
+  const rule = doc.references?.check(parsedOf(c)) ?? null;
+  return rule === null
+    ? null
+    : new ProfileInvalidError(
+        "INVALID_AUTOMERGE_BYTES",
+        `the change's operations refer outside its causal history (§11.4 ${rule})`,
+      );
 }
 
 /** A change admission refused: held (§14.1, POST-001) or invalid. */
@@ -111,6 +129,11 @@ export function admitBatch(
       });
       continue;
     } else {
+      const references = referenceRefusal(c, doc);
+      if (references !== null) {
+        refused.push({ change: c, error: references, held: false });
+        continue;
+      }
       try {
         accept(c);
       } catch (e) {
@@ -118,6 +141,7 @@ export function admitBatch(
         continue;
       }
       seqs.set(c.actor, c.seq);
+      doc.references?.add(c.hash, parsedOf(c));
       admitted.push(c);
     }
     for (const child of children.get(c.hash) ?? []) {
@@ -171,5 +195,8 @@ export function admitChange(change: CheckedChange, doc: DocumentSequences): Chan
         `actor ${change.actor} sequence ${change.seq} skips sequence ${latest + 1} (§14.1)`,
       ),
     };
+  // §11.4: checked only; the caller adds the change once the engine applied it.
+  const references = referenceRefusal(change, doc);
+  if (references !== null) return { kind: "invalid", error: references };
   return { kind: "next" };
 }

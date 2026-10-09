@@ -7,13 +7,19 @@ import {
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
-import { type CheckedChange, checkChange, checkSaveHeader } from "../admission/framing.js";
+import {
+  type CheckedChange,
+  checkChange,
+  checkSaveHeader,
+  parsedOf,
+} from "../admission/framing.js";
 import {
   checkChangeExpansion,
   checkSnapshotExpansion,
   SNAPSHOT_LIMITS_FLOOR,
   type SnapshotLimits,
 } from "../admission/limits.js";
+import { type ReferenceHistory, referenceHistoryOf } from "../admission/references.js";
 import { admitBatch } from "../admission/sequence.js";
 import { ProfileInvalidError } from "../profile-invalid.js";
 import { prepareTaskIntent, type ReplicaIntent, type TaskView, taskView } from "../replica.js";
@@ -437,6 +443,8 @@ export class SectionReplica {
   readonly #actor: string;
   readonly #minSeq: number;
   #doc: Doc;
+  /** SOP §11.4: the document's changes as references read them; null to build again from the document. */
+  #refs: ReferenceHistory | null = null;
 
   private constructor(doc: Doc, opts: SectionReplicaOptions) {
     this.resource = opts.resource;
@@ -624,12 +632,16 @@ export class SectionReplica {
       checked.push(c);
     });
     const seqs = this.#sequences();
+    this.#refs ??= referenceHistoryOf(this.#doc);
+    const references = this.#refs;
     const admission = new SectionAdmission(this.#doc, this.resource);
     const decided = admitBatch(
       checked,
       {
         hasChange: (hash) => A.hasHeads(this.#doc, [hash]),
         latestSeq: (actor) => seqs.get(actor) ?? 0,
+        // SOP §11.4; admitBatch adds what it admits, as the working copy holds it.
+        references,
       },
       (c) => admission.accept(c),
     );
@@ -842,6 +854,7 @@ export class SectionReplica {
     // replica keeps its own until apply().
     let next = A.clone(this.#doc, { actor: this.#actor });
     const parts: SectionChangePart[] = [];
+    const partChanges: CheckedChange[] = [];
     for (const chunk of chunks) {
       if (chunk.length === 0) continue;
       const heads = A.getHeads(next).join();
@@ -860,6 +873,7 @@ export class SectionReplica {
           `a change of the batch is larger than one change may be (SOP §11.1: ${(e as Error).message})`,
         );
       }
+      partChanges.push(checked);
       parts.push(
         Object.freeze({
           change: checked.bytes,
@@ -891,6 +905,7 @@ export class SectionReplica {
         this.#doc = next;
         if (this.#seqs !== undefined && last.seq > (this.#seqs.get(this.#actor) ?? 0))
           this.#seqs.set(this.#actor, last.seq);
+        for (const c of partChanges) this.#refs?.add(c.hash, parsedOf(c));
         applied = true;
       },
       revert: () => {
@@ -899,6 +914,7 @@ export class SectionReplica {
           throw new Error("the replica changed after the batch was applied; it cannot be reverted");
         this.#doc = prior;
         this.#seqs = priorSeqs === undefined ? undefined : new Map(priorSeqs);
+        this.#refs = null;
         applied = false;
       },
     });
