@@ -11,6 +11,7 @@ import {
   type Hash32,
   hash32,
   LfcpError,
+  type PrincipalId,
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
@@ -87,13 +88,19 @@ import { LfcpConnection, type WebSocketFactory } from "./connection.js";
 import { EngineGuard, isEngineTrap, snapshotItem } from "./engine-guard.js";
 import type { AckOutcome, NackOutcome, OutboundQueue, StaleOutboundUnit } from "./outbound.js";
 import { resourceSyncState, snapshotFrontier } from "./outbound.js";
-import { createQueuedSnapshot } from "./queue.js";
+import { controlRecordWrites, createQueuedSnapshot, keyPackageWrites } from "./queue.js";
 import { intentsHash, OperationIdReusedError, type Receipt, receiptOf } from "./receipts.js";
 import {
   type ResourcePhase,
   type ResourcePhaseEvent,
   resourcePhaseTransition,
 } from "./resource-state.js";
+import {
+  planRevocation,
+  type RemainingPath,
+  type RevocationRefusal,
+  RevocationRefused,
+} from "./revoke.js";
 import {
   type CatchUp,
   type ReofferReason,
@@ -119,6 +126,34 @@ import {
   type WriteAccess,
   writeAccess,
 } from "./write-access.js";
+
+/** LFCP-02-060: what revokeAccess did. */
+export type RevokeAccessResult =
+  | {
+      readonly kind: "queued";
+      /** The grants revoked, and those delegated from them that this deactivates (§17.2). */
+      readonly revoked: readonly ControlRecordId[];
+      readonly deactivated: readonly ControlRecordId[];
+      /** The queued Control Records: the revocations, then the Key Epoch if any. */
+      readonly recordIds: readonly ControlRecordId[];
+      /** The new Data Epoch, or null when it was not rotated. */
+      readonly epoch: DataEpoch | null;
+      /** The remaining readers who get the new DEK in Key Packages. */
+      readonly recipients: readonly PrincipalId[];
+      /** Grants this revoker may not revoke: the member keeps access through them. */
+      readonly remainingPaths: readonly RemainingPath[];
+    }
+  | {
+      readonly kind: "refused";
+      /**
+       * offline: the Resource is not live in this session; stale: the
+       * validated chain is behind what the server reported; control-pending:
+       * Control Records of this client are not committed yet. Nothing is
+       * queued: a removal never waits in an offline queue.
+       */
+      readonly reason: RevocationRefusal | "offline" | "stale" | "control-pending";
+      readonly message: string;
+    };
 
 /** Every status of a stored unit: any of them means the Resource has content. */
 const STORED_STATUSES: readonly DataUnitStatus[] = [
@@ -1797,6 +1832,88 @@ export class SyncClient {
    * that loads it never skips content the state does not hold. Queued and
    * sent like any object; returns its ID.
    */
+  /**
+   * LFCP-02-060: removes `subject`'s access to `resource`. Every active
+   * grant naming it that this client may revoke is revoked (§17.3); when it
+   * has no read access left, the Data Epoch is rotated with a fresh DEK
+   * (§19, member revoked) and the DEK goes in Key Packages to every other
+   * remaining reader (§25), so it cannot read new data. Built on the
+   * validated head and checked before anything is queued; the records, the
+   * Key Packages and (first) the new DEK are written at once, then sent.
+   * Refused, with nothing queued, unless the Resource is live and current
+   * here and no Control Record of this client is pending.
+   */
+  revokeAccess(
+    resource: ResourceId,
+    subject: PrincipalId,
+    options: { readonly rotate?: boolean } = {},
+  ): Promise<RevokeAccessResult> {
+    return new Promise((resolve, reject) =>
+      this.#serial(async () => {
+        try {
+          resolve(await this.#revoke(resource, subject, options));
+        } catch (e) {
+          reject(e);
+        }
+      }),
+    );
+  }
+
+  async #revoke(
+    resource: ResourceId,
+    subject: PrincipalId,
+    options: { readonly rotate?: boolean },
+  ): Promise<RevokeAccessResult> {
+    const refused = (
+      reason: Extract<RevokeAccessResult, { kind: "refused" }>["reason"],
+      message: string,
+    ) => Object.freeze({ kind: "refused" as const, reason, message });
+    const ctx = this.#resources.get(toHex(resource));
+    const view = ctx?.view ?? null;
+    if (ctx === undefined || ctx.state !== "LIVE" || view === null)
+      return refused("offline", "the Resource is not live in this session");
+    if (ctx.serverControlSeq !== null && view.state.seq < ctx.serverControlSeq)
+      return refused("stale", "the validated Control Chain is behind the server's");
+    const storage = this.#o.storage;
+    if ((await storage.outbound.list(resource)).some((i) => i.kind === "control-record"))
+      return refused("control-pending", "Control Records of this client are not committed yet");
+    let plan: Awaited<ReturnType<typeof planRevocation>>;
+    try {
+      plan = await planRevocation({
+        view,
+        revoker: this.#o.signer,
+        subject,
+        frontier: (await resourceSyncState(storage, resource)).have,
+        ...(options.rotate === undefined ? {} : { rotate: options.rotate }),
+      });
+    } catch (e) {
+      if (e instanceof RevocationRefused) return refused(e.reason, e.message);
+      throw e;
+    }
+    // The new DEK first (LFCP-034), then everything that names it, at once.
+    if (plan.rotation !== null)
+      await this.#o.secrets.put(
+        dekSecretRef(resource, plan.rotation.epoch),
+        exportSecretKeyBytes(plan.rotation.dek),
+      );
+    const r = await storage.commit([
+      ...plan.records.flatMap((rec) => controlRecordWrites(rec.bytes)),
+      ...plan.keyPackages.flatMap(keyPackageWrites),
+    ]);
+    if (!r.ok) throw new Error(`the revocation was not queued: ${r.reason}`);
+    await this.#refreshAccess(ctx);
+    await this.#flush(ctx);
+    return Object.freeze({
+      kind: "queued" as const,
+      revoked: plan.revoked,
+      deactivated: plan.deactivated,
+      recordIds: Object.freeze(plan.records.map((rec) => rec.recordId)),
+      epoch: plan.rotation?.epoch ?? null,
+      recipients: plan.recipients,
+      remainingPaths: plan.remainingPaths,
+    });
+  }
+
   /**
    * SDK-SECTIONS-INTEGRATION-01 §3.1: commits a batch of intents on an open
    * Resource and returns its receipt once the batch is durable: its Data

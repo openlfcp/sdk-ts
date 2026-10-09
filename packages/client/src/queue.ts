@@ -69,16 +69,12 @@ export async function queueKeyEpoch(
   return queueControlRecord(storage, rotation.bytes, also);
 }
 
-/** Stores a sealed Key Package (§25) and queues it for KEY_PACKAGE_PUT. */
-export async function queueKeyPackage(
-  storage: Pick<LfcpStorage, "commit">,
-  bytes: Uint8Array,
-  also: readonly StorageWrite[] = [],
-): Promise<Hash32> {
+/** The writes that store a sealed Key Package (§25) and queue it, for one commit with others. */
+export function keyPackageWrites(bytes: Uint8Array): StorageWrite[] {
   const parsed = parseKeyPackage(bytes);
   const p = parsed.payload;
   const id = hash32(parsed.signed.id);
-  await commit(storage, [
+  return [
     {
       op: "put-key-package",
       row: {
@@ -91,9 +87,17 @@ export async function queueKeyPackage(
       },
     },
     { op: "enqueue", item: outboundItem("key-package", id, p.resourceId, parsed.signed.bytes) },
-    ...also,
-  ]);
-  return id;
+  ];
+}
+
+/** Stores a sealed Key Package (§25) and queues it for KEY_PACKAGE_PUT. */
+export async function queueKeyPackage(
+  storage: Pick<LfcpStorage, "commit">,
+  bytes: Uint8Array,
+  also: readonly StorageWrite[] = [],
+): Promise<Hash32> {
+  await commit(storage, [...keyPackageWrites(bytes), ...also]);
+  return hash32(parseKeyPackage(bytes).signed.id);
 }
 
 /** Stores a sealed Snapshot (§29) with its selection metadata and queues it for SNAPSHOT_PUT. */
@@ -149,16 +153,20 @@ export async function queueControlRecord(
   bytes: Uint8Array,
   also: readonly StorageWrite[] = [],
 ): Promise<Hash32> {
+  await commit(storage, [...controlRecordWrites(bytes), ...also]);
+  return hash32(parseControlRecord(bytes).signed.id);
+}
+
+/** The write that queues a signed Control Record for CONTROL_PUT, for one commit with others. */
+export function controlRecordWrites(bytes: Uint8Array): StorageWrite[] {
   const parsed = parseControlRecord(bytes);
   if (parsed.payload.prevControlId === null)
     throw new Error("a Genesis record is hosted with RESOURCE_HOST, not CONTROL_PUT");
   const id = hash32(parsed.signed.id);
-  await commit(storage, [
+  return [
     {
       op: "enqueue",
       item: outboundItem("control-record", id, parsed.payload.resourceId, parsed.signed.bytes),
     },
-    ...also,
-  ]);
-  return id;
+  ];
 }

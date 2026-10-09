@@ -173,6 +173,25 @@ remove or rename any.
   `accessState` and `commit` (`NotWritableError`), instead of an error
   from the DEK lookup (LFCP-02-030). Nothing is written, and no key or
   reference is removed.
+- `SyncClient.revokeAccess(resource, subject, { rotate? })` (LFCP-02-060)
+  removes a member's access:
+  - Every active grant naming the member that this client may revoke is
+    revoked (LFCP-WIRE-01 §17.3), which deactivates the grants delegated
+    from it.
+  - When the member has no read access left, the Data Epoch is rotated
+    with a fresh DEK (§19, member revoked). The DEK goes in Key Packages to
+    every other remaining reader.
+  - Everything is built on the validated head and written in one
+    transaction, the DEK first.
+  - It returns the revoked and deactivated grants, the record IDs, the new
+    epoch, the recipients, and the `remainingPaths` this revoker may not
+    revoke.
+  - It is refused, with nothing queued, when the Resource is not live
+    (`offline`), the chain is behind the server (`stale`), Control Records
+    of this client are pending (`control-pending`), and for
+    `would-remove-owner`, `not-member` and `not-authorized`.
+  - `planRevocation` is the pure planner, and `controlRecordWrites` and
+    `keyPackageWrites` queue in a caller's transaction.
 
 ## 0.1.3 — 2026-10-08
 

@@ -74,7 +74,9 @@ export {
   snapshotFrontier,
 } from "./outbound.js";
 export {
+  controlRecordWrites,
   createQueuedSnapshot,
+  keyPackageWrites,
   outboundItem,
   queueControlRecord,
   queueKeyEpoch,
@@ -94,6 +96,13 @@ export {
   type ResourcePhaseEvent,
   resourcePhaseTransition,
 } from "./resource-state.js";
+export {
+  planRevocation,
+  type RemainingPath,
+  type RevocationPlan,
+  type RevocationRefusal,
+  RevocationRefused,
+} from "./revoke.js";
 export {
   type CatchUp,
   type ReceivedFact,
@@ -125,6 +134,7 @@ export {
   type ReconnectPolicy,
   type ResourceBinding,
   type ResourceRefusal,
+  type RevokeAccessResult,
   type SnapshotBinding,
   type StagedOperation,
   SyncClient,

@@ -40,6 +40,7 @@ import {
   DataUnitApplier,
   dekResolver,
   OutboundQueue,
+  queueControlRecord,
   releaseReceipt,
   type StatusEvent,
   SyncClient,
@@ -623,5 +624,41 @@ describe("the Snapshot policy (LFCP-02-097)", () => {
     await d.sync.commit(chain.R, ["c"], { operationId: "op-2" });
     await d.at(1_000);
     expect(asked.at(-1)).toBe(3);
+  });
+});
+
+describe("revokeAccess refusals (LFCP-02-060)", () => {
+  it("refuses while a Control Record of this client is pending, and queues nothing", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(233);
+    const bob = party(40);
+    chain.add({
+      type: "CAPABILITY_GRANT",
+      subject: bob.signer.descriptor,
+      abilities: [1n],
+      delegable: [],
+    });
+    serve(server, chain);
+    const d = await device(server, chain);
+    await d.live();
+    // A grant of ours still in flight: the server does not answer CONTROL_PUT here.
+    const v = chain.view();
+    const pending = signControlRecord(
+      { resourceId: chain.R, controlSeq: v.state.seq + 1n, prevControlId: v.state.head },
+      {
+        type: "CAPABILITY_GRANT",
+        subject: party(41).signer.descriptor,
+        abilities: [1n],
+        delegable: [],
+      },
+      OWNER.signer,
+    );
+    await queueControlRecord(d.storage, pending.bytes);
+    const before = await d.storage.outbound.list(chain.R);
+    expect(await d.sync.revokeAccess(chain.R, bob.signer.descriptor.principalId)).toMatchObject({
+      kind: "refused",
+      reason: "control-pending",
+    });
+    expect(await d.storage.outbound.list(chain.R)).toEqual(before);
   });
 });
