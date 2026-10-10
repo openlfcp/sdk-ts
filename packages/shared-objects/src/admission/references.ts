@@ -39,7 +39,7 @@ interface Entry {
 }
 
 /** A §11.4 rule a change breaks. */
-export type ReferenceRule = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "R9";
+export type ReferenceRule = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "R9" | "R10";
 
 const MAKE = new Set([0, 2, 4, 6]);
 const MAP_LIKE = new Set([0, 6]);
@@ -160,8 +160,10 @@ export class ReferenceHistory {
     };
     for (const [i, op] of change.ops.entries()) {
       const id = `${change.startOp + i}@${change.actor}`;
-      // R9: no operation is a mark.
+      // R9: no operation is a mark. R10: no operation makes a table (an engine
+      // cannot write a table back out, and writing into one aborts the apply).
       if (op.action === 7) return "R9";
+      if (op.action === 6) return "R10";
       // R3: the root, or an object an operation made; its key form.
       let sequence: boolean;
       if (op.obj === "_root") sequence = false;

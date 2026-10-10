@@ -35,8 +35,11 @@ export {
   type SharedObjectsUnit,
 } from "./data-profile.js";
 export {
+  applyBatchChecked,
+  applyChecked,
   type BatchReceiveResult,
   type BuiltReplica,
+  isWasmTrap,
   type LocalChange,
   type ObjectChange,
   ObjectIdCollisionError,

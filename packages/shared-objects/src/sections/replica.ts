@@ -23,7 +23,13 @@ import {
 import { type ReferenceHistory, referenceHistoryOf } from "../admission/references.js";
 import { admitBatch } from "../admission/sequence.js";
 import { ProfileInvalidError } from "../profile-invalid.js";
-import { prepareTaskIntent, type ReplicaIntent, type TaskView, taskView } from "../replica.js";
+import {
+  isWasmTrap,
+  prepareTaskIntent,
+  type ReplicaIntent,
+  type TaskView,
+  taskView,
+} from "../replica.js";
 import type { Task } from "../task.js";
 import type { Json } from "../validate.js";
 import { frameProfilePayload, isUtcTimestamp, principalRef } from "../values.js";
@@ -428,6 +434,55 @@ const isListStyle = (s: unknown): s is ListStyle =>
   typeof s === "string" && (LIST_STYLES as readonly string[]).includes(s);
 const revisionOf = (doc: Doc) => [...A.getHeads(doc)].sort().join(",");
 
+/** Rebuilds a section document from the changes it held before an aborted apply. */
+function restoreSection(changes: readonly Uint8Array[], actor: string, revision: string): Doc {
+  let restored: Doc;
+  try {
+    [restored] = A.applyChanges(A.init<Record<string, unknown>>({ actor }), [...changes]) as [Doc];
+  } catch (r) {
+    throw new Error(
+      `the section replica could not be restored after an Automerge error: ${String(r)}`,
+    );
+  }
+  if (revisionOf(restored) !== revision)
+    throw new Error(
+      "the section replica could not be restored after an Automerge error: heads differ",
+    );
+  return restored;
+}
+
+/**
+ * Applies admitted changes one at a time to `doc`, so a change the engine
+ * aborts on (D1) is isolated. On an abort the working document is rebuilt
+ * from the changes applied so far, never from the aborted one. A wasm trap
+ * is rethrown (isWasmTrap): the module is dead, and only a restart recovers.
+ */
+function applyIsolating(
+  doc: Doc,
+  changes: readonly CheckedChange[],
+): {
+  readonly doc: Doc;
+  readonly applied: readonly CheckedChange[];
+  readonly poisoned: readonly CheckedChange[];
+} {
+  const actor = A.getActorId(doc);
+  let work = doc;
+  const applied: CheckedChange[] = [];
+  const poisoned: CheckedChange[] = [];
+  for (const c of changes) {
+    const before = { revision: revisionOf(work), changes: A.getAllChanges(work) };
+    try {
+      work = A.applyChanges(work, [c.bytes])[0] as Doc;
+      applied.push(c);
+    } catch (e) {
+      if (isWasmTrap(e)) throw e;
+      work = restoreSection(before.changes, actor, before.revision);
+      poisoned.push(c);
+    }
+  }
+  return { doc: work, applied, poisoned };
+}
+
 /** Every concurrent value of `map[key]`. */
 function values(map: AMap, key: string): unknown[] {
   if (!(key in map)) return [];
@@ -639,6 +694,15 @@ export class SectionReplica {
     const seqs = this.#sequences();
     this.#refs ??= referenceHistoryOf(this.#doc);
     const references = this.#refs;
+    // The document's good state, captured before admission applies anything: a
+    // change the engine aborts on (D1: a makeTable it cannot write back)
+    // corrupts the working document, so on an abort this.#doc is rebuilt from
+    // the changes it held here, never from the aborted one.
+    const safe = {
+      revision: this.revision(),
+      actor: A.getActorId(this.#doc),
+      changes: A.getAllChanges(this.#doc),
+    };
     const admission = new SectionAdmission(this.#doc, this.resource);
     const decided = admitBatch(
       checked,
@@ -653,10 +717,34 @@ export class SectionReplica {
     for (const r of decided.refused)
       refused.push(refusal(indexOf.get(r.change.hash) ?? -1, r.change.hash, r.error, r.held));
     if (decided.admitted.length > 0) {
-      // The admission applied each admitted change, at its turn, to its working copy.
-      this.#doc = admission.document as Doc;
-      for (const c of decided.admitted)
-        if (c.seq > (seqs.get(c.actor) ?? 0)) seqs.set(c.actor, c.seq);
+      let applied: readonly CheckedChange[] = decided.admitted;
+      try {
+        // The admission applied each admitted change, at its turn, to its working copy.
+        this.#doc = admission.document as Doc;
+      } catch (e) {
+        if (isWasmTrap(e)) throw e;
+        // The engine aborted applying an admitted change without a wasm trap
+        // (D1). The working document is corrupt; rebuild this.#doc from the
+        // changes it held before, then re-apply the admitted changes one at a
+        // time, refusing the one the engine rejects (§74.1).
+        this.#doc = restoreSection(safe.changes, safe.actor, safe.revision);
+        const isolated = applyIsolating(this.#doc, decided.admitted);
+        this.#doc = isolated.doc;
+        applied = isolated.applied;
+        for (const c of isolated.poisoned)
+          refused.push({
+            index: indexOf.get(c.hash) ?? -1,
+            hash: c.hash,
+            diagnostic: "INVALID_AUTOMERGE_BYTES",
+            held: false,
+            message: `the engine could not apply the change (${String(e)})`,
+          });
+        // The admitted changes were added to the reference index and the
+        // sequences; a refused one is not in the document, so rebuild both.
+        this.#refs = null;
+        this.#seqs = undefined;
+      }
+      for (const c of applied) if (c.seq > (seqs.get(c.actor) ?? 0)) seqs.set(c.actor, c.seq);
     }
     const hashes = (list: readonly CheckedChange[]) => Object.freeze(list.map((c) => c.hash));
     return Object.freeze({
