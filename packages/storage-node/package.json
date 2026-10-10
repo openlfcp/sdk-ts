@@ -1,6 +1,6 @@
 {
   "name": "@openlfcp/storage-node",
-  "version": "0.2.0-beta.1",
+  "version": "0.2.0-beta.2",
   "description": "Durable Node.js storage for LFCP clients: SQLite (better-sqlite3) and a file secret store. Node only.",
   "keywords": [
     "openlfcp",

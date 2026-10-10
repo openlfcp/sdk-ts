@@ -4,6 +4,34 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.0-beta.2 — 2026-10-11
+
+The SDK is read at spec `mvp-0.2-baseline.6`. This beta adds the last of the
+differential-fuzzing convergence between the two reference SDKs and moves the
+spec pin up to `mvp-0.2-baseline.6`. Published under the npm dist-tag `beta`,
+like `0.2.0-beta.1`.
+
+### Added
+
+- The sequence admission refuses, before the engine, a later change whose
+  Automerge extra bytes begin with an author — an unsigned LEB128 1, a length
+  and that many bytes — when its sequence number is not 1, with
+  `INVALID_AUTOMERGE_BYTES` (SHARED-OBJECTS-PROFILE-01 §14.1, differential-
+  fuzzing finding D5). automerge 0.12 reads such an author and aborts applying
+  it on a later change; refusing it before the engine keeps the replica intact
+  (a unit test covers the detection, the rule and the replica's recovery, and
+  the shared sections corpus covers it as SS70).
+
+### Changed
+
+- `spec.lock` moves to `mvp-0.2-baseline.6` and `server.lock` to the matching
+  server. baseline.6 bounds a change's sequence number and time below 2^53
+  (§11.3 rule 2, finding D2), orders the checks of a change's bytes then its
+  actor before its dependencies (§14.1), and refuses collaborative Text in any
+  field a profile does not define (SHARED-SECTIONS-PROFILE-01 A5, finding D3).
+  The shared sections corpus gains SS66 to SS75; this SDK already decided D2,
+  D3 and the ordering, so only the D5 rule above is new code.
+
 ## 0.2.0-beta.1 — 2026-10-10
 
 The first beta of the 0.2 line, published under the npm dist-tag `beta`;
