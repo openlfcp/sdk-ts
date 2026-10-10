@@ -4,7 +4,14 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
-## Unreleased
+## 0.2.0-beta.1 — 2026-10-10
+
+The first beta of the 0.2 line, published under the npm dist-tag `beta`;
+`latest` stays on the 0.1.x releases until 0.2.0 is final. 0.2 adds the
+Shared Sections profile (Working Draft) and the section-aware sync client
+on top of the Shared Objects admission module, with status and receipt
+reporting, and hardens the Automerge binding. APIs may still change before
+0.2.0. The SDK is read at spec `mvp-0.2-baseline.4`.
 
 ### Added
 
@@ -19,6 +26,11 @@ remove or rename any.
   (`deriveDomainActorId`, `checkChangeActor`) and the sequence admission
   with held changes (`admitBatch`, `admitChange`). The Shared Objects
   profile now runs on it; its behaviour and exports are unchanged.
+- The reference rules of SHARED-OBJECTS-PROFILE-01 §11.4 now refuse, from
+  the change bytes before the engine, an increment that does not name a
+  counter put (R8), an Automerge mark (action 7, R9) and an operation that
+  makes a table (action 6, R10); each is `INVALID_AUTOMERGE_BYTES`. R10
+  keeps the D1 table-making change (see Fixed) from reaching the engine.
 - `@openlfcp/shared-objects/sections` (LFCP-02-011), Working Draft:
   SHARED-SECTIONS-PROFILE-01 dispatch by a Resource's Genesis profile
   (`profileModel`, `taskRefModel`; an unknown profile is
@@ -208,6 +220,20 @@ remove or rename any.
   - Unaccepted batches are `blocked`, with the work kept; catch-up is
     `unknown`.
   - Events report each change, and `open()` again clears the refusal.
+
+### Fixed
+
+- A received change that makes an Automerge table (action 6) and writes
+  into it no longer poisons a replica (differential-fuzzing defect D1).
+  Automerge JS 3.5.0 panics applying such a change ("Obj … Missing from
+  Index"), which before left the aborted change as the document's head: the
+  replica could not take the actor's next change ("duplicate seq") and a
+  reload failed. Two backstops cover it: admission refuses the change
+  (§11.4 R10) before the engine, and if any change aborts in the engine the
+  document is rolled back to the changes it held before the apply, so an
+  aborted change never becomes a replica's state (`applyChecked`,
+  `applyBatchChecked`, both now exported from `@openlfcp/shared-objects`).
+  Both `SharedObjectsReplica` and `SectionReplica` are covered.
 
 ## 0.1.3 — 2026-10-08
 
