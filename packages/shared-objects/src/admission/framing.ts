@@ -46,6 +46,12 @@ export interface CheckedChange {
   readonly deps: readonly string[];
   /** Hex IDs of the other actors the change refers to (§11.1: each must be known to the document). */
   readonly otherActors: readonly string[];
+  /**
+   * §14.1: the change's extra bytes begin with an Automerge author, allowed
+   * only in an actor's first change (finding D5). See
+   * {@link ParsedChange.beginsWithAuthor}.
+   */
+  readonly beginsWithAuthor: boolean;
 }
 
 /**
@@ -80,6 +86,7 @@ export function checkChange(bytes: Uint8Array): CheckedChange {
     seq: decoded.seq,
     deps: Object.freeze([...decoded.deps]),
     otherActors: expansion.otherActors,
+    beginsWithAuthor: parsed.beginsWithAuthor,
   });
   DECODED.set(checked, decoded);
   PARSED.set(checked, parsed);

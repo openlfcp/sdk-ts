@@ -16,7 +16,15 @@ import { deriveActorId } from "../src/index.js";
 const R = resourceId(Uint8Array.from({ length: 32 }, (_, i) => i));
 const P = principalId(Uint8Array.from({ length: 32 }, (_, i) => 100 + i));
 const change = (actor: string, seq: number, hash: string, deps: string[] = []): CheckedChange =>
-  Object.freeze({ bytes: new Uint8Array(), hash, actor, seq, deps, otherActors: [] });
+  Object.freeze({
+    bytes: new Uint8Array(),
+    hash,
+    actor,
+    seq,
+    deps,
+    otherActors: [],
+    beginsWithAuthor: false,
+  });
 
 describe("the shared admission module (LFCP-02-085)", () => {
   it("binds actors per domain; the Shared Objects domain gives deriveActorId", () => {

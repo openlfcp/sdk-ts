@@ -43,6 +43,13 @@ export interface ParsedChange {
   /** Hex other actors, ascending: actor index i is otherActors[i - 1]. */
   readonly otherActors: readonly string[];
   readonly ops: readonly ParsedOp[];
+  /**
+   * §14.1: the extra bytes after the columns (which rule 4 leaves free) begin
+   * with an Automerge author — an unsigned LEB128 1, a length L, then at least
+   * L bytes. automerge 0.12 reads it and asserts the change's sequence number
+   * is 1, so a later change carrying one is refused (finding D5).
+   */
+  readonly beginsWithAuthor: boolean;
 }
 
 const refuse = (why: string): never => {
@@ -377,6 +384,33 @@ function checkValue(type: number, bytes: Uint8Array): void {
 }
 
 /**
+ * §14.1: whether the extra bytes after a change's columns begin with an
+ * Automerge author (finding D5). Rule 4 leaves these bytes free, but
+ * automerge 0.12 reads an author there — an unsigned LEB128 1, a length L,
+ * then L bytes — and asserts the change's sequence number is 1. The LEB128 is
+ * read as automerge reads it: up to ten bytes, under 2^64, in any encoding
+ * (not the shortest-form `Reader` the rest of the walk uses).
+ */
+function beginsWithAuthor(extra: Uint8Array): boolean {
+  let pos = 0;
+  const leb = (): bigint | null => {
+    let value = 0n;
+    let shift = 0n;
+    for (;;) {
+      if (pos >= extra.length) return null;
+      const b = extra[pos++] as number;
+      if (shift === 63n && b !== 0 && b !== 1) return null;
+      value |= BigInt(b & 0x7f) << shift;
+      if ((b & 0x80) === 0) return value;
+      shift += 7n;
+    }
+  };
+  if (leb() !== 1n) return false;
+  const length = leb();
+  return length !== null && BigInt(extra.length - pos) >= length;
+}
+
+/**
  * §11.3: checks that `bytes` (one change chunk within the §11.1 limits) is
  * the canonical encoding of its change, and returns the change's operations
  * read from it. Throws PROFILE_INVALID / INVALID_AUTOMERGE_BYTES.
@@ -424,7 +458,9 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
   }
   const data = new Map<number, Uint8Array>();
   for (const m of metas) data.set(m.spec, r.take(m.length));
-  // What follows is the change's extra bytes.
+  // What follows is the change's extra bytes (§11.3 rule 4), free except that
+  // automerge reads an author from their start (§14.1, finding D5).
+  const authored = beginsWithAuthor(bytes.subarray(r.pos));
 
   const rle = (spec: number): Row[] | undefined => {
     const d = data.get(spec);
@@ -632,5 +668,6 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
     deps: Object.freeze(deps.map(hex)),
     otherActors: Object.freeze(others.map(hex)),
     ops: Object.freeze(ops),
+    beginsWithAuthor: authored,
   });
 }

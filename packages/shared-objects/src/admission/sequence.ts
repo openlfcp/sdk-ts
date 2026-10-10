@@ -128,6 +128,16 @@ export function admitBatch(
         held: false,
       });
       continue;
+    } else if (c.beginsWithAuthor && c.seq !== 1) {
+      refused.push({
+        change: c,
+        error: new ProfileInvalidError(
+          "INVALID_AUTOMERGE_BYTES",
+          `the change's extra bytes begin with an author but its sequence number is ${c.seq}, not 1 (§14.1)`,
+        ),
+        held: false,
+      });
+      continue;
     } else {
       const references = referenceRefusal(c, doc);
       if (references !== null) {
@@ -193,6 +203,15 @@ export function admitChange(change: CheckedChange, doc: DocumentSequences): Chan
       error: new ProfileInvalidError(
         "INVALID_AUTOMERGE_BYTES",
         `actor ${change.actor} sequence ${change.seq} skips sequence ${latest + 1} (§14.1)`,
+      ),
+    };
+  // §14.1: an author belongs only in an actor's first change (finding D5).
+  if (change.beginsWithAuthor && change.seq !== 1)
+    return {
+      kind: "invalid",
+      error: new ProfileInvalidError(
+        "INVALID_AUTOMERGE_BYTES",
+        `the change's extra bytes begin with an author but its sequence number is ${change.seq}, not 1 (§14.1)`,
       ),
     };
   // §11.4: checked only; the caller adds the change once the engine applied it.
