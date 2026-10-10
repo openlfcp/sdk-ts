@@ -3,9 +3,12 @@
 // sdk-ts has no Node type definitions.
 //
 // The server checkout is $LFCP_SERVER_DIR, or ../server next to sdk-ts. It
-// is built with `cargo build` into a shared temporary target directory
-// ($LFCP_SERVER_TARGET_DIR, default <tmp>/openlfcp-sdk-ts-server-target),
-// so only the first run compiles. When cargo or the checkout is missing,
+// is built with `cargo build` into a shared target directory
+// ($LFCP_SERVER_TARGET_DIR, default ~/Library/Caches/openlfcp-sdk-ts-server-target
+// on macOS, or the XDG cache elsewhere), so only the first run compiles. Not
+// the temp directory: macOS deletes temp files it has not seen accessed for
+// some days, which left a build without a build script's output and failed the
+// next cargo build (2026-10-10). When cargo or the checkout is missing,
 // startRustServer resolves { skip: "<why>" } and the test is skipped,
 // unless LFCP_REQUIRE_LIVE=1: then it throws, so a gate that must run the
 // live tests cannot pass by skipping them.
@@ -24,14 +27,20 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ROOT } from "../spec.mjs";
 import { guardChild } from "./reaper.mjs";
 
 const SERVER_DIR = resolve(ROOT, process.env.LFCP_SERVER_DIR ?? "../server");
 const TARGET_DIR =
-  process.env.LFCP_SERVER_TARGET_DIR ?? join(tmpdir(), "openlfcp-sdk-ts-server-target");
+  process.env.LFCP_SERVER_TARGET_DIR ??
+  join(
+    process.platform === "darwin"
+      ? join(homedir(), "Library", "Caches")
+      : (process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache")),
+    "openlfcp-sdk-ts-server-target",
+  );
 
 function cargoAvailable() {
   try {
