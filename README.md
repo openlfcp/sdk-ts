@@ -131,7 +131,7 @@ The official vectors belong to `openlfcp/spec` and are never copied into
 sdk-ts. `spec.lock` pins the spec version the SDK implements:
 
 ```json
-{ "tag": "mvp-0.2-baseline.5", "commit": "45e5aadf70ca76cd2b366389102c017955ca1003" }
+{ "tag": "mvp-0.2-baseline.6", "commit": "73c0e80ead9d3fff08beefe7b2e2cf6b86f25198" }
 ```
 
 `conformance/spec.mjs` reads spec files with `git show <commit>:<path>`
@@ -140,7 +140,7 @@ from the sdk-ts root). It first checks that the tag still resolves to the
 locked commit and fails loudly if not. Moving to a new baseline means
 changing `spec.lock` deliberately.
 
-`mvp-0.2-baseline.5` holds `mvp-0.1-baseline.10` unchanged, which the
+`mvp-0.2-baseline.6` holds `mvp-0.1-baseline.10` unchanged, which the
 Wire and Shared Objects packages implement (with the canonical change
 encoding and operation references of SPEC-PATCH-10, SHARED-OBJECTS-PROFILE-01
 §11.3 and §11.4), and adds the Working Draft shared sections corpus that
@@ -151,7 +151,13 @@ SS61 to SS63), included. It bounds the start op of a change without
 operations below 2^32 (SHARED-OBJECTS-PROFILE-01 §11.3 rule 8) and adds the
 operation references R8 to R10: an increment names only the counter puts it
 adds to, no operation is a mark, and none makes a table (§11.4, finding D1),
-which shared sections inherit (SS64, SS65).
+which shared sections inherit (SS64, SS65). It bounds a change's header numbers
+— the sequence number below 2^53, the time above -2^53 and below 2^53 (§11.3
+rule 2, finding D2) — makes the checks of a change's bytes, then its actor,
+before its dependencies (§14.1), allows an Automerge author only in an actor's
+first change (§14.1, finding D5), and refuses collaborative Text in any field a
+profile does not define, not only the fields it names (SHARED-SECTIONS-PROFILE-01
+A5, finding D3); the shared sections corpus gains SS66 to SS75.
 
 ```sh
 pnpm build
