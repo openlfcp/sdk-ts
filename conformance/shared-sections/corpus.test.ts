@@ -157,10 +157,21 @@ describe("shared sections corpus", () => {
           const before = doc.save();
           const v = doc.validate();
           expect(doc.save()).toEqual(before);
-          expect(v.problems).toEqual([]);
+          // A PROFILE_INVALID reference snapshot has no valid root (SS65: a
+          // section created with ready false is refused, so its base is the
+          // genesis alone); every other case's snapshot is a valid section.
+          if (c.expected.classification === "PROFILE_INVALID")
+            expect(v.problems.length).toBeGreaterThan(0);
+          else expect(v.problems).toEqual([]);
           // §14.2: collisions are reported apart; a collided node is not validated.
           expect(v.collisions).toEqual(c.expected.collisions ?? []);
-          expect(v.state).toBe(c.expected.classification === "IMPORTING" ? "importing" : "ready");
+          expect(v.state).toBe(
+            c.expected.classification === "IMPORTING"
+              ? "importing"
+              : c.expected.classification === "PROFILE_INVALID"
+                ? "invalid"
+                : "ready",
+          );
           expect(v.placements.size).toBe(0);
           expect(v.objects.size).toBe(0);
           expect(
