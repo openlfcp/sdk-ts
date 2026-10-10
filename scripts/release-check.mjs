@@ -12,7 +12,8 @@
 // 4. Each packed package.json: the release version, every @openlfcp/*
 //    dependency rewritten from workspace:^ to ^<version> (or the exact
 //    version), no "workspace:" left, publishConfig { access public, tag
-//    "latest" for a final version, "next" for a prerelease }, license,
+//    the version's dist-tag (scripts/dist-tag.mjs: "latest" for a final
+//    version, "beta" for X.Y.Z-beta.N, "next" for X.Y.Z-rc.N) }, license,
 //    repository and engines set.
 // 5. The eight tarballs installed into a fresh project with npm (from the
 //    tarball files; --prefer-offline uses the npm cache for third-party
@@ -40,6 +41,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { distTag } from "./dist-tag.mjs";
 import { checkoutPackProblems, packJsonFiles } from "./pack-files.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -53,8 +55,14 @@ export { PUBLISH_ORDER };
 const VERSION = JSON.parse(
   readFileSync(join(root, "packages", "core", "package.json"), "utf8"),
 ).version;
-/** The dist-tag: `next` for a prerelease (`0.1.0-rc.1`), `latest` for a final release. */
-const DIST_TAG = VERSION.includes("-") ? "next" : "latest";
+/** The dist-tag release.yml publishes VERSION under (scripts/dist-tag.mjs). */
+let DIST_TAG;
+try {
+  DIST_TAG = distTag(VERSION);
+} catch (e) {
+  console.error(`release:check: ${e.message}`);
+  process.exit(1);
+}
 const failures = [];
 const fail = (what) => {
   failures.push(what);

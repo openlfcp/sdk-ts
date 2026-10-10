@@ -4,8 +4,10 @@
 # docs/release/npm-trusted-publishing-setup.md for the one-time setup.
 #
 # - A pushed tag vX.Y.Z publishes version X.Y.Z, after an approval in the
-#   GitHub environment npm-publish. A prerelease (X.Y.Z-rc.N) goes to the
-#   dist-tag next, a final version to latest.
+#   GitHub environment npm-publish. The dist-tag comes from
+#   scripts/dist-tag.mjs: a final version goes to latest, a beta
+#   (X.Y.Z-beta.N) to beta, leaving latest on the last final version, a
+#   release candidate (X.Y.Z-rc.N) to next; any other version is refused.
 # - workflow_dispatch runs the same path as a dry run (npm publish
 #   --dry-run) on the chosen branch: nothing is published and no approval
 #   is asked. A real publish only ever comes from a tag.
@@ -70,7 +72,7 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
             echo "::error::tag $GITHUB_REF_NAME, packages $version"; exit 1
           fi
-          case "$version" in *-*) tag=next ;; *) tag=latest ;; esac
+          tag=$(node scripts/dist-tag.mjs "$version")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "dist-tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version $version, dist-tag $tag"
@@ -95,6 +97,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           DIST_TAG: ${{ steps.version.outputs.dist-tag }}
         run: |
+          echo "::notice::version $VERSION would be published under the dist-tag $DIST_TAG"
           for p in core crypto storage wire storage-node storage-idb shared-objects client; do
             if npm view "@openlfcp/$p@$VERSION" version >/dev/null 2>&1; then
               echo "::notice::@openlfcp/$p@$VERSION is already published: dry run skipped"

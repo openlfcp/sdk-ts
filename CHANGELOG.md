@@ -8,6 +8,10 @@ remove or rename any.
 
 ### Added
 
+- Betas: a tag `vX.Y.Z-beta.N` publishes under the npm dist-tag `beta`,
+  leaving `latest` on the last final release (`scripts/dist-tag.mjs`, used
+  by `release.yml` and `pnpm release:check`; the dry run names the
+  dist-tag). A prerelease that is neither `beta.N` nor `rc.N` is refused.
 - `@openlfcp/shared-objects/admission` (LFCP-02-085): the admission of
   SHARED-OBJECTS-PROFILE-01 §§7–18 as a module every inheriting profile
   shares (SHARED-SECTIONS-PROFILE-01 §2): the framing, the expansion,

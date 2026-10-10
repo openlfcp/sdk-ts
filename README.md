@@ -260,13 +260,15 @@ building or testing a consumer, and again after changing the SDK.
 ## Publication
 
 The packages are named `@openlfcp/*` from the start, but they are published
-to npm only at milestones, as `0.x` versions. A release candidate (a
-prerelease version such as `0.1.0-rc.1`) goes under the `next` dist-tag, a
-final release (such as `0.1.0`) under `latest`. The project owner does this.
-The repository has no publish script or CI publish job.
+to npm only at milestones, as `0.x` versions. A final release (such as
+`0.1.0`) goes under the `latest` dist-tag, a beta (`0.2.0-beta.1`) under
+`beta`, so `latest` stays on the last final release until GA, and a release
+candidate (`0.1.0-rc.1`) under `next`; `scripts/dist-tag.mjs` holds the rule
+and refuses any other version. A pushed tag `vX.Y.Z` publishes through
+`.github/workflows/release.yml` after the project owner's approval.
 
-Every package carries `publishConfig.tag` (`latest` for a final release,
-`next` for a prerelease), its own LICENSE and a
+Every package carries `publishConfig.tag` (the version's dist-tag), its own
+LICENSE and a
 README, and publishes only `dist/` (JavaScript and type declarations, no
 source maps). Before a publish, `pnpm release:check`
 (`scripts/release-check.mjs`) verifies the release locally and offline-capable:
