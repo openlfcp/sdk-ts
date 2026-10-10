@@ -502,7 +502,7 @@ const actorHex = (opts: ReplicaOptions): string =>
  * the change refused): it is rethrown as it is, never turned into
  * INVALID_AUTOMERGE_BYTES, so a crash-loop breaker sees it.
  */
-function isWasmTrap(e: unknown): boolean {
+export function isWasmTrap(e: unknown): boolean {
   const trap = (globalThis as { WebAssembly?: { RuntimeError?: abstract new () => unknown } })
     .WebAssembly?.RuntimeError;
   if (trap !== undefined && e instanceof trap) return true;
@@ -521,22 +521,38 @@ export function applyChecked(
   doc: Doc,
   bytes: Uint8Array,
 ): { readonly next: Doc } | { readonly restored: Doc; readonly error: Error } {
+  // Capture the document's changes BEFORE the apply: a change the engine
+  // aborts on (D1: a makeTable it cannot write back) stays in the document's
+  // graph or aborts the apply mid-way, so A.getAllChanges(doc) AFTER the
+  // error still holds the bad change and rebuilding from it re-aborts
+  // ("could not be restored"). Rebuilding from the changes it held before
+  // always gives its prior state.
+  //
+  // Do NOT "simplify" this by applying to A.clone(doc): A.clone gives the
+  // clone a new actor id, which breaks local writes (§8) and convergence.
   const before = [...A.getHeads(doc)].sort().join();
+  const actor = A.getActorId(doc);
+  const good = A.getAllChanges(doc);
   try {
     return { next: A.applyChanges(doc, [bytes])[0] };
   } catch (e) {
     if (isWasmTrap(e)) throw e;
     const error = e instanceof Error ? e : new Error(String(e));
-    let restored: Doc;
-    try {
-      [restored] = A.applyChanges(A.init({ actor: A.getActorId(doc) }), A.getAllChanges(doc));
-    } catch (r) {
-      throw new Error(`the replica could not be restored after an Automerge error: ${String(r)}`);
-    }
-    if ([...A.getHeads(restored)].sort().join() !== before)
-      throw new Error("the replica could not be restored after an Automerge error: heads differ");
-    return { restored, error };
+    return { restored: restoreFrom(good, actor, before), error };
   }
+}
+
+/** Rebuilds a document from the changes it held before an aborted apply (never from the aborted one). */
+function restoreFrom(good: readonly Uint8Array[], actor: string, before: string): Doc {
+  let restored: Doc;
+  try {
+    [restored] = A.applyChanges(A.init({ actor }), [...good]);
+  } catch (r) {
+    throw new Error(`the replica could not be restored after an Automerge error: ${String(r)}`);
+  }
+  if ([...A.getHeads(restored)].sort().join() !== before)
+    throw new Error("the replica could not be restored after an Automerge error: heads differ");
+  return restored;
 }
 
 /**
@@ -549,7 +565,10 @@ export function applyBatchChecked(
   doc: Doc,
   batch: readonly CheckedChange[],
 ): { readonly next: Doc } | { readonly restored: Doc; readonly error: Error } {
-  const heads = A.getHeads(doc);
+  // See applyChecked: capture the changes before the apply, restore from them.
+  const before = [...A.getHeads(doc)].sort().join();
+  const actor = A.getActorId(doc);
+  const good = A.getAllChanges(doc);
   try {
     return {
       next: A.applyChanges(
@@ -560,22 +579,8 @@ export function applyBatchChecked(
   } catch (e) {
     if (isWasmTrap(e)) throw e;
     const error = e instanceof Error ? e : new Error(String(e));
-    return { restored: restoreWithout(doc, batch, heads), error };
+    return { restored: restoreFrom(good, actor, before), error };
   }
-}
-
-function restoreWithout(doc: Doc, batch: readonly CheckedChange[], heads: A.Heads): Doc {
-  const out = new Set(batch.map((c) => c.hash));
-  const kept = A.getAllChanges(doc).filter((c) => !out.has(A.decodeChange(c).hash));
-  let restored: Doc;
-  try {
-    [restored] = A.applyChanges(A.init({ actor: A.getActorId(doc) }), kept);
-  } catch (r) {
-    throw new Error(`the replica could not be restored after an Automerge error: ${String(r)}`);
-  }
-  if ([...A.getHeads(restored)].sort().join() !== [...heads].sort().join())
-    throw new Error("the replica could not be restored after an Automerge error: heads differ");
-  return restored;
 }
 
 function loadFailure(e: unknown, what: string): never {

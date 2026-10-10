@@ -1,6 +1,6 @@
 {
   "name": "@openlfcp/core",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Identifiers, shared protocol types, errors and byte helpers for LFCP.",
   "keywords": [
     "openlfcp",

@@ -37,7 +37,7 @@ interface Entry {
 }
 
 /** A §11.4 rule a change breaks. */
-export type ReferenceRule = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7";
+export type ReferenceRule = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R10";
 
 const MAKE = new Set([0, 2, 4, 6]);
 const MAP_LIKE = new Set([0, 6]);
@@ -157,6 +157,10 @@ export class ReferenceHistory {
     };
     for (const [i, op] of change.ops.entries()) {
       const id = `${change.startOp + i}@${change.actor}`;
+      // R10: no operation makes a table. Automerge JS 3.5.0 cannot write a
+      // table back out and aborts applying one (differential fuzzing D1); a
+      // writer of this profile never makes one.
+      if (op.action === 6) return "R10";
       // R3: the root, or an object an operation made; its key form.
       let sequence: boolean;
       if (op.obj === "_root") sequence = false;

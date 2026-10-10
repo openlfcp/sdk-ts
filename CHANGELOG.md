@@ -4,6 +4,30 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.1.5 — 2026-10-10
+
+A patch release of the 0.1 line, still at `mvp-0.1-baseline.10`. No API
+is removed or renamed.
+
+### Fixed
+
+- A received change that makes an Automerge table (action 6) and writes
+  into it no longer poisons a replica (differential-fuzzing defect D1).
+  Automerge JS 3.5.0 panics applying such a change ("Obj … Missing from
+  Index"), which, before this release, left the aborted change as the
+  document's head: the replica could not take the actor's next change
+  ("duplicate seq") and a reload failed ("could not be restored"). Two
+  backstops now cover it: `@openlfcp/shared-objects` refuses the change
+  at admission (SHARED-OBJECTS-PROFILE-01 §11.4 R10, no table-making
+  operation) with `INVALID_AUTOMERGE_BYTES`, and if any change aborts in
+  the engine the document is rolled back to the changes it held before
+  the apply, so an aborted change never becomes the replica's state.
+
+### Added
+
+- `@openlfcp/shared-objects` exports `applyChecked`, `applyBatchChecked`,
+  and `isWasmTrap`, the engine-apply helpers that perform the rollback.
+
 ## 0.1.4 — 2026-10-09
 
 A patch release of the 0.1 line with the admission of SPEC-PATCH-10

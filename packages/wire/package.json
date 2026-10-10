@@ -1,6 +1,6 @@
 {
   "name": "@openlfcp/wire",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Deterministic CBOR, COSE and LFCP Wire structures and codecs.",
   "keywords": [
     "openlfcp",
