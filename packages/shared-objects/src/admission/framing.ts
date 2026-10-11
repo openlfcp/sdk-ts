@@ -3,7 +3,7 @@ import { LfcpError, toHex } from "@openlfcp/core";
 import { sha256 } from "@openlfcp/crypto";
 import { ProfileInvalidError } from "../profile-invalid.js";
 import { checkCanonicalChange, type ParsedChange } from "./canonical.js";
-import { checkChangeExpansion, MalformedChunkError } from "./limits.js";
+import { checkChangeExpansion } from "./limits.js";
 
 /**
  * Automerge byte checks of the SHARED-OBJECTS-PROFILE-01 payloads (LFCP-031):
@@ -94,16 +94,18 @@ export function checkChange(bytes: Uint8Array): CheckedChange {
 }
 
 /**
- * The change hash of bytes checkChange refused, read without decoding
- * them: the SHA-256 of the chunk from its type byte on (the Automerge
- * change hash). A change above a §11.1 limit is named this way, so a
- * receiver can report it without expanding it. Undefined when the bytes
- * are not one change chunk that could be read: no magic bytes, another
- * chunk type, a length that does not cover them exactly, or a header or
- * column cut short.
+ * The change hash of bytes checkChange refused, read without decoding them:
+ * the SHA-256 of the chunk from its type byte on (the Automerge change hash).
+ * §14.1 names a refused change by this hash whenever the bytes are one change
+ * chunk of type 1 whose length field covers them exactly and whose checksum
+ * matches — the inner header is never read, so a change above a §11.1 limit
+ * (named without being expanded) and one whose header holds a length running
+ * past its end (finding C3) are both named. Undefined when the bytes are not
+ * such a chunk: no magic bytes, another chunk type (a compressed chunk
+ * included), a length that does not cover them exactly, or a wrong checksum
+ * (whose name would be its intact copy's, finding C1).
  */
-export function refusedChangeHash(bytes: Uint8Array, error: unknown): string | undefined {
-  if (error instanceof MalformedChunkError) return undefined;
+export function refusedChangeHash(bytes: Uint8Array): string | undefined {
   if (bytes.length < HEADER || MAGIC.some((b, i) => bytes[i] !== b)) return undefined;
   if (bytes[8] !== CHUNK_CHANGE) return undefined;
   // The ULEB128 chunk length after the type byte must cover the rest exactly.

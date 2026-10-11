@@ -671,7 +671,7 @@ export class SectionReplica {
         c = checkChange(unit.bytes);
       } catch (e) {
         // Never decoded: a change refused by the checks is named from its bytes only.
-        refused.push(refusal(index, refusedChangeHash(unit.bytes, e), e, false));
+        refused.push(refusal(index, refusedChangeHash(unit.bytes), e, false));
         return;
       }
       if (
