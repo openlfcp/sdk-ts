@@ -131,7 +131,7 @@ The official vectors belong to `openlfcp/spec` and are never copied into
 sdk-ts. `spec.lock` pins the spec version the SDK implements:
 
 ```json
-{ "tag": "mvp-0.2-baseline.8", "commit": "a38fb27a89f766985e9cce1c8a5b1a49da88b898" }
+{ "tag": "mvp-0.2-baseline.9", "commit": "369c22b47783e71b5322d87f714d665d92e938e9" }
 ```
 
 `conformance/spec.mjs` reads spec files with `git show <commit>:<path>`
@@ -140,7 +140,7 @@ from the sdk-ts root). It first checks that the tag still resolves to the
 locked commit and fails loudly if not. Moving to a new baseline means
 changing `spec.lock` deliberately.
 
-`mvp-0.2-baseline.8` holds `mvp-0.1-baseline.10` unchanged, which the
+`mvp-0.2-baseline.9` holds `mvp-0.1-baseline.10` unchanged, which the
 Wire and Shared Objects packages implement (with the canonical change
 encoding and operation references of SPEC-PATCH-10, SHARED-OBJECTS-PROFILE-01
 §11.3 and §11.4), and adds the Working Draft shared sections corpus that
@@ -165,7 +165,11 @@ whose header length runs past its end without reading the header (finding C3;
 baseline.8 adds SS79). It surfaces a move of a node (a write to its `placement`
 register — `node.move` or `node.resolve_placement`, §8) concurrent with a
 deletion of the node or of an effective ancestor as a retained concurrent edit
-(§9, `EDIT_UNDER_DELETED_ANCESTOR`; baseline.8 adds SS80 to SS82).
+(§9, `EDIT_UNDER_DELETED_ANCESTOR`; baseline.8 adds SS80 to SS82). It compares
+such an edit only with the deletions the lifecycle register still holds — a
+later write to the same register supersedes an earlier deletion, so deleting the
+node again clears the attention, while two concurrent deletions both count (§9;
+baseline.9 adds SS83 to SS87).
 
 ```sh
 pnpm build
