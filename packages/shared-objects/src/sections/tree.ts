@@ -301,6 +301,10 @@ export function deriveTree(
  * operation on its Text, a Task's title or status, or a move of the node
  * (a write to its `placement` register — node.move or node.resolve_placement,
  * §8). Two changes are concurrent when neither is in the other's dependencies.
+ * Only a deletion the lifecycle register still holds counts: one a later write
+ * to the same register depends on is superseded (deleting the node again clears
+ * the attention a concurrent edit raised), while two concurrent deletions both
+ * count (baseline.9).
  */
 function retainedEdits(
   doc: A.Doc<unknown>,
@@ -336,6 +340,8 @@ function retainedEdits(
 
   const deps = new Map<string, readonly string[]>();
   const deletes: { hash: string; node: string }[] = [];
+  // Every lifecycle write (any value), to tell whether a deletion is still held.
+  const lifecycleWrites: { hash: string; node: string }[] = [];
   const edits: { hash: string; node: string }[] = [];
   for (const bytes of A.getAllChanges(doc as A.Doc<AMap>)) {
     const change = A.decodeChange(bytes);
@@ -360,8 +366,10 @@ function retainedEdits(
       const owner = ownerOf.get(op.obj);
       if (owner !== undefined && key === "lifecycle") lastLifecycle.set(owner, value);
     }
-    for (const [owner, value] of lastLifecycle)
+    for (const [owner, value] of lastLifecycle) {
+      lifecycleWrites.push({ hash: change.hash, node: owner });
       if (value === "deleted") deletes.push({ hash: change.hash, node: owner });
+    }
     for (const node of touched) edits.push({ hash: change.hash, node });
   }
   if (deletes.length === 0 || edits.length === 0) return [];
@@ -385,8 +393,21 @@ function retainedEdits(
   const concurrent = (a: string, b: string) =>
     a !== b && !ancestorsOf(a).has(b) && !ancestorsOf(b).has(a);
 
+  // §9 (baseline.9): a deletion counts only while the lifecycle register still
+  // holds it. A later write to the same register — one that has the deletion in
+  // its dependencies — supersedes it, so deleting a node again clears the
+  // attention a concurrent edit raised. Two concurrent deletions supersede
+  // neither, so both still count (SS86); the writes come from each change's
+  // operations, which also keeps a deletion merged after a concurrent one.
+  const heldDeletes = deletes.filter(
+    (d) =>
+      !lifecycleWrites.some(
+        (w) => w.node === d.node && w.hash !== d.hash && ancestorsOf(w.hash).has(d.hash),
+      ),
+  );
+
   const deletesOf = new Map<string, string[]>();
-  for (const d of deletes) deletesOf.set(d.node, [...(deletesOf.get(d.node) ?? []), d.hash]);
+  for (const d of heldDeletes) deletesOf.set(d.node, [...(deletesOf.get(d.node) ?? []), d.hash]);
   const attention = new Set<string>();
   for (const edit of edits) {
     if (attention.has(edit.node)) continue;

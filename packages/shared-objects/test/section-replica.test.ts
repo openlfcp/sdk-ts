@@ -871,6 +871,72 @@ describe("SectionReplica: a move concurrent with a deletion is retained (§9)", 
   });
 });
 
+describe("SectionReplica: only deletions the register still holds are retained (§9)", () => {
+  // §9 (baseline.9): a retained concurrent edit is compared only with the
+  // deletions the lifecycle register still holds. Deleting the node again — a
+  // later write the register depends on — supersedes the first deletion and
+  // clears the attention a concurrent move raised; but two concurrent deletions
+  // supersede neither, so both count, and a re-delete after both clears it too.
+  // SS83, SS86 and SS87, built from the authoring API to stay green at .8.
+  const branch = (save: Uint8Array, fill: number, intents: SectionIntent[]): Uint8Array[] => {
+    const w = SectionReplica.fromSave(
+      save,
+      { resource, principal: principalId(new Uint8Array(32).fill(fill)) },
+      "local-state",
+    );
+    const before = w.changes().length;
+    for (const i of intents) w.commit([i]);
+    return w.changes().slice(before);
+  };
+
+  it("clears a move retained against a deletion when the node is deleted again (SS83's shape)", () => {
+    const base = built();
+    const save = base.save();
+    const moved = branch(save, 11, [{ intent: "node.move", id: T, parent: X, after: null }]);
+    const deleted = branch(save, 12, [{ intent: "node.delete", id: T }]);
+    const r = SectionReplica.fromChanges([...base.changes(), ...moved, ...deleted], {
+      resource,
+      principal: alice,
+    }).replica;
+    expect(r.tree().retainedConcurrentEdits).toEqual([T]); // move ∥ delete, SS80's shape
+    // Delete again: a fresh lifecycle write that depends on both, superseding
+    // the first deletion. The move is now causally before the held deletion.
+    r.commit([{ intent: "node.delete", id: T }]);
+    expect(r.tree().retainedConcurrentEdits).toEqual([]);
+    expect(r.tree().hidden).toEqual([T, P].sort());
+  });
+
+  it("counts both of two concurrent deletions against a concurrent move (SS86's shape)", () => {
+    const base = built();
+    const save = base.save();
+    const del1 = branch(save, 11, [{ intent: "node.delete", id: T }]);
+    const del2 = branch(save, 12, [{ intent: "node.delete", id: T }]);
+    const moved = branch(save, 13, [{ intent: "node.move", id: T, parent: X, after: null }]);
+    const r = SectionReplica.fromChanges([...base.changes(), ...del1, ...del2, ...moved], {
+      resource,
+      principal: alice,
+    }).replica;
+    // Neither deletion supersedes the other, so the move is retained against them.
+    expect(r.tree().retainedConcurrentEdits).toEqual([T]);
+  });
+
+  it("clears the move when the node is deleted again after both concurrent deletions (SS87's shape)", () => {
+    const base = built();
+    const save = base.save();
+    const del1 = branch(save, 11, [{ intent: "node.delete", id: T }]);
+    const del2 = branch(save, 12, [{ intent: "node.delete", id: T }]);
+    const moved = branch(save, 13, [{ intent: "node.move", id: T, parent: X, after: null }]);
+    const r = SectionReplica.fromChanges([...base.changes(), ...del1, ...del2, ...moved], {
+      resource,
+      principal: alice,
+    }).replica;
+    expect(r.tree().retainedConcurrentEdits).toEqual([T]);
+    // A re-delete that depends on both deletions and the move supersedes both.
+    r.commit([{ intent: "node.delete", id: T }]);
+    expect(r.tree().retainedConcurrentEdits).toEqual([]);
+  });
+});
+
 describe("SectionReplica: Text, split and join (§10)", () => {
   const text = (r: SectionReplica, n: string) => view(r).nodes[n]?.text;
   const edit = (
