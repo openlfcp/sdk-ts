@@ -131,7 +131,7 @@ The official vectors belong to `openlfcp/spec` and are never copied into
 sdk-ts. `spec.lock` pins the spec version the SDK implements:
 
 ```json
-{ "tag": "mvp-0.2-baseline.6", "commit": "73c0e80ead9d3fff08beefe7b2e2cf6b86f25198" }
+{ "tag": "mvp-0.2-baseline.8", "commit": "a38fb27a89f766985e9cce1c8a5b1a49da88b898" }
 ```
 
 `conformance/spec.mjs` reads spec files with `git show <commit>:<path>`
@@ -140,7 +140,7 @@ from the sdk-ts root). It first checks that the tag still resolves to the
 locked commit and fails loudly if not. Moving to a new baseline means
 changing `spec.lock` deliberately.
 
-`mvp-0.2-baseline.6` holds `mvp-0.1-baseline.10` unchanged, which the
+`mvp-0.2-baseline.8` holds `mvp-0.1-baseline.10` unchanged, which the
 Wire and Shared Objects packages implement (with the canonical change
 encoding and operation references of SPEC-PATCH-10, SHARED-OBJECTS-PROFILE-01
 §11.3 and §11.4), and adds the Working Draft shared sections corpus that
@@ -157,7 +157,15 @@ rule 2, finding D2) — makes the checks of a change's bytes, then its actor,
 before its dependencies (§14.1), allows an Automerge author only in an actor's
 first change (§14.1, finding D5), and refuses collaborative Text in any field a
 profile does not define, not only the fields it names (SHARED-SECTIONS-PROFILE-01
-A5, finding D3); the shared sections corpus gains SS66 to SS75.
+A5, finding D3); the shared sections corpus gains SS66 to SS75. It names a
+refused Shared Sections change only when its checksum matches — a wrong-checksum
+copy is left unnamed, so a name stands for one sequence of bytes (§14.1, finding
+C1; baseline.7 drops SS45's name and adds SS76 to SS78) — and names a change
+whose header length runs past its end without reading the header (finding C3;
+baseline.8 adds SS79). It surfaces a move of a node (a write to its `placement`
+register — `node.move` or `node.resolve_placement`, §8) concurrent with a
+deletion of the node or of an effective ancestor as a retained concurrent edit
+(§9, `EDIT_UNDER_DELETED_ANCESTOR`; baseline.8 adds SS80 to SS82).
 
 ```sh
 pnpm build
