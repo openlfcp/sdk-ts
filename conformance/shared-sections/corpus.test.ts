@@ -18,6 +18,7 @@
 // facts and admission are later tasks (LFCP-02-013..017).
 
 import { fromHex, principalId, resourceId, toHex } from "@openlfcp/core";
+import { sha256 } from "@openlfcp/crypto";
 import { checkChange, checkChangeActor } from "@openlfcp/shared-objects/admission";
 import {
   deriveSectionActorId,
@@ -88,10 +89,19 @@ const load = (c: Case) => SectionDocument.fromSave(bytes(c.reference_snapshot));
 const heldHash = (h: string | { readonly change: string }) =>
   typeof h === "string" ? h : h.change;
 
+/** §14.1 (C1): the checksum (bytes 4 to 8) is the first four bytes of the chunk
+ * hash (the SHA-256 from the type byte on). A chunk whose checksum does not
+ * match is refused without a name and never decoded. */
+function checksumMatches(b: Uint8Array): boolean {
+  const h = sha256(b.subarray(8));
+  return b[4] === h[0] && b[5] === h[1] && b[6] === h[2] && b[7] === h[3];
+}
+
 /**
  * The case's admitted changes: all but the refused ones and those held
  * behind them. A refused change the corpus does not name (§14.1: not one
- * readable type 1 change chunk, SS44's compressed one) is never admitted.
+ * readable type 1 change chunk whose checksum matches — SS44's compressed one,
+ * SS45's and SS76 to SS78's broken-checksum one) is never admitted.
  */
 function admitted(c: Case): Change[] {
   const out = new Set([
@@ -99,7 +109,7 @@ function admitted(c: Case): Change[] {
     ...c.expected.held.map(heldHash),
   ]);
   return [...c.base_changes, ...c.branches.A, ...c.branches.B, ...c.after_merge].filter(
-    (ch) => !out.has(ch.change_hash) && bytes(ch)[8] === 1,
+    (ch) => !out.has(ch.change_hash) && bytes(ch)[8] === 1 && checksumMatches(bytes(ch)),
   );
 }
 
@@ -204,16 +214,28 @@ describe("shared sections corpus", () => {
               ...(ch.signer === undefined ? {} : { signer: principal(ch.signer) }),
             })),
           );
+          // §14.1 sets no order on the refusals, so compare them as a set: the
+          // delivery order decides the order the receiver reports them in.
+          const byName = (
+            xs: readonly { readonly change?: string; readonly diagnostic: string }[],
+          ) =>
+            [...xs].sort(
+              (a, b) =>
+                (a.change ?? "").localeCompare(b.change ?? "") ||
+                a.diagnostic.localeCompare(b.diagnostic),
+            );
           expect(
-            r.refused
-              .filter((x) => !x.held)
-              // The SDK's own name for each refused change (§14.1), none for an unnamed one.
-              .map((x) =>
-                x.hash === undefined
-                  ? { diagnostic: x.diagnostic }
-                  : { change: x.hash, diagnostic: x.diagnostic },
-              ),
-          ).toEqual(c.expected.refused);
+            byName(
+              r.refused
+                .filter((x) => !x.held)
+                // The SDK's own name for each refused change (§14.1), none for an unnamed one.
+                .map((x) =>
+                  x.hash === undefined
+                    ? { diagnostic: x.diagnostic }
+                    : { change: x.hash, diagnostic: x.diagnostic },
+                ),
+            ),
+          ).toEqual(byName(c.expected.refused));
           expect([...r.waiting].sort()).toEqual(c.expected.held.map(heldHash).sort());
           expect(receiver.revision()).toBe(heads.join(","));
           expect(receiver.tree().tree).toEqual(t.tree);

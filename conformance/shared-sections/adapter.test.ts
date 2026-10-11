@@ -41,10 +41,22 @@ describe("sdk-ts adapter for SHARED-SECTIONS-TEST-VECTORS-01", () => {
               after_merge: c.after_merge,
               delivery,
             });
-            // A refused change's place in the list differs by delivery; the set is what counts.
+            // A refused change's place in the list differs by delivery, and §14.1
+            // sets no order on the refusals; the set is what counts, so sort both.
+            type Refusal = { readonly change?: string; readonly diagnostic: string };
+            const byName = (xs: readonly Refusal[]): Refusal[] =>
+              [...xs].sort(
+                (a, b) =>
+                  (a.change ?? "").localeCompare(b.change ?? "") ||
+                  a.diagnostic.localeCompare(b.diagnostic),
+              );
             const keys = Object.keys(c.expected).filter((k) => k !== "errors");
-            for (const key of keys)
-              expect(result[key], `${c.id} ${delivery} ${key}`).toEqual(c.expected[key]);
+            for (const key of keys) {
+              const got = key === "refused" ? byName(result[key] as Refusal[]) : result[key];
+              const want =
+                key === "refused" ? byName(c.expected[key] as Refusal[]) : c.expected[key];
+              expect(got, `${c.id} ${delivery} ${key}`).toEqual(want);
+            }
           }),
         30_000,
       );

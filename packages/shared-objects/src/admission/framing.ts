@@ -118,7 +118,14 @@ export function refusedChangeHash(bytes: Uint8Array, error: unknown): string | u
     if ((b & 0x80) === 0) break;
   }
   if (pos + length !== bytes.length) return undefined;
-  return toHex(sha256(bytes.subarray(8)));
+  // §14.1 (baseline.7, finding C1): name the bytes only when their checksum
+  // matches. The name is the SHA-256 of the chunk from its type byte on, and
+  // the checksum (bytes 4 to 8) is the first four bytes of that same hash; a
+  // chunk with a wrong checksum would be named by its intact copy's hash, so
+  // it is left unnamed and the intact copy is checked as any change is.
+  const hash = sha256(bytes.subarray(8));
+  for (let i = 0; i < 4; i++) if (bytes[4 + i] !== hash[i]) return undefined;
+  return toHex(hash);
 }
 
 /** The operations checkChange read from the bytes (§11.3), for the references of §11.4. */
