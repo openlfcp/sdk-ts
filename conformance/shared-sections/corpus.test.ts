@@ -236,7 +236,17 @@ describe("shared sections corpus", () => {
                 ),
             ),
           ).toEqual(byName(c.expected.refused));
-          expect([...r.waiting].sort()).toEqual(c.expected.held.map(heldHash).sort());
+          // A change the corpus holds is either waiting for a dependency
+          // (r.waiting) or held for a resequence — a refusal with held = true,
+          // because another change already holds its actor's sequence number
+          // (ACTOR_EQUIVOCATION, §14.1/POST-001; SS88's twin at a taken seq).
+          const heldHashes = [
+            ...r.waiting,
+            ...r.refused
+              .filter((x) => x.held)
+              .flatMap((x) => (x.hash === undefined ? [] : [x.hash])),
+          ];
+          expect(heldHashes.sort()).toEqual(c.expected.held.map(heldHash).sort());
           expect(receiver.revision()).toBe(heads.join(","));
           expect(receiver.tree().tree).toEqual(t.tree);
           // SS55 and SS56 replay 64 changes of 8,192 Text operations several ways.

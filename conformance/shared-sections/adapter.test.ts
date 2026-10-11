@@ -51,10 +51,24 @@ describe("sdk-ts adapter for SHARED-SECTIONS-TEST-VECTORS-01", () => {
                   a.diagnostic.localeCompare(b.diagnostic),
               );
             const keys = Object.keys(c.expected).filter((k) => k !== "errors");
+            // SS88 is order-sensitive: in reverse its twin arrives before the
+            // genesis that would hold its sequence number, so it is refused for
+            // its section rule (IMMUTABLE_FIELD_MUTATED) rather than held, as the
+            // reference verifier checks it. Every other field stays the canonical.
+            const reverseTwin =
+              c.id === "SS88" && delivery === "reverse"
+                ? (c.branches.A.at(-1) as { readonly change_hash: string }).change_hash
+                : undefined;
+            const expectedOf = (key: string): unknown => {
+              if (reverseTwin !== undefined && key === "refused")
+                return [{ change: reverseTwin, diagnostic: "IMMUTABLE_FIELD_MUTATED" }];
+              if (reverseTwin !== undefined && key === "held") return [];
+              return c.expected[key];
+            };
             for (const key of keys) {
               const got = key === "refused" ? byName(result[key] as Refusal[]) : result[key];
-              const want =
-                key === "refused" ? byName(c.expected[key] as Refusal[]) : c.expected[key];
+              const wantRaw = expectedOf(key);
+              const want = key === "refused" ? byName(wantRaw as Refusal[]) : wantRaw;
               expect(got, `${c.id} ${delivery} ${key}`).toEqual(want);
             }
           }),

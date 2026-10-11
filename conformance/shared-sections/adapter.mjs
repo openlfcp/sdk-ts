@@ -137,7 +137,15 @@ export async function runCase(input) {
           : { change: x.hash, diagnostic: x.diagnostic },
       )
       .filter((x, i, all) => all.findIndex((y) => y.change === x.change) === i),
-    held: [...received.waiting].sort(),
+    // Held: waiting for a dependency, or held for a resequence — a refusal with
+    // held = true, because another change already holds its actor's sequence
+    // number (ACTOR_EQUIVOCATION, §14.1 / POST-001; SS88's twin at a taken seq).
+    held: [
+      ...received.waiting,
+      ...received.refused
+        .filter((x) => x.held)
+        .flatMap((x) => (x.hash === undefined ? [] : [x.hash])),
+    ].sort(),
     snapshot: snapshotCounts(replica.save()),
   };
 }
