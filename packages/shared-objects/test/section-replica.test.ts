@@ -819,6 +819,58 @@ describe("SectionReplica: lifecycle (§9)", () => {
   });
 });
 
+describe("SectionReplica: a move concurrent with a deletion is retained (§9)", () => {
+  // §9, §14.3 EDIT_UNDER_DELETED_ANCESTOR: a move (a write to a node's
+  // `placement` register — node.move or node.resolve_placement) concurrent
+  // with a deletion of the node or of an effective ancestor is a retained
+  // concurrent edit, the same as a title edit. Concurrency is by the change
+  // dependencies, so a move causally after the deletion is not retained.
+  // These are SS80 to SS82 of SHARED-SECTIONS-TEST-VECTORS-01 (baseline.8),
+  // built here from the authoring API so they stay green at the pinned .7.
+  function merge(aIntents: SectionIntent[], bIntents: SectionIntent[]): SectionReplica {
+    const base = built();
+    const a = SectionReplica.fromSave(base.save(), { resource, principal: alice }, "local-state");
+    const b = SectionReplica.fromSave(base.save(), { resource, principal: bob }, "local-state");
+    for (const i of aIntents) a.commit([i]);
+    for (const i of bIntents) b.commit([i]);
+    return SectionReplica.fromChanges([...a.changes(), ...b.changes()], {
+      resource,
+      principal: alice,
+    }).replica;
+  }
+
+  it("retains a move of a node concurrent with that node's own deletion (SS80's shape)", () => {
+    const r = merge(
+      [{ intent: "node.move", id: T, parent: X, after: null }],
+      [{ intent: "node.delete", id: T }],
+    );
+    const t = r.tree();
+    expect(t.classification).toBe("VALID");
+    expect(t.hidden).toEqual([T, P].sort());
+    expect(t.retainedConcurrentEdits).toEqual([T]);
+  });
+
+  it("retains a move under a node concurrent with that node's deletion (SS81's shape)", () => {
+    const r = merge(
+      [{ intent: "node.move", id: T, parent: Y, after: null }],
+      [{ intent: "node.delete", id: Y }],
+    );
+    const t = r.tree();
+    expect(t.classification).toBe("VALID");
+    expect(t.hidden).toEqual([T, P, Y].sort());
+    expect(t.retainedConcurrentEdits).toEqual([T]);
+  });
+
+  it("does not retain a move causally after a deletion (SS82's shape: no diagnostic)", () => {
+    const r = built();
+    r.commit([{ intent: "node.move", id: T, parent: X, after: null }]);
+    r.commit([{ intent: "node.delete", id: T }]);
+    const t = r.tree();
+    expect(t.hidden).toEqual([T, P].sort());
+    expect(t.retainedConcurrentEdits).toEqual([]);
+  });
+});
+
 describe("SectionReplica: Text, split and join (§10)", () => {
   const text = (r: SectionReplica, n: string) => view(r).nodes[n]?.text;
   const edit = (

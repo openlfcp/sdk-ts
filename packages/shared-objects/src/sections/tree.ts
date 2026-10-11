@@ -298,8 +298,9 @@ export function deriveTree(
  * the node or of an ancestor, from the change history. A change deletes
  * when the last lifecycle value it writes to an owner (a Task node's Task,
  * another node itself) is "deleted"; content is a node's creation, an
- * operation on its Text, or a Task's title or status. Two changes are
- * concurrent when neither is in the other's dependencies.
+ * operation on its Text, a Task's title or status, or a move of the node
+ * (a write to its `placement` register — node.move or node.resolve_placement,
+ * §8). Two changes are concurrent when neither is in the other's dependencies.
  */
 function retainedEdits(
   doc: A.Doc<unknown>,
@@ -315,8 +316,12 @@ function retainedEdits(
   const textOf = new Map<string, string>();
   const ownerOf = new Map<string, string>();
   const taskOf = new Map<string, string>();
+  // The object ID of each node's own map, for a move written to its `placement`.
+  const nodeMapOf = new Map<string, string>();
   for (const id of Object.keys(nodes)) {
     const n = nodes[id] as AMap;
+    const nodeMap = A.getObjectId(n);
+    if (nodeMap !== null) nodeMapOf.set(nodeMap, id);
     const text = A.getObjectId(n, "text");
     if (text !== null) textOf.set(text, id);
     const isTask = str(n.kind) === "task";
@@ -347,6 +352,11 @@ function retainedEdits(
       const task = taskOf.get(op.obj);
       if (task !== undefined && hidden.has(task) && (key === "title" || key === "status"))
         touched.add(task);
+      // §8, §9: a move writes the node's `placement` register (node.move or
+      // node.resolve_placement). A creation also writes it and is already
+      // counted above; what this adds is a move of an existing node.
+      const moved = nodeMapOf.get(op.obj);
+      if (moved !== undefined && key === "placement" && hidden.has(moved)) touched.add(moved);
       const owner = ownerOf.get(op.obj);
       if (owner !== undefined && key === "lifecycle") lastLifecycle.set(owner, value);
     }
