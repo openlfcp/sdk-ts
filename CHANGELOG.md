@@ -6,9 +6,10 @@ remove or rename any.
 
 ## 0.2.0-beta.3 — 2026-10-11
 
-The SDK is read at spec `mvp-0.2-baseline.7`, which refines how a refused
-Shared Sections change is named (SHARED-SECTIONS-PROFILE-01 §14.1). Published
-under the npm dist-tag `beta`, like the earlier 0.2 betas.
+The SDK is read at spec `mvp-0.2-baseline.8`. It refines how a refused
+Shared Sections change is named (SHARED-SECTIONS-PROFILE-01 §14.1) and surfaces
+a move concurrent with a deletion that hides it (§9). Published under the npm
+dist-tag `beta`, like the earlier 0.2 betas.
 
 ### Fixed
 
@@ -22,7 +23,13 @@ under the npm dist-tag `beta`, like the earlier 0.2 betas.
 - A refused change whose inner header holds a length running past the chunk's
   end is now named too (finding C3): §14.1 names a type 1 chunk from its outer
   length and checksum without reading the header, and `refusedChangeHash` no
-  longer bails on that malformed header.
+  longer bails on that malformed header. At baseline.8 SS79 covers it: such a
+  change is refused with `INVALID_AUTOMERGE_BYTES` and named.
+- A move of a node (a write to its `placement` register — `node.move` or
+  `node.resolve_placement`, SHARED-SECTIONS-PROFILE-01 §8) concurrent with a
+  deletion of the node or of an effective ancestor is now a retained concurrent
+  edit (`EDIT_UNDER_DELETED_ANCESTOR`, §9), the same as a title or Text edit;
+  a move causally after the deletion is not. At baseline.8 SS80 to SS82 cover it.
 
 ## 0.2.0-beta.2 — 2026-10-11
 
