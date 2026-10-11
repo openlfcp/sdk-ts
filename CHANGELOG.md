@@ -4,6 +4,26 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.0-beta.4 — 2026-10-11
+
+The SDK is read at spec `mvp-0.2-baseline.9`, which refines how a Shared
+Sections re-deletion clears a retained concurrent edit
+(SHARED-SECTIONS-PROFILE-01 §9). Published under the npm dist-tag `beta`,
+like the earlier 0.2 betas.
+
+### Fixed
+
+- A retained concurrent edit (`EDIT_UNDER_DELETED_ANCESTOR`, §9) is now
+  compared only with the deletions the lifecycle register still holds. A later
+  write to the same register — one that has the deletion in its dependencies —
+  supersedes it, so deleting the node again clears the attention a concurrent
+  edit or move raised. Two concurrent deletions supersede neither and both
+  count, and the writes are read from each change's operations so a deletion
+  merged after a concurrent one still counts. At baseline.9 SS83 to SS87 cover
+  it: SS83 and SS85 clear the attention by deleting again, SS84 keeps an edit
+  concurrent with the new deletion, and SS86 (surfaced) and SS87 (cleared) are
+  the two-concurrent-deletions pair.
+
 ## 0.2.0-beta.3 — 2026-10-11
 
 The SDK is read at spec `mvp-0.2-baseline.8`. It refines how a refused
