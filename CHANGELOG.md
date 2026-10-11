@@ -4,6 +4,26 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.0-beta.3 — 2026-10-11
+
+The SDK is read at spec `mvp-0.2-baseline.7`, which refines how a refused
+Shared Sections change is named (SHARED-SECTIONS-PROFILE-01 §14.1). Published
+under the npm dist-tag `beta`, like the earlier 0.2 betas.
+
+### Fixed
+
+- A refused change is named by its hash (the SHA-256 of the chunk from its type
+  byte on) only when its checksum matches (finding C1). The checksum is the
+  first four bytes of that hash, so a wrong-checksum copy was named by its
+  intact copy's hash; it is now left unnamed, and the intact copy is checked on
+  its own. At baseline.7 SS45 loses its name and SS76 to SS78 cover the twin
+  copies; SS78's intact copy signed by another Principal is refused with
+  `CHANGE_ACTOR_MISMATCH`.
+- A refused change whose inner header holds a length running past the chunk's
+  end is now named too (finding C3): §14.1 names a type 1 chunk from its outer
+  length and checksum without reading the header, and `refusedChangeHash` no
+  longer bails on that malformed header.
+
 ## 0.2.0-beta.2 — 2026-10-11
 
 The SDK is read at spec `mvp-0.2-baseline.6`. This beta adds the last of the
