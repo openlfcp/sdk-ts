@@ -105,6 +105,9 @@ const ERIN = party(112);
 const FRANK = party(132);
 const GRACE = party(152);
 const HANK = party(172);
+const IVY = party(192);
+const JACK = party(212);
+const KATE = party(232);
 const R = resourceId(bytes32(171));
 const DEK0 = importResourceDEK(bytes32(91));
 const TASK = "017f22e2-79b0-7cc3-98c4-dc0c0c0739a0" as ObjectId;
@@ -139,6 +142,7 @@ class Side {
     url: string,
     replica: SharedObjectsReplica,
     stores?: { storage: InMemoryLfcpStorage; secrets: InMemorySecretStore },
+    webSocket?: WebSocketFactory,
   ) {
     this.storage = stores?.storage ?? new InMemoryLfcpStorage();
     this.secrets = stores?.secrets ?? new InMemorySecretStore();
@@ -167,6 +171,7 @@ class Side {
       now: () => Date.now(),
       reconnect: () => 200,
       antiEntropyMs: 1000,
+      ...(webSocket === undefined ? {} : { webSocket }),
     });
     this.client.on((e) => this.events.push(e));
     this.#stopDriver = startSyncDriver(
@@ -568,7 +573,103 @@ describe("invitations ↔ Rust reference server (live, LFCP-053)", () => {
         expect(log).not.toContain(uri);
         expect(log).not.toContain(uri.slice(uri.indexOf("#secret=") + 8));
       }
+      // 5. Two invitations created back to back, before either is acknowledged
+      //    (LFCP-02-A): the second chains on the first (§47) instead of
+      //    colliding on the committed head, so both land and both links join.
+      const seq5 = await owner.seq();
+      const inviteA = await createInvitation({
+        storage: owner.storage,
+        resourceId: R,
+        inviter: OWNER.signer,
+        dek: DEK0,
+        endpoints: [url],
+      });
+      const inviteB = await createInvitation({
+        storage: owner.storage,
+        resourceId: R,
+        inviter: OWNER.signer,
+        dek: DEK0,
+        endpoints: [url],
+      });
+      expect(
+        (await owner.storage.outbound.list(R)).filter((i) => i.kind === "control-record"),
+      ).toHaveLength(2);
+      owner.client.flush();
+      await waitFor("both back-to-back invitations ACKed", () => owner.queueEmpty());
+      await waitFor(
+        "OWNER holds both back-to-back grants",
+        async () => (await owner.seq()) === (seq5 ?? 0n) + 2n,
+      );
+      expect(
+        (await joiner(IVY, inviteA.link, undefined, undefined, undefined, [PROFILE_ID]).accept())
+          .kind,
+      ).toBe("claimed");
+      expect(
+        (await joiner(JACK, inviteB.link, undefined, undefined, undefined, [PROFILE_ID]).accept())
+          .kind,
+      ).toBe("claimed");
+
+      // 6. A re-propose on a moved head: a second OWNER device builds an
+      //    invitation on the head it knows, that CONTROL_PUT is held while the
+      //    first device commits a competing invitation, so the server refuses
+      //    it with CONTROL_HEAD_MISMATCH. The device re-proposes the grant on
+      //    the new head (a new record ID, the SAME Invitation Principal and
+      //    claim parameters) and re-seals its Key Package; the link copied
+      //    BEFORE the re-propose still joins (resolved by its subject, §18.2).
+      let releaseHeld: (v: unknown) => void = () => undefined;
+      const heldGate = new Promise((r) => {
+        releaseHeld = r;
+      });
+      let onHeld: (v: unknown) => void = () => undefined;
+      const wasHeld = new Promise((r) => {
+        onHeld = r;
+      });
+      const deviceB = new Side(
+        OWNER,
+        url,
+        SharedObjectsReplica.empty({ resource: R, principal: OWNER.signer.descriptor.principalId }),
+        undefined,
+        holdingControlPut(heldGate, () => onHeld(true)),
+      );
+      sides.push(deviceB);
+      await deviceB.secrets.put(dekSecretRef(R, dataEpoch(0n)), exportSecretKeyBytes(DEK0));
+      deviceB.client.start();
+      await waitFor("OWNER-B READY", () => deviceB.client.connectionState === "READY");
+      deviceB.open();
+      await waitFor("OWNER-B LIVE", () => deviceB.client.resourceState(R) === "LIVE");
+      // Device B authors on the head it knows, then its CONTROL_PUT is held.
+      const bInvite = await createInvitation({
+        storage: deviceB.storage,
+        resourceId: R,
+        inviter: OWNER.signer,
+        dek: DEK0,
+        endpoints: [url],
+      });
+      deviceB.client.flush();
+      await wasHeld;
+      // The first device commits a competing invitation, moving the head.
+      await invite();
+      // Releasing B's put: the server refuses it, and B re-proposes on the new head.
+      releaseHeld(undefined);
+      await waitFor("OWNER-B re-proposed its grant", () =>
+        deviceB.events.some(
+          (e) => e.type === "repropose" && e.outcomes.some((o) => o.kind === "reproposed"),
+        ),
+      );
+      await waitFor("OWNER-B's re-proposed grant landed", () => deviceB.queueEmpty());
+      const reproposed = deviceB.events
+        .flatMap((e) => (e.type === "repropose" ? e.outcomes : []))
+        .find((o) => o.kind === "reproposed");
+      if (reproposed?.kind !== "reproposed") throw new Error("no re-proposed outcome");
+      // The grant's record ID changed, but the link (its old ID) still joins.
+      expect(toHex(reproposed.newId)).not.toBe(toHex(bInvite.grantId));
+      expect(
+        (await joiner(KATE, bInvite.link, undefined, undefined, undefined, [PROFILE_ID]).accept())
+          .kind,
+      ).toBe("claimed");
+
       expect(owner.events.filter((e) => e.type === "error")).toEqual([]);
+      expect(deviceB.events.filter((e) => e.type === "error")).toEqual([]);
     } catch (e) {
       throw new Error(
         `${e instanceof Error ? e.message : String(e)}\n--- server log (tail) ---\n${server.log().slice(-4000)}`,

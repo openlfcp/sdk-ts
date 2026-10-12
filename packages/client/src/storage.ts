@@ -23,6 +23,7 @@ import {
 } from "@openlfcp/storage";
 import {
   type ChainResult,
+  parseControlRecord,
   parseDataUnit,
   type SeenRecord,
   type SeenUnits,
@@ -158,6 +159,40 @@ export async function loadControlChain(
       `the stored Control Records validate to sequence ${result.state.seq}, not the stored head at ${head.controlSeq} (local corruption)`,
     );
   return result;
+}
+
+/**
+ * The client's LOCAL Control Chain: the committed chain extended by this
+ * client's own queued Control Records that are still live (not yet
+ * acknowledged, and not blocked). A writer chains a new record on this
+ * local head, not the committed head, so records authored back to back
+ * (e.g. two invitations) carry consecutive sequence numbers and a linear
+ * `previous` instead of colliding on the committed head (§47,
+ * CONTROL_HEAD_MISMATCH). Blocked items are excluded: they will not land as
+ * they are, so nothing is chained on them (the re-proposal re-authors them).
+ *
+ * Returns the committed chain unchanged when there are no live pending
+ * records, `undefined` when the Resource has no stored chain, and the
+ * committed chain when the pending records do not extend it linearly (they
+ * are then left for the re-proposal to sort out, and the caller sees the
+ * committed head).
+ */
+export async function localControlChain(
+  storage: Pick<LfcpStorage, "control" | "outbound">,
+  resource: ResourceId,
+): Promise<ChainResult | undefined> {
+  const committed = await loadControlChain(storage, resource);
+  if (committed === undefined || committed.kind !== "linear") return committed;
+  const pending = (await storage.outbound.list(resource))
+    .filter((i) => i.kind === "control-record" && i.blocked === null)
+    .map((i) => parseControlRecord(i.bytes))
+    .sort((a, b) => (a.payload.controlSeq < b.payload.controlSeq ? -1 : 1));
+  if (pending.length === 0) return committed;
+  const extended = validateControlChain([
+    ...committed.records.map((r) => r.signed.bytes),
+    ...pending.map((p) => p.signed.bytes),
+  ]);
+  return extended.kind === "linear" ? extended : committed;
 }
 
 /**

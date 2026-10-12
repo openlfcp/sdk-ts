@@ -5,6 +5,7 @@
 // Package and reads what OWNER writes after it, and BOB never gets that
 // edit.
 
+import { createInvitation } from "@openlfcp/client";
 import { type ObjectId, resourceId, toHex } from "@openlfcp/core";
 import { importResourceDEK } from "@openlfcp/crypto";
 import {
@@ -130,4 +131,63 @@ describe("revokeAccess ↔ Rust reference server (live, LFCP-02-060)", () => {
       );
     }
   }, 180_000);
+
+  it("refuses a revoke while a Control Record is pending, then succeeds after it lands (LFCP-02-A, B)", async (ctx) => {
+    if (server === undefined) {
+      console.warn(`SKIPPED: revoke-while-pending (${skip})`);
+      ctx.skip();
+      return;
+    }
+    const url = server.url;
+    const R2 = resourceId(bytes32(191));
+    const owner = new Side({
+      url,
+      resource: R2,
+      who: OWNER,
+      profile: new SharedObjectsDataProfile(
+        SharedObjectsReplica.create({
+          resource: R2,
+          principal: OWNER.signer.descriptor.principalId,
+        }).replica,
+      ),
+    });
+    try {
+      const genesis = await createResource(owner, url, DEK0);
+      owner.start({ open: false });
+      await waitFor("OWNER READY (R2)", () => owner.client.connectionState === "READY");
+      await owner.client.host(genesis.bytes);
+      owner.open();
+      await waitFor("OWNER LIVE (R2)", () => owner.client.resourceState(R2) === "LIVE");
+      await grantAndKey(owner, BOB, DEK0);
+      await waitFor("BOB granted (R2)", () => owner.controlSettled(1n), 30_000);
+
+      // A pending (queued, unacknowledged) invitation: revokeAccess rotates
+      // the Data Epoch, so it is serialized (B) rather than chained onto the
+      // pending grant. It is refused and nothing is queued.
+      await createInvitation({
+        storage: owner.storage,
+        resourceId: R2,
+        inviter: OWNER.signer,
+        dek: DEK0,
+        endpoints: [url],
+      });
+      expect(await owner.client.revokeAccess(R2, BOB.signer.descriptor.principalId)).toMatchObject({
+        kind: "refused",
+        reason: "control-pending",
+      });
+
+      // Once the invitation lands, the retry succeeds (the guard is temporary).
+      owner.client.flush();
+      await waitFor("invitation ACKed (R2)", () => owner.queueEmpty(), 30_000);
+      await waitFor("OWNER holds the grant (R2)", () => owner.controlSettled(2n), 30_000);
+      const retry = await owner.client.revokeAccess(R2, BOB.signer.descriptor.principalId);
+      expect(retry.kind).toBe("queued");
+    } catch (e) {
+      throw new Error(
+        `${e instanceof Error ? e.message : String(e)}\n--- server log (tail) ---\n${server.log().slice(-4000)}`,
+      );
+    } finally {
+      await owner.stop();
+    }
+  }, 120_000);
 });

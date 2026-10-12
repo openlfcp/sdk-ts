@@ -90,6 +90,7 @@ import type { AckOutcome, NackOutcome, OutboundQueue, StaleOutboundUnit } from "
 import { resourceSyncState, snapshotFrontier } from "./outbound.js";
 import { controlRecordWrites, createQueuedSnapshot, keyPackageWrites } from "./queue.js";
 import { intentsHash, OperationIdReusedError, type Receipt, receiptOf } from "./receipts.js";
+import { type ReproposeOutcome, reproposeControlRecords } from "./repropose.js";
 import {
   type ResourcePhase,
   type ResourcePhaseEvent,
@@ -402,6 +403,18 @@ export type SyncEvent =
       readonly reason?: string;
     }
   /**
+   * This client's own Control Records that a moved head refused
+   * (CONTROL_HEAD_MISMATCH) were re-proposed on the current head, or dropped
+   * when no longer authorized or meaningful (repropose.ts). One outcome per
+   * record; a copied invitation link keeps working, as a re-proposed grant
+   * keeps the same Invitation Principal and claim parameters.
+   */
+  | {
+      readonly type: "repropose";
+      readonly resourceId: ResourceId;
+      readonly outcomes: readonly ReproposeOutcome[];
+    }
+  /**
    * The server refused the Resource for good (see ResourceRefusal): it is
    * CLOSED and is not opened again until open() is called for it.
    */
@@ -598,6 +611,8 @@ export class SyncClient {
   readonly #sentAt = new Map<string, number>();
   readonly #requestTimeoutMs: number;
   readonly #listeners = new Set<(event: SyncEvent) => void>();
+  /** Re-proposal attempts per Control Record (item ID hex), bounded; cleared on ACK (repropose.ts). */
+  readonly #reproposeAttempts = new Map<string, number>();
   readonly #antiEntropyMs: number;
   /** The crash-loop breaker for Snapshot loads (EngineGuard). */
   readonly #snapshots: EngineGuard;
@@ -1653,12 +1668,40 @@ export class SyncClient {
       }
     }
     await this.#o.outbound.controlSynced(R);
+    // §47, §21: on the fresh head, re-propose our own Control Records that a
+    // moved head refused (CONTROL_HEAD_MISMATCH) and recover any persisted
+    // "repropose" items (a restart, or an older SDK). Runs here, under the
+    // serial lock, on every control sync — so it covers both the start of an
+    // open and a sync triggered by a repropose NACK; it is idempotent.
+    await this.#reproposeControl(ctx);
     if (ctx.state === "CONTROL_SYNC") {
       this.#move(ctx, "CONTROL_COMPLETE");
       this.#requestKeys(ctx, this.#o.now());
     } else if (ctx.state === "KEY_BLOCKED" && epochsChanged) {
       this.#requestKeys(ctx, this.#o.now());
     }
+  }
+
+  /**
+   * Re-proposes this client's blocked "repropose" Control Records of `ctx`'s
+   * Resource on the current local head, re-sealing their dependent Key
+   * Packages, and flushes the re-authored objects. Bounded and idempotent
+   * (repropose.ts); a dropped record (no longer authorized, or a dependent's
+   * key is not held) is surfaced so the application can act.
+   */
+  async #reproposeControl(ctx: ResourceContext): Promise<void> {
+    const R = ctx.binding.resourceId;
+    const { outcomes } = await reproposeControlRecords({
+      storage: this.#o.storage,
+      secrets: this.#o.secrets,
+      signer: this.#o.signer,
+      resource: R,
+      queue: this.#o.outbound,
+      attempts: this.#reproposeAttempts,
+    });
+    if (outcomes.length === 0) return;
+    this.#emit({ type: "repropose", resourceId: R, outcomes });
+    if (outcomes.some((o) => o.kind === "reproposed")) await this.#flush(ctx);
   }
 
   // -------------------------------------------------------------------------
@@ -2454,10 +2497,13 @@ export class SyncClient {
     for (const [R, ops, finals] of changed) await this.#reportBatches(R, ops.keys(), finals);
     this.#emit({ type: "ack", outcome });
     // Our own Control Record was committed: catch up, since the server does not push it back to us.
-    if (m.body.requestType === MESSAGE_TYPE.CONTROL_PUT && outcome.acked.length > 0)
+    if (m.body.requestType === MESSAGE_TYPE.CONTROL_PUT && outcome.acked.length > 0) {
+      // A committed record is settled: clear its bounded re-proposal count.
+      for (const id of outcome.acked) this.#reproposeAttempts.delete(toHex(id));
       for (const ctx of this.#resources.values())
         if (ctx.state === "LIVE") this.#refreshControl(ctx);
         else ctx.controlStale = true;
+    }
   }
 
   /**
@@ -2511,9 +2557,27 @@ export class SyncClient {
       if (ctx !== undefined) ctx.lossReason ??= "unknown-previous";
     }
     this.#emit({ type: "nack", outcome });
+    // MISSING_DEPENDENCY: the server lacks our Control records; a sync releases the held puts.
     if (outcome.kind === "needs-control-sync")
       for (const ctx of this.#resources.values())
         if (ctx.state === "LIVE") this.#refreshControl(ctx);
+    // CONTROL_HEAD_MISMATCH: re-author the refused record on the current head
+    // (§47, §21). When we already hold that head (e.g. the winning record was
+    // pushed to us live, §65), a CONTROL_GET would return nothing and never
+    // reach #controlComplete, so re-propose here directly; otherwise sync
+    // first and #controlComplete drives it.
+    if (outcome.kind === "repropose")
+      for (const ctx of this.#resources.values()) {
+        if (ctx.state !== "LIVE") continue;
+        const head = await this.#o.storage.control.head(ctx.binding.resourceId);
+        if (
+          outcome.currentHead !== null &&
+          head !== undefined &&
+          bytesEqual(head.head, outcome.currentHead)
+        )
+          await this.#reproposeControl(ctx);
+        else this.#refreshControl(ctx);
+      }
     // §51.1: the server lost what our unit names. Its DATA_HAVE answer
     // starts the offer (§68.1), which releases the held items.
     if (outcome.kind === "needs-offer") {

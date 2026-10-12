@@ -24,9 +24,12 @@ import {
   assembleInviteUri,
   type ChainResult,
   type ControlHeadRef,
+  type ControlState,
   createMessage,
   ERROR_CODE,
+  type Grant,
   invitationPrincipal,
+  isGrantActive,
   type LfcpMessage,
   type PrincipalDescriptor,
   parseControlRecord,
@@ -49,7 +52,7 @@ import {
 } from "./claim-journal.js";
 import { LfcpConnection, type WebSocketFactory } from "./connection.js";
 import { queueControlRecord, queueKeyPackage } from "./queue.js";
-import { loadControlChain, saveControlChain } from "./storage.js";
+import { loadControlChain, localControlChain, saveControlChain } from "./storage.js";
 
 /**
  * Link invitations and the one-time capability claim (LFCP-WIRE-01 §18,
@@ -125,8 +128,39 @@ const fail = (code: LfcpErrorCode, why: string): never => {
 
 type Linear = Extract<ChainResult, { kind: "linear" }>;
 
+/**
+ * Resolves the invitation grant the claimant will reference (§18.1, §18.2).
+ * The link names the record the inviter first queued; a re-propose on a
+ * moved head gives the grant a new record ID while keeping the same
+ * Invitation Principal and claim parameters, so the grant is looked up by
+ * its ID first and, failing that, by its subject: the single active
+ * invitation grant (invite/claim) whose subject is the secret's Invitation
+ * Principal. Returns the on-chain grant ID, the grant and the claim signer.
+ * Throws MISSING_DEPENDENCY when no such grant is on the chain.
+ */
+function resolveInvitationGrant(
+  state: ControlState,
+  linkGrantId: ControlRecordId,
+  secret: InvitationSecret,
+): { readonly grantId: ControlRecordId; readonly grant: Grant; readonly claimSigner: Signer } {
+  const principal = invitationPrincipal(secret);
+  const byId = state.grants.get(toHex(linkGrantId));
+  const grant =
+    byId ??
+    [...state.grants.values()].find(
+      (g) =>
+        bytesEqual(g.subject, principal.principalId) &&
+        g.abilities.includes(ABILITY.INVITE_CLAIM) &&
+        isGrantActive(state, g.id),
+    ) ??
+    fail("MISSING_DEPENDENCY", "the invitation grant is not on the chain");
+  const grantId = grant.id;
+  const claimSigner = verifyInvitationSecret(state, grantId, secret);
+  return Object.freeze({ grantId, grant, claimSigner });
+}
+
 export interface CreateInvitationOptions {
-  readonly storage: Pick<LfcpStorage, "control" | "commit">;
+  readonly storage: Pick<LfcpStorage, "control" | "commit" | "outbound">;
   readonly resourceId: ResourceId;
   /** The issuer: needs the authority to grant the abilities (§17.2) and key/distribute (§25.2). */
   readonly inviter: Signer;
@@ -164,7 +198,11 @@ export async function createInvitation(
   options: CreateInvitationOptions,
 ): Promise<CreatedInvitation> {
   const R = options.resourceId;
-  const stored = await loadControlChain(options.storage, R);
+  // §47: build the grant on the LOCAL head (the committed chain extended by
+  // this client's own still-queued records), so an invitation made before an
+  // earlier one is acknowledged chains on it instead of colliding on the
+  // committed head (CONTROL_HEAD_MISMATCH).
+  const stored = await localControlChain(options.storage, R);
   const view: Linear =
     stored?.kind === "linear"
       ? stored
@@ -522,11 +560,16 @@ export async function acceptInvitation(
       throw new Unavailable("the Resource has no single Control Head: no claim is made (§42)");
     let chain = await fetchChain(s, R, [], { seq: (heads[0] as ControlHeadRef).seq });
 
-    // §18.2: the secret's Principal must be the grant's subject before the secret is used further.
-    const claimSigner = verifyInvitationSecret(chain.state, invitation.grantId, secret);
-    const grant =
-      chain.state.grants.get(toHex(invitation.grantId)) ??
-      fail("MISSING_DEPENDENCY", "the invitation grant is not on the chain");
+    // §18.2: the secret's Principal must be the grant's subject before the
+    // secret is used further. The link names the grant the inviter first
+    // queued; if that grant was re-proposed on a moved head (a new record ID,
+    // the same Invitation Principal and claim parameters), it is resolved by
+    // its subject, so a link copied before the re-propose still joins (§18.1).
+    const resolved = resolveInvitationGrant(chain.state, invitation.grantId, secret);
+    const claimSigner = resolved.claimSigner;
+    const grant = resolved.grant;
+    // The claim references the grant that is actually on the chain.
+    const grantId = resolved.grantId;
 
     // §27: a profile the caller cannot open is refused before the DEK and the claim.
     if (
@@ -582,7 +625,7 @@ export async function acceptInvitation(
         { resourceId: R, controlSeq: chain.state.seq + 1n, prevControlId: chain.state.head },
         {
           type: "CAPABILITY_CLAIM",
-          invitationGrantId: invitation.grantId,
+          invitationGrantId: grantId,
           claimant: options.claimant.signer.descriptor,
           abilities,
         },

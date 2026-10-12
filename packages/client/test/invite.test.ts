@@ -157,6 +157,62 @@ describe("createInvitation (§18, §73)", () => {
     );
     expect(await storage.outbound.list(R)).toEqual([]);
   });
+
+  it("chains a second invitation on the first still-queued one (§47, LFCP-02-A)", async () => {
+    const { storage, chain } = await owned();
+    const first = await createInvitation({
+      storage,
+      resourceId: R,
+      inviter: OWNER,
+      dek: DEK,
+      endpoints: [URL],
+      secret: InvitationSecret.fromKeys(
+        importSigningKey(bytes32(5)),
+        importAgreementKey(bytes32(6)),
+      ),
+    });
+    const second = await createInvitation({
+      storage,
+      resourceId: R,
+      inviter: OWNER,
+      dek: DEK,
+      endpoints: [URL],
+      secret: InvitationSecret.fromKeys(
+        importSigningKey(bytes32(55)),
+        importAgreementKey(bytes32(66)),
+      ),
+    });
+    const queued = await storage.outbound.list(R);
+    expect(queued.map((q) => q.kind)).toEqual([
+      "control-record",
+      "key-package",
+      "control-record",
+      "key-package",
+    ]);
+    const g1 = parseControlRecord(queued[0]?.bytes as Uint8Array);
+    const g2 = parseControlRecord(queued[2]?.bytes as Uint8Array);
+    // The second grant builds on the first, not the committed head: consecutive
+    // sequence numbers and a linear `previous`, so neither collides on commit.
+    expect([g1.payload.controlSeq, g2.payload.controlSeq]).toEqual([2n, 3n]);
+    expect(toHex(g2.payload.prevControlId as Uint8Array)).toBe(toHex(first.grantId));
+    expect(toHex(g1.signed.id)).toBe(toHex(first.grantId));
+    expect(toHex(g2.signed.id)).toBe(toHex(second.grantId));
+    // Both grants and both Key Packages validate as one linear extension.
+    const extended = validateControlChain([
+      ...chain.records.map((r) => r.signed.bytes),
+      g1.signed.bytes,
+      g2.signed.bytes,
+    ]);
+    if (extended.kind !== "linear") throw new Error(extended.kind);
+    for (const [kp, grantId] of [
+      [queued[1], first.grantId],
+      [queued[3], second.grantId],
+    ] as const) {
+      const pkg = parseKeyPackage(kp?.bytes as Uint8Array);
+      expect(toHex(pkg.payload.controlHead)).toBe(toHex(grantId));
+      expect(verifyKeyPackage(extended, pkg).kind).toBe("authorized");
+    }
+  });
 });
 
 describe("acceptInvitation (§18.2)", () => {

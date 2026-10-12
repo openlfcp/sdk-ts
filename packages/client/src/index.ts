@@ -92,6 +92,12 @@ export {
   releaseReceipt,
 } from "./receipts.js";
 export {
+  type ReproposeDropReason,
+  type ReproposeOutcome,
+  type ReproposeResult,
+  reproposeControlRecords,
+} from "./repropose.js";
+export {
   type ResourcePhase,
   type ResourcePhaseEvent,
   resourcePhaseTransition,
@@ -123,6 +129,7 @@ export {
   dekResolver,
   latestAcceptedOwnUnit,
   loadControlChain,
+  localControlChain,
   StoredSeenUnits,
   saveControlChain,
   saveControlConflict,

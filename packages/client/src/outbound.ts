@@ -802,6 +802,16 @@ export class OutboundQueue {
     return out;
   }
 
+  /**
+   * Drops all in-memory tracking of these items, which a re-proposal has
+   * replaced with re-authored ones in storage (repropose.ts). The items are
+   * already dequeued in that same transaction; this clears any stale flight,
+   * solo or awaiting-control state so the queue never looks for them again.
+   */
+  release(ids: readonly Hash32[]): void {
+    for (const id of ids) this.#forget(id);
+  }
+
   /** Removes a blocked item once the application has dealt with it (e.g. re-proposed or re-applied). */
   async discard(itemId: Hash32): Promise<void> {
     const item = await this.#storage.outbound.get(itemId);
