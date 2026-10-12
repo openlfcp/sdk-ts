@@ -110,6 +110,26 @@ export interface SideOptions<P extends SideProfile = SharedObjectsDataProfile> {
   readonly checkpoints?: boolean;
   /** The WebSocket to use (default the platform's): e.g. a tap or a fault injector. */
   readonly webSocket?: WebSocketFactory;
+  /**
+   * Periodic anti-entropy interval (§69), LIVE Resources only. Default 1 s, so
+   * a lost live push recovers quickly in tests. Set it high to turn anti-entropy
+   * off, when a test must prove a request-timeout retransmit drives recovery and
+   * not the periodic pull.
+   */
+  readonly antiEntropyMs?: number;
+  /**
+   * How long a sent request (DATA_GET, SNAPSHOT…) waits for its reply on a live
+   * connection before it is issued again (§70). Left unset = the SDK default
+   * (15 s); a test lowers it to keep its retransmit fast and bounded.
+   */
+  readonly requestTimeoutMs?: number;
+  /**
+   * The OutboundQueue request timeout (§70): how long a sent DATA_PUT waits for
+   * its ACK before it is retransmitted, doubling per unanswered send. Left unset
+   * = the SDK default (10 s to 60 s); a test lowers it so a dropped put or lost
+   * ACK recovers in about a second instead of the production backoff.
+   */
+  readonly outboundRequestTimeout?: { readonly baseMs: number; readonly maxMs: number };
 }
 
 /** One client: storage, secrets, replica, applier, queue, sync session and its driver. */
@@ -133,7 +153,12 @@ export class Side<P extends SideProfile = SharedObjectsDataProfile> {
     this.who = o.who;
     this.storage = o.storage ?? new InMemoryLfcpStorage();
     this.secrets = o.secrets ?? new InMemorySecretStore();
-    this.outbound = new OutboundQueue({ storage: this.storage });
+    this.outbound = new OutboundQueue({
+      storage: this.storage,
+      ...(o.outboundRequestTimeout === undefined
+        ? {}
+        : { requestTimeout: o.outboundRequestTimeout }),
+    });
     this.profile = o.profile;
     this.#snapshots = o.snapshots ?? true;
     this.#commit = o.commit;
@@ -165,7 +190,8 @@ export class Side<P extends SideProfile = SharedObjectsDataProfile> {
       outbound: this.outbound,
       now: () => Date.now(),
       reconnect: () => 200,
-      antiEntropyMs: 1000,
+      antiEntropyMs: o.antiEntropyMs ?? 1000,
+      ...(o.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: o.requestTimeoutMs }),
       ...(o.webSocket === undefined ? {} : { webSocket: o.webSocket }),
     });
     this.client.on((e) => this.events.push(e));

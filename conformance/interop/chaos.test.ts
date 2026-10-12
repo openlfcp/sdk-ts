@@ -69,7 +69,14 @@ import {
   validateControlChain,
 } from "@openlfcp/wire";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createResource, grantAndKey, type Party, Side, waitFor } from "./harness.js";
+import {
+  createResource,
+  grantAndKey,
+  type Party,
+  Side,
+  type SideOptions,
+  waitFor,
+} from "./harness.js";
 import { codeName, RawSession } from "./raw-session.js";
 import { type RunningRustServer, startRustServer } from "./rust-server.mjs";
 import { type Action, type Frame, WireTap } from "./wire-tap.js";
@@ -153,7 +160,18 @@ interface Pair {
  * data/read + data/write with the epoch-0 DEK, and creates a Task that B
  * receives. B's profile applies are recorded (applied).
  */
-async function pair(url: string): Promise<Pair> {
+/**
+ * Timer overrides applied to both sides of a pair, for the scenarios that tune
+ * recovery timing: a fast outbound retransmit, a fast request timeout, or
+ * anti-entropy turned off so a request-timeout retransmit is provably what
+ * recovers (not the periodic pull).
+ */
+type PairTimers = Pick<
+  SideOptions,
+  "antiEntropyMs" | "requestTimeoutMs" | "outboundRequestTimeout"
+>;
+
+async function pair(url: string, timers: PairTimers = {}): Promise<Pair> {
   const R = generateResourceId();
   const dek = generateResourceDEK();
   const owner = fresh();
@@ -171,6 +189,7 @@ async function pair(url: string): Promise<Pair> {
     profile: new SharedObjectsDataProfile(replica),
     webSocket: tapA.factory,
     snapshots: false,
+    ...timers,
   });
   const genesis = await createResource(A, url, dek);
   await A.write(init);
@@ -190,6 +209,7 @@ async function pair(url: string): Promise<Pair> {
     ),
     webSocket: tapB.factory,
     snapshots: false,
+    ...timers,
   });
   const applied = spyApply(B);
   B.start();
@@ -449,7 +469,10 @@ describe("LFCP-057: network chaos (live)", () => {
   it("13. a lost ACK on a live connection: the put is retransmitted after the request timeout", async (ctx) => {
     const url = live(ctx);
     await withLog(async () => {
-      const p = await pair(url);
+      // A fast outbound request timeout (anti-entropy cannot re-push A's own
+      // unit, so it is irrelevant here): the retransmit this test proves then
+      // happens in about a second instead of the production 10 s.
+      const p = await pair(url, { outboundRequestTimeout: { baseMs: 1000, maxMs: 4000 } });
       try {
         let dropped = false;
         const sentBefore = sentUnits(p.tapA);
@@ -484,7 +507,11 @@ describe("LFCP-057: network chaos (live)", () => {
   it("14. a lost DATA_GET reply on a live connection: the data round is issued again", async (ctx) => {
     const url = live(ctx);
     await withLog(async () => {
-      const p = await pair(url);
+      // Anti-entropy off and a fast request timeout: B catches up while it is
+      // not yet LIVE (anti-entropy only runs at LIVE), so the DATA_GET this test
+      // sees issued again is provably the request-timeout retransmit (§70), never
+      // a periodic pull — and it happens in about a second, not the production 15 s.
+      const p = await pair(url, { antiEntropyMs: 600_000, requestTimeoutMs: 1000 });
       try {
         await p.B.stop();
         await p.edit(p.A, "fetched twice");
@@ -519,7 +546,11 @@ describe("LFCP-057: network chaos (live)", () => {
   it("15. a lost SNAPSHOT reply falls back to the data round after the request timeout", async (ctx) => {
     const url = live(ctx);
     await withLog(async () => {
-      const p = await pair(url);
+      // Anti-entropy off and a fast request timeout on the fresh replica below:
+      // it catches up while not yet LIVE, so the fallback from the lost SNAPSHOT
+      // to the data round is provably the request timeout (§70), not a periodic
+      // pull, and resolves in about a second instead of the production 15 s.
+      const p = await pair(url, { antiEntropyMs: 600_000, requestTimeoutMs: 1000 });
       const tap = new WireTap();
       let fresh: Side | undefined;
       try {
@@ -560,6 +591,8 @@ describe("LFCP-057: network chaos (live)", () => {
           ),
           webSocket: tap.factory,
           snapshots: true,
+          antiEntropyMs: 600_000,
+          requestTimeoutMs: 1000,
         });
         const side = fresh;
         side.start();
@@ -1056,7 +1089,16 @@ describe("LFCP-057: seeded faults (live)", () => {
           );
           return action;
         };
-      const p = await pair(url);
+      // A dropped put, a lost ACK or a lost DATA_GET reply recovers on a request
+      // timeout (§70); the faults land on Data messages only, so the test pins
+      // these timers low (anti-entropy stays at the harness default) to recover
+      // in about a second instead of the production 10-to-60 s backoff. The
+      // production values are exercised by scenarios 13 to 15; here we only need
+      // convergence, bounded and seed-independent.
+      const p = await pair(url, {
+        outboundRequestTimeout: { baseMs: 1000, maxMs: 4000 },
+        requestTimeoutMs: 1000,
+      });
       try {
         p.tapA.rule(faulty("A"));
         p.tapB.rule(faulty("B"));
