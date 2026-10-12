@@ -4,6 +4,28 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.0-beta.5 — 2026-10-12
+
+The SDK is read at spec `mvp-0.2-baseline.10`, which makes three
+SHARED-SECTIONS-PROFILE-01 rules explicit (findings E1, E2 and F1) and adds
+cases SS88 to SS91. The production SDK already met them, so no package behaviour
+changes; the fixes those findings name are in the Rust SDK. Published under the
+npm dist-tag `beta`, like the earlier 0.2 betas.
+
+### Conformance
+
+- Baseline.10 states that §14.1's sequence checks count every change of the
+  document, so a change at a taken sequence number is held before a section rule
+  would refuse it (finding E1); that A5 refuses a scalar written to a node's
+  `text` whatever the node's kind, even when the merge shows a Text (finding E2);
+  and that a refused chunk whose dependencies or actor do not read is named too
+  (finding F1). The production engine already behaved this way; SS88 to SS91
+  confirm it.
+- The shared-sections conformance adapter now counts a change held at a taken
+  sequence number (`ACTOR_EQUIVOCATION`, §14.1) among the held rather than the
+  refused, and treats SS88's order-dependent refusal in reverse delivery as the
+  reference verifier does, so every case passes in each delivery order.
+
 ## 0.2.0-beta.4 — 2026-10-11
 
 The SDK is read at spec `mvp-0.2-baseline.9`, which refines how a Shared
