@@ -4,6 +4,40 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.0-beta.6 — 2026-10-12
+
+A control-plane fix (LFCP-02-A): Control Records a client authored while an
+earlier one of its own was still unacknowledged no longer stall forever.
+Published under the npm dist-tag `beta`, like the earlier 0.2 betas.
+
+### Fixed
+
+- `createInvitation` builds the grant on the client's LOCAL Control Head — the
+  committed chain extended by its own still-queued records — not the committed
+  head, so two invitations made back to back chain on each other (consecutive
+  sequence numbers, a linear `previous`) instead of colliding on commit and
+  each other's `CONTROL_HEAD_MISMATCH` (§47).
+- A Control Record the coordinator refuses with `CONTROL_HEAD_MISMATCH` is now
+  re-proposed on the current head: re-authored with the same intent (a grant
+  keeps the same Invitation Principal and claim parameters), re-signed, and its
+  dependent Key Packages re-sealed to the new head; a record no longer
+  authorized or meaningful is dropped with a typed outcome (`repropose` event).
+  Re-proposal is bounded and idempotent, and recovers records persisted as
+  "repropose" by an earlier version at the next open. Without it, such a record
+  — and the invitation Key Package and link that depend on it — waited forever.
+- A copied invitation link keeps working after its grant is re-proposed:
+  `acceptInvitation` resolves the grant by its subject (the Invitation
+  Principal) when the link's record ID is no longer on the chain (§18.2).
+- `revokeAccess` still refuses with `control-pending` while a Control Record is
+  pending (a revocation rotates the Data Epoch, so it is serialized, not
+  chained); with re-proposal in place the refusal is temporary and a retry
+  succeeds.
+
+### Added
+
+- `reproposeControlRecords` and the `repropose` SyncEvent (re-proposal outcomes),
+  and `localControlChain` (the committed chain extended by own pending records).
+
 ## 0.2.0-beta.5 — 2026-10-12
 
 The SDK is read at spec `mvp-0.2-baseline.10`, which makes three
