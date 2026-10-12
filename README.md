@@ -131,7 +131,7 @@ The official vectors belong to `openlfcp/spec` and are never copied into
 sdk-ts. `spec.lock` pins the spec version the SDK implements:
 
 ```json
-{ "tag": "mvp-0.2-baseline.9", "commit": "369c22b47783e71b5322d87f714d665d92e938e9" }
+{ "tag": "mvp-0.2-baseline.10", "commit": "a3161f7a29f42462eac7e13c37e2d57db65866c1" }
 ```
 
 `conformance/spec.mjs` reads spec files with `git show <commit>:<path>`
@@ -140,7 +140,7 @@ from the sdk-ts root). It first checks that the tag still resolves to the
 locked commit and fails loudly if not. Moving to a new baseline means
 changing `spec.lock` deliberately.
 
-`mvp-0.2-baseline.9` holds `mvp-0.1-baseline.10` unchanged, which the
+`mvp-0.2-baseline.10` holds `mvp-0.1-baseline.10` unchanged, which the
 Wire and Shared Objects packages implement (with the canonical change
 encoding and operation references of SPEC-PATCH-10, SHARED-OBJECTS-PROFILE-01
 §11.3 and §11.4), and adds the Working Draft shared sections corpus that
@@ -169,7 +169,13 @@ deletion of the node or of an effective ancestor as a retained concurrent edit
 such an edit only with the deletions the lifecycle register still holds — a
 later write to the same register supersedes an earlier deletion, so deleting the
 node again clears the attention, while two concurrent deletions both count (§9;
-baseline.9 adds SS83 to SS87).
+baseline.9 adds SS83 to SS87). It holds a change at a taken sequence number
+before the section's own rules would refuse it (§14.1, finding E1), refuses a
+scalar written to a node's `text` whatever the node's kind and even where the
+merge shows a Text (A5, finding E2), and names a refused chunk whose dependencies
+or actor it does not read (§14.1, finding F1); baseline.10 adds SS88 to SS91. The
+production SDK already met these rules; its conformance adapter now counts a
+change held at a taken sequence number (§14.1) among the held, not the refused.
 
 ```sh
 pnpm build
@@ -281,7 +287,7 @@ building or testing a consumer, and again after changing the SDK.
 
 ## Publication
 
-`0.2.0-beta.4` is on npm under the `beta` tag (`pnpm add @openlfcp/client@beta`);
+`0.2.0-beta.5` is on npm under the `beta` tag (`pnpm add @openlfcp/client@beta`);
 `latest` stays on the 0.1.x releases until `0.2.0` is final.
 
 The packages are named `@openlfcp/*` from the start, but they are published
