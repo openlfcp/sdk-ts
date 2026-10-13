@@ -4,6 +4,25 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.0-beta.8 — 2026-10-13
+
+A fix release. The SDK is still read at spec `mvp-0.2-baseline.12` and tested
+against the reference server at `138030a`; nothing else changes. Published
+under the npm dist-tag `beta`, like the earlier 0.2 betas.
+
+### Fixed
+
+- After a member's first unit in a Resource went stale (for example, an access
+  change made while the member was offline cut it off), the member could never
+  write to that Resource again: its next unit was refused for naming no
+  previous unit. The next unit is now sent with no previous unit, as
+  LFCP-WIRE-01 §26.2 requires, and a peer that accepted nothing of that member
+  links it.
+- An explicit null previous unit is refused while the writer still holds an
+  accepted unit of its own in the Resource, before a sequence number is used:
+  a peer that accepted that unit would hold the new one for good (§26.2). The
+  default, the latest accepted own unit, is unchanged.
+
 ## 0.2.0-beta.7 — 2026-10-13
 
 The SDK is read at spec `mvp-0.2-baseline.12` and tested against the reference
