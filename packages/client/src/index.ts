@@ -25,6 +25,7 @@ export { type CheckpointSource, ProfileCheckpointer } from "./checkpoint.js";
 export { type ClaimJournal, pendingInvitationClaims } from "./claim-journal.js";
 export {
   type ConnectionEvents,
+  ConnectionNotReady,
   type ConnectionOptions,
   LFCP_SUBPROTOCOL,
   LfcpConnection,

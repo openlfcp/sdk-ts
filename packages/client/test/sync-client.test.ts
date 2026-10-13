@@ -277,6 +277,45 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     expect(server.of("RESOURCE_OPEN")).toHaveLength(2);
   });
 
+  it("a connection lost while the outbound queue is read is no INTERNAL error; the next READY sends", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(202);
+    const owner = client(OWNER, server, clock);
+    await ownerState(owner, chain);
+    hostOf(server, chain);
+    owner.sync.open(owner.binding(chain.R));
+    owner.sync.start();
+    await settle(200);
+    await owner.sync.idle();
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+    // A flush reads the queue (READY then); the connection drops before it sends.
+    let release: () => void = () => {};
+    const next = owner.outbound.next.bind(owner.outbound);
+    owner.outbound.next = async (resource, now) => {
+      await new Promise<void>((r) => {
+        release = r;
+      });
+      owner.outbound.next = next;
+      return [{ bytes: Uint8Array.of(0xa0) }] as never;
+    };
+    owner.sync.flush();
+    await settle(50);
+    server.current.drop();
+    await settle(50);
+    release();
+    await settle(200);
+    await owner.sync.idle();
+    expect(owner.sync.connectionState).toBe("DISCONNECTED");
+    expect(owner.events.filter((e) => e.type === "error")).toEqual([]);
+    clock.t = 1000;
+    owner.sync.tick(1000);
+    await settle(200);
+    await owner.sync.idle();
+    expect(owner.sync.resourceState(chain.R)).toBe("LIVE");
+    expect(owner.events.filter((e) => e.type === "error")).toEqual([]);
+  });
+
   it("enters CONTROL_CONFLICT on competing records and never resolves it (§42, §67)", async () => {
     const server = new FakeServer();
     const clock = { t: 0 };

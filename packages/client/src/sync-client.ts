@@ -84,7 +84,7 @@ import {
 } from "./batch-status.js";
 import type { ProfileCheckpointer } from "./checkpoint.js";
 import { readClaimJournal } from "./claim-journal.js";
-import { LfcpConnection, type WebSocketFactory } from "./connection.js";
+import { ConnectionNotReady, LfcpConnection, type WebSocketFactory } from "./connection.js";
 import { EngineGuard, isEngineTrap, snapshotItem } from "./engine-guard.js";
 import type { AckOutcome, NackOutcome, OutboundQueue, StaleOutboundUnit } from "./outbound.js";
 import { resourceSyncState, snapshotFrontier } from "./outbound.js";
@@ -902,6 +902,10 @@ export class SyncClient {
     this.#queue = this.#queue
       .then(() => (this.#trapped ? undefined : fn()))
       .catch((e: unknown) => {
+        // The connection closed while a handler worked: nothing was sent, and
+        // its closing (queued here) starts over at the next READY. An
+        // ordinary outcome, not an INTERNAL error.
+        if (e instanceof ConnectionNotReady) return;
         if (!isEngineTrap(e)) {
           this.#emit({
             type: "error",
@@ -1102,10 +1106,18 @@ export class SyncClient {
   // plumbing
 
   #request(request: Request, message: LfcpMessage): void {
+    try {
+      this.#connection.send(message);
+    } catch (e) {
+      // Never waiting for an answer to what was not sent (the connection's
+      // closing already failed the requests it saw).
+      if (e instanceof ConnectionNotReady && request.kind === "host")
+        request.reject(new Error("the connection closed before RESOURCE_HOSTED: not READY"));
+      throw e;
+    }
     const key = toHex(message.messageId);
     this.#requests.set(key, request);
     this.#sentAt.set(key, this.#o.now());
-    this.#connection.send(message);
   }
 
   /**

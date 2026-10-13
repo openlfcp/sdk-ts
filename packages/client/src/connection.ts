@@ -64,6 +64,18 @@ export function platformWebSocket(): WebSocketFactory {
   return (url, protocols) => new ctor(url, [...protocols]);
 }
 
+/**
+ * A send on a connection that is not READY: it closed while the caller was
+ * working (an ordinary network loss, not a fault of the caller's). Nothing
+ * was sent. Still an LfcpError UNSUPPORTED_VALUE, as before.
+ */
+export class ConnectionNotReady extends LfcpError {
+  constructor() {
+    super("UNSUPPORTED_VALUE", "the connection is not READY");
+    this.name = "ConnectionNotReady";
+  }
+}
+
 /** §30: the only LFCP subprotocol. */
 export const LFCP_SUBPROTOCOL = "lfcp-1";
 
@@ -238,8 +250,7 @@ export class LfcpConnection {
 
   /** Sends already encoded message bytes (e.g. an OutboundMessage) on a READY session. */
   sendEncoded(bytes: Uint8Array): void {
-    if (this.#state !== "READY" || this.#socket === null)
-      throw new LfcpError("UNSUPPORTED_VALUE", "the connection is not READY");
+    if (this.#state !== "READY" || this.#socket === null) throw new ConnectionNotReady();
     if (bytes.length > this.#limit())
       throw new LfcpError(
         "MESSAGE_TOO_LARGE",
