@@ -4,6 +4,48 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.0-beta.7 — 2026-10-13
+
+The SDK is read at spec `mvp-0.2-baseline.12` and tested against the reference
+server at `138030a`. Concurrent equal values of a scalar register now agree,
+as baseline.12 makes normative. Published under the npm dist-tag `beta`, like
+the earlier 0.2 betas.
+
+### Changed
+
+- Concurrent equal values of a scalar register agree (SHARED-OBJECTS-PROFILE-01
+  §45; SHARED-SECTIONS-PROFILE-01 §2, §7). A field is conflicted only when its
+  concurrent values differ, and its conflict set lists its distinct values.
+  Equal means the same Automerge scalar type and the same value; a map, a list
+  or Text equals no other value. Two peers that each complete a Task, or each
+  restore it, now produce no conflict. In shared sections, equal lifecycle,
+  placement and title assignments agree: equal placements are no
+  `PLACEMENT_CONFLICT`, and two concurrent deletions are no scalar conflict
+  (SS86).
+- A send on a connection that closed while a handler worked is no longer an
+  `error` event with code `INTERNAL`. The connection's closing starts the next
+  round at the next READY. Such a send throws `ConnectionNotReady` (still an
+  `LfcpError` `UNSUPPORTED_VALUE`), and a request is registered only once it is
+  sent.
+
+### Added
+
+- `delete-resource` storage write and `deleteUnsentResource`: forget a Resource
+  this client made and never sent, every row of it in one commit, then its Data
+  Epoch keys. Refused with `RESOURCE_SENT` (nothing of the batch written) when
+  an outbound item was attempted, an ACK recorded, or anything of another
+  Principal stored. In the memory, SQLite and IndexedDB adapters, and in the
+  shared storage contract.
+- `resourceSent`, the rule the adapters share, and `ConnectionNotReady`.
+
+### Conformance
+
+- `spec.lock` pins `mvp-0.2-baseline.12` (`bf1c78c`), `server.lock` the server at
+  `138030a`. The new vectors pass: S17 to S19, SS92 to SS94, the Automerge
+  reference corpus and the changed SS86; the baseline.11 Wire negatives (Haves
+  of `RESOURCE_OPEN` and `RESOURCE_OPENED`, the envelope before the type)
+  already passed.
+
 ## 0.2.0-beta.6 — 2026-10-12
 
 A control-plane fix (LFCP-02-A): Control Records a client authored while an
