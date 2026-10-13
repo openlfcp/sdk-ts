@@ -287,8 +287,8 @@ building or testing a consumer, and again after changing the SDK.
 
 ## Publication
 
-`0.2.0-beta.5` is on npm under the `beta` tag (`pnpm add @openlfcp/client@beta`);
-`latest` stays on the 0.1.x releases until `0.2.0` is final.
+`0.2.0` is on npm under the `latest` tag (`pnpm add @openlfcp/client`); the
+0.2 betas stay under `beta`.
 
 The packages are named `@openlfcp/*` from the start, but they are published
 to npm only at milestones, as `0.x` versions. A final release (such as
