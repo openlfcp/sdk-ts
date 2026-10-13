@@ -481,10 +481,11 @@ describe("OutboundQueue (LFCP-036)", () => {
       previousUnitId: null,
       value: "after",
     }).catch((e: unknown) => e);
-    // Sequence 3 with a null previous unit is refused before sealing (§26.2); nothing was queued.
+    // A null previous unit while the writer holds its accepted unit at 1 is refused
+    // before a sequence is reserved (§26.2); nothing was queued.
     expect(next).toMatchObject({ code: "INVALID_STRUCTURE" });
     expect(await storage.outbound.list(R)).toHaveLength(1);
-    expect(await storage.actorSequences.reserveNext(R, WRITER.descriptor.principalId)).toBe(4n);
+    expect(await storage.actorSequences.reserveNext(R, WRITER.descriptor.principalId)).toBe(3n);
   });
 
   it("14. keeps several Resources' queues and sync states apart", async () => {

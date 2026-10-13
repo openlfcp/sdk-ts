@@ -414,10 +414,16 @@ async function createQueuedDataUnitNow<T>(
   actor: PrincipalId,
 ): Promise<CreatedDataUnit> {
   const { onCreated, previousUnitId, ...create } = options;
-  const previous =
-    previousUnitId !== undefined
-      ? previousUnitId
-      : await latestAcceptedOwnUnit(storage, resource, actor);
+  const latest = await latestAcceptedOwnUnit(storage, resource, actor);
+  // §26.2: a null previous only when the writer holds no own unit as
+  // accepted (before its first, or after a first that went stale); while it
+  // holds one, a receiver that accepted it would hold this unit for good.
+  if (previousUnitId === null && latest !== null)
+    throw new LfcpError(
+      "INVALID_STRUCTURE",
+      "the writer still holds an accepted own unit: its next unit names it as previous (§26.2)",
+    );
+  const previous = previousUnitId !== undefined ? previousUnitId : latest;
   const created = await createDataUnit({
     ...create,
     previousUnitId: previous,

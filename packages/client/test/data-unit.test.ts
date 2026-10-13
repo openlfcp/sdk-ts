@@ -158,13 +158,26 @@ describe("createDataUnit (§8, §12, §26)", () => {
     });
   });
 
-  it("15. sequence 1 must have a null previous unit; later sequences need one", async () => {
+  it("15. sequence 1 must have a null previous unit", async () => {
     const sequences = new InMemoryActorSequenceReservation();
     await expect(
       create({ sequences, previousUnitId: dataUnitId(bytes32(9)) }),
     ).rejects.toMatchObject({ code: "INVALID_STRUCTURE" });
-    // Sequence 1 was abandoned with the refusal; the next one is 2 and needs a previous unit.
-    await expect(create({ sequences })).rejects.toMatchObject({ code: "INVALID_STRUCTURE" });
+  });
+
+  it("15b. after a first unit abandoned or gone stale, sequence 2 has a null previous (§26.2)", async () => {
+    const sequences = new InMemoryActorSequenceReservation();
+    // Sequence 1 is taken (abandoned with this refusal, or later cut off by a Key Epoch).
+    await expect(
+      create({ sequences, previousUnitId: dataUnitId(bytes32(9)) }),
+    ).rejects.toMatchObject({ code: "INVALID_STRUCTURE" });
+    const u2 = await create({ sequences, value: "after", previousUnitId: null });
+    expect(u2.seq).toBe(2n);
+    expect(parseDataUnit(u2.bytes).payload.prevDataUnitId).toBeNull();
+    // A receiver that accepted nothing of the actor takes it.
+    const receive = (b: Uint8Array) =>
+      receiveDataUnit(VIEW, b, { seen: new InMemorySeenUnits(), dek: () => DEK0, profile: TEXT });
+    expect(await receive(u2.bytes)).toMatchObject({ kind: "accepted", value: "after" });
   });
 
   it("17. a Data Epoch rotation does not reset the actor sequence", async () => {

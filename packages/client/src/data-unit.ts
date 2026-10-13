@@ -90,12 +90,14 @@ export async function createDataUnit<T>(
 
   const seq = await options.sequences.reserveNext(atHead.resourceId, actor);
   options.guard?.claim(atHead.resourceId, actor, seq);
-  if ((seq === 1n) !== (options.previousUnitId === null))
+  // §26.2: sequence 1 names no previous unit. A later one names the writer's
+  // latest own unit still accepted, or none: after a first unit that went
+  // stale (a Key Epoch cut it off) or was abandoned, the unit at 2 has a null
+  // previous, and a receiver that accepted nothing of the actor links it.
+  if (seq === 1n && options.previousUnitId !== null)
     throw new LfcpError(
       "INVALID_STRUCTURE",
-      seq === 1n
-        ? "the actor's first unit (sequence 1) must have a null previous unit (§26.2)"
-        : `sequence ${seq} needs the actor's unit at sequence ${seq - 1n} as its previous unit (§26.2)`,
+      "the actor's first unit (sequence 1) must have a null previous unit (§26.2)",
     );
   const sealed = sealDataUnit(
     {
