@@ -23,6 +23,7 @@ import {
 } from "./admission/limits.js";
 import { type ReferenceHistory, referenceHistoryOf } from "./admission/references.js";
 import { admitBatch, admitChange, type DocumentSequences } from "./admission/sequence.js";
+import { distinctValues, isConflicted } from "./concurrent.js";
 
 /** The decoded actions that create an object (§11.2). */
 const MAKE_ACTIONS: ReadonlySet<string> = new Set(["makeMap", "makeList", "makeText", "makeTable"]);
@@ -320,17 +321,13 @@ function canonical(value: Json): Json {
   return value;
 }
 
-/** Every concurrent value of `map[key]`: none if absent, one if not conflicted. */
-function valuesOf(map: AMap, key: string): unknown[] {
-  if (!(key in map)) return [];
-  const conflicts = A.getConflicts(map, key);
-  return conflicts === undefined ? [map[key]] : Object.values(conflicts);
-}
-
-/** Top-level fields of `object` with more than one concurrent value. */
-function conflictedFields(object: AMap): string[] {
+/**
+ * Top-level fields of `object` in conflict: two or more distinct concurrent
+ * values (§45; concurrent equal values agree).
+ */
+function conflictedFields(doc: Doc, object: AMap): string[] {
   return Object.keys(object)
-    .filter((f) => A.getConflicts(object, f) !== undefined)
+    .filter((f) => isConflicted(doc as A.Doc<unknown>, object, f))
     .sort();
 }
 
@@ -419,7 +416,7 @@ export function taskView(
   const problems = storedObjectProblems(doc, object, id);
   const parsed = parseTask(plain(object), id);
   const field = (f: string): ScalarView => {
-    const values = valuesOf(object, f).map(plain).sort(byJson);
+    const values = distinctValues(doc, object, f).map(plain).sort(byJson);
     return Object.freeze({
       value: f in object ? plain(object[f]) : undefined,
       values: Object.freeze(values),
@@ -744,7 +741,7 @@ export class SharedObjectsReplica {
     this.#doc = doc;
     for (const meta of A.getChangesMetaSince(doc, [])) this.#noteSeq(meta.actor, meta.seq);
     for (const [id, object] of Object.entries(this.#objects() ?? {}))
-      if (isMap(object as Json)) this.#conflicted.set(id, conflictedFields(object as AMap));
+      if (isMap(object as Json)) this.#conflicted.set(id, conflictedFields(doc, object as AMap));
   }
 
   /**
@@ -991,9 +988,9 @@ export class SharedObjectsReplica {
     const objects = this.#objects() ?? {};
     for (const [id, object] of Object.entries(objects)) {
       if (!isMap(object as Json)) continue;
-      for (const field of conflictedFields(object as AMap)) {
+      for (const field of conflictedFields(this.#doc, object as AMap)) {
         out[id] ??= {};
-        out[id][field] = valuesOf(object as AMap, field)
+        out[id][field] = distinctValues(this.#doc as A.Doc<unknown>, object as AMap, field)
           .map(plain)
           .sort(byJson);
       }
@@ -1274,7 +1271,7 @@ export class SharedObjectsReplica {
       const now = objects[id];
       if (!isMap(now as Json)) continue;
       if (set.size === 0) for (const f of Object.keys(now as AMap)) set.add(f);
-      const nowConflicts = conflictedFields(now as AMap);
+      const nowConflicts = conflictedFields(this.#doc, now as AMap);
       const wasConflicts = this.#conflicted.get(id) ?? [];
       this.#conflicted.set(id, nowConflicts);
       out.push(

@@ -179,6 +179,54 @@ describe("concurrency", () => {
     expect(a.root()).toEqual(b.root());
   });
 
+  it("concurrent equal values agree: no conflict, the value stands (§45, mvp-0.2-baseline.12)", () => {
+    const { replica: a } = aliceWithTask();
+    const b = fork(a, BOB);
+    const done = (r: Replica) => r.apply(complete(taskOf(r), "2026-10-08").intent) as LocalChange;
+    const fromB = done(b);
+    done(a);
+    const received = a.receive(fromB.plaintext);
+    if (received.status === "applied") expect(received.objects[0]?.conflictsAppeared).toEqual([]);
+    sync(a, b);
+    for (const r of [a, b]) {
+      expect(r.conflicts()).toEqual({});
+      expect(r.task(ID)?.fields.status).toMatchObject({
+        value: "done",
+        values: ["done"],
+        conflicted: false,
+      });
+      expect(r.validate().valid).toBe(true);
+    }
+  });
+
+  it("concurrent equal restores agree; two equal values and a different one conflict over the distinct ones (§45)", () => {
+    const { replica: a } = aliceWithTask();
+    a.apply(deleteTask(taskOf(a)).intent);
+    const b = fork(a, BOB);
+    const c = fork(a, CAROL);
+    const deleted = (r: Replica) => r.task(ID)?.task as Task;
+    a.apply(restoreTask(deleted(a)).intent);
+    b.apply(restoreTask(deleted(b)).intent);
+    sync(a, b);
+    expect(a.conflicts()).toEqual({});
+    expect(taskOf(a).lifecycle).toBe("active");
+    // Status: done twice, cancelled once.
+    const d = fork(a, ALICE);
+    const e = fork(a, BOB);
+    d.apply(complete(taskOf(d), "2026-10-08").intent);
+    e.apply(complete(taskOf(e), "2026-10-08").intent);
+    c.apply(restoreTask(deleted(c)).intent);
+    sync(c, a);
+    const f = fork(c, CAROL);
+    f.apply(cancel(taskOf(f)).intent);
+    sync(d, e, f);
+    expect(d.conflicts()).toEqual({ [ID]: { status: ["cancelled", "done"] } });
+    expect(d.task(ID)?.fields.status).toMatchObject({
+      conflicted: true,
+      values: ["cancelled", "done"],
+    });
+  });
+
   it("keeps done vs cancelled conflicted and resolves it causally (§47, §48, §69)", () => {
     const { replica: a } = aliceWithTask();
     const b = fork(a, BOB);

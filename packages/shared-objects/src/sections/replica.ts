@@ -22,6 +22,7 @@ import {
 } from "../admission/limits.js";
 import { type ReferenceHistory, referenceHistoryOf } from "../admission/references.js";
 import { admitBatch } from "../admission/sequence.js";
+import { distinctValues } from "../concurrent.js";
 import { ProfileInvalidError } from "../profile-invalid.js";
 import {
   isWasmTrap,
@@ -483,11 +484,9 @@ function applyIsolating(
   return { doc: work, applied, poisoned };
 }
 
-/** Every concurrent value of `map[key]`. */
-function values(map: AMap, key: string): unknown[] {
-  if (!(key in map)) return [];
-  const c = A.getConflicts(map, key);
-  return c === undefined ? [map[key]] : Object.values(c);
+/** The distinct concurrent values of `map[key]` in `doc` (SOP §45: equal values agree). */
+function values(doc: Doc, map: AMap, key: string): unknown[] {
+  return distinctValues(doc as A.Doc<unknown>, map, key);
 }
 
 /** PROFILE_INVALID for a Snapshot, with the diagnostic of what refused it. */
@@ -782,7 +781,7 @@ export class SectionReplica {
     const objects = (root.objects ?? {}) as AMap;
     const placements = (root.placements ?? {}) as AMap;
     const hidden = new Set(tree.hidden);
-    const titles = values(section, "title").map(str);
+    const titles = values(this.#doc, section, "title").map(str);
     const out: Record<string, SectionSnapshotNode> = {};
     for (const id of Object.keys(nodes).sort()) {
       if (tree.collisions.includes(id)) continue;
@@ -1276,7 +1275,8 @@ export class SectionReplica {
         const otherKind = str((other as AMap).kind);
         const sameStyle =
           kind === "paragraph" ||
-          values(node as AMap, "list_style").join() === values(other as AMap, "list_style").join();
+          values(doc, node as AMap, "list_style").join() ===
+            values(doc, other as AMap, "list_style").join();
         if (otherKind !== kind || (kind !== "paragraph" && kind !== "item") || !sameStyle)
           refuse(
             "INVALID_INTENT",
@@ -1312,8 +1312,8 @@ export class SectionReplica {
       if (intent.intent.slice(0, intent.intent.indexOf(".")) !== kind)
         refuse("INVALID_INTENT", `${intent.intent} on a ${kind} node (§10)`, id);
       if (
-        values(node as AMap, "placement").length !== 1 ||
-        new Set(values(node as AMap, "lifecycle")).size !== 1
+        values(doc, node as AMap, "placement").length !== 1 ||
+        new Set(values(doc, node as AMap, "lifecycle")).size !== 1
       )
         refuse("NODE_IN_CONFLICT", `${id} has unresolved structure (§10)`, id);
       const cut = rebase(
@@ -1400,7 +1400,7 @@ export class SectionReplica {
           n.list_style = S(style);
         };
       }
-      if (intent.intent === "node.move" && values(node as AMap, "placement").length !== 1)
+      if (intent.intent === "node.move" && values(doc, node as AMap, "placement").length !== 1)
         refuse(
           "NODE_IN_CONFLICT",
           `${id} has concurrent placements: use node.resolve_placement (§7, §8)`,
@@ -1597,10 +1597,10 @@ function insertionIndex(
     if (v.nodes.has(id) || collidedSet(v).has(id)) return { why: "is invalid (§14.2)" };
     const kind = str(node.kind);
     const owner = kind === "task" ? (objects[id] as AMap) : node;
-    const life = values(owner, "lifecycle").map(str);
+    const life = values(doc, owner, "lifecycle").map(str);
     if (life.length !== 1) return { why: "has a lifecycle conflict (§9)" };
     if (life[0] !== "active") return { why: "is deleted (§9)" };
-    const selected = values(node, "placement").map(str);
+    const selected = values(doc, node, "placement").map(str);
     if (selected.length !== 1) return { why: "has a placement conflict (§7)" };
     const placement = placements[selected[0] as string] as AMap | undefined;
     if (placement === undefined) return { why: "has no placement" };
@@ -1641,7 +1641,7 @@ function insertionIndex(
   const e = eligible(after);
   if ("why" in e || e.parent !== parent)
     refuse("INVALID_PREDECESSOR", `${after} is not a visible child of ${parent} (§6)`, after);
-  const slot = str(values(nodes[after] as AMap, "placement")[0]);
+  const slot = str(values(doc, nodes[after] as AMap, "placement")[0]);
   const at = lane.findIndex((x) => str(x) === slot);
   if (at < 0)
     refuse("INVALID_PREDECESSOR", `${after}'s placement is not in the parent's list (§4.3)`, after);

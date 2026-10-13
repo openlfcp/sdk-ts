@@ -1,4 +1,5 @@
 import * as A from "@automerge/automerge";
+import { distinctValues } from "../concurrent.js";
 import { type SectionValidation, validateSection } from "./schema.js";
 
 /**
@@ -89,11 +90,9 @@ const CONFLICT_FIELDS = ["title", "status", "lifecycle", "due", "priority"] as c
 const str = (v: unknown): string | undefined =>
   A.isImmutableString(v) ? v.toString() : typeof v === "string" ? v : undefined;
 
-/** Every concurrent value of `map[key]`, as strings. */
-function values(map: AMap | undefined, key: string): (string | undefined)[] {
-  if (map === undefined || !(key in map)) return [];
-  const c = A.getConflicts(map, key);
-  return (c === undefined ? [map[key]] : Object.values(c)).map(str);
+/** The distinct concurrent values of `map[key]` in `doc`, as strings (SOP §45: equal values agree). */
+function values(doc: A.Doc<unknown>, map: AMap | undefined, key: string): (string | undefined)[] {
+  return distinctValues(doc, map, key).map(str);
 }
 
 const byId = <T extends { readonly id: string }>(a: T, b: T) =>
@@ -125,11 +124,11 @@ export function deriveTree(
     // §7.6: a lifecycle conflict has no winner. It blocks the branch (below)
     // instead of the provisional value hiding it: the node is not deleted,
     // and edits under it are not under a deleted ancestor.
-    const lifecycles = new Set(values(owner(id), "lifecycle"));
+    const lifecycles = new Set(values(doc, owner(id), "lifecycle"));
     if (lifecycles.size === 1 && lifecycles.has("deleted")) deleted.add(id);
     if (collided.has(id)) continue;
     const n = node(id) as AMap;
-    const selected = values(n, "placement");
+    const selected = values(doc, n, "placement");
     const parentOf = (p: string | undefined) =>
       p === undefined ? undefined : str((placements[p] as AMap | undefined)?.parent_id);
     // The default value selects the parent used for hiding and for the walk below.
@@ -283,7 +282,7 @@ export function deriveTree(
     scalarConflicts: Object.freeze(
       Object.keys(objects).flatMap((id) =>
         CONFLICT_FIELDS.flatMap((field) => {
-          const vs = values(objects[id] as AMap, field);
+          const vs = values(doc, objects[id] as AMap, field);
           return vs.length > 1 ? [{ id, field, values: vs.map((v) => v ?? "").sort() }] : [];
         }),
       ),

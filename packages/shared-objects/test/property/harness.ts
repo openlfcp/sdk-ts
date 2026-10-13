@@ -173,7 +173,16 @@ export class Oracle {
       const surviving = list.filter(
         (w) => !list.some((other) => other.change.past.has(w.change.hash)),
       );
-      const puts = surviving.filter((w) => w.write.put).map((w) => w.write.value);
+      // §45 (mvp-0.2-baseline.12): concurrent equal values agree; a map or
+      // a list equals no other value.
+      const puts: Json[] = [];
+      for (const w of surviving) {
+        if (!w.write.put) continue;
+        const v = w.write.value;
+        const scalar = v === null || typeof v !== "object";
+        if (scalar && puts.some((p) => JSON.stringify(p) === JSON.stringify(v))) continue;
+        puts.push(v);
+      }
       const first = list[0] as { write: Write };
       const fields = objects.get(first.write.object) ?? new Map<string, Json[]>();
       objects.set(first.write.object, fields);
