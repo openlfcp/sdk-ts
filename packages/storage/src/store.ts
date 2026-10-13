@@ -1,11 +1,12 @@
-import type {
-  ActorSequence,
-  ControlRecordId,
-  DataEpoch,
-  DataUnitId,
-  Hash32,
-  PrincipalId,
-  ResourceId,
+import {
+  type ActorSequence,
+  bytesEqual,
+  type ControlRecordId,
+  type DataEpoch,
+  type DataUnitId,
+  type Hash32,
+  type PrincipalId,
+  type ResourceId,
 } from "@openlfcp/core";
 import type { SecretRef } from "./secrets.js";
 import type { ActorSequenceReservation } from "./sequence.js";
@@ -319,7 +320,22 @@ export type StorageWrite =
   | { readonly op: "put-profile-checkpoint"; readonly checkpoint: ProfileCheckpoint }
   | { readonly op: "put-sync-state"; readonly row: SyncStateRow }
   /** Sets (or, with null, removes) a local mark (LocalMarkReader). */
-  | { readonly op: "put-local-mark"; readonly key: string; readonly value: string | null };
+  | { readonly op: "put-local-mark"; readonly key: string; readonly value: string | null }
+  | {
+      /**
+       * Forgets a Resource this client made and never sent: its row, route,
+       * Control Records, head and conflict, epochs, Data Units, Key
+       * Packages, Snapshots, outbound items, profile checkpoint and sync
+       * state. Fails the batch (RESOURCE_SENT) when anything of it may have
+       * left this device or come from elsewhere: an outbound item attempted,
+       * an ACK recorded, or a Data Unit, Key Package or Snapshot of another
+       * Principal stored. The actor and Snapshot sequence counters are kept
+       * (a number is never reused). Secrets are the caller's
+       * (deleteUnsentResource deletes the Resource's DEKs).
+       */
+      readonly op: "delete-resource";
+      readonly resourceId: ResourceId;
+    };
 
 export type CommitResult =
   | { readonly ok: true }
@@ -337,7 +353,38 @@ export type CommitResult =
       readonly resourceId: ResourceId;
       readonly actor: PrincipalId;
       readonly current: DataUnitId | null;
+    }
+  /** Nothing was written: the Resource to delete may have been sent (delete-resource). */
+  | {
+      readonly ok: false;
+      readonly reason: "RESOURCE_SENT";
+      readonly resourceId: ResourceId;
+      /** What shows it: "attempted", "acked" or "received". */
+      readonly detail: ResourceSentDetail;
     };
+
+/** Why a Resource counts as sent (delete-resource). */
+export type ResourceSentDetail = "attempted" | "acked" | "received";
+
+/**
+ * Why `resource` counts as sent, from what is stored of it, or null: an
+ * outbound item attempted, an ACK recorded, or a Data Unit, Key Package or
+ * Snapshot of a Principal other than its local one. Shared by the adapters
+ * (delete-resource).
+ */
+export function resourceSent(stored: {
+  readonly local: PrincipalId | null;
+  readonly outbound: readonly OutboundItem[];
+  readonly syncState: SyncStateRow | undefined;
+  readonly actors: readonly PrincipalId[];
+}): ResourceSentDetail | null {
+  if (stored.outbound.some((o) => o.attempts > 0 || o.lastAttempt !== null)) return "attempted";
+  const s = stored.syncState;
+  if (s !== undefined && (s.recentlyAcked.length > 0 || s.ackedDurability !== null)) return "acked";
+  const local = stored.local;
+  if (stored.actors.some((a) => local === null || !bytesEqual(a, local))) return "received";
+  return null;
+}
 
 export interface ControlReader {
   record(recordId: ControlRecordId): Promise<ControlRecordRow | undefined>;

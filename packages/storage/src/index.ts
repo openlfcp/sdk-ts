@@ -1,6 +1,7 @@
 /** Name of this package. */
 export const PACKAGE = "@openlfcp/storage";
 
+export { deleteUnsentResource } from "./delete-resource.js";
 export {
   LOCAL_STATE_SCHEME,
   type LocalStateCipher,
@@ -58,6 +59,7 @@ export type {
   ProfileStateReader,
   ResourceReader,
   ResourceRow,
+  ResourceSentDetail,
   RouteRow,
   SeenRecord,
   SnapshotReader,
@@ -67,3 +69,4 @@ export type {
   SyncStateReader,
   SyncStateRow,
 } from "./store.js";
+export { resourceSent } from "./store.js";

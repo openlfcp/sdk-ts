@@ -10,6 +10,7 @@ import {
   resourceId,
   toHex,
 } from "@openlfcp/core";
+import { deleteUnsentResource } from "./delete-resource.js";
 import { dekSecretRef, isSecretRef, principalKeySecretRef, type SecretStore } from "./secrets.js";
 import type {
   ControlRecordRow,
@@ -824,6 +825,176 @@ export function runStorageContract(
         )
       )
         throw new Error("exact bytes");
+    });
+    /** Everything a client stores of R before sending it, and another Resource R2. */
+    const unsent = (): StorageWrite[] => [
+      { op: "put-resource", row: resourceRow },
+      { op: "put-route", resourceId: R, route },
+      { op: "put-control-records", records: [record(0, null), record(1, 0)] },
+      {
+        op: "set-control-head",
+        resourceId: R,
+        expected: null,
+        head: { head: record(1, 0).recordId, controlSeq: 1n },
+      },
+      { op: "set-control-conflict", resourceId: R, conflict: { heads: [record(1, 0).recordId] } },
+      ...epochRows.map((epoch) => ({ op: "put-epoch" as const, resourceId: R, epoch })),
+      { op: "put-data-unit", unit: unit(1, 1n), status: "merged", accepted: true },
+      { op: "put-key-package", row: keyPackage(1) },
+      { op: "put-snapshot", row: snapshot },
+      {
+        op: "enqueue",
+        item: {
+          itemId: hash32(id(160)),
+          resourceId: R,
+          kind: "control-record",
+          bytes: Uint8Array.of(1),
+          attempts: 0,
+          lastAttempt: null,
+          nextAttempt: null,
+          blocked: null,
+        },
+      },
+      { op: "put-profile-checkpoint", checkpoint },
+      { op: "put-sync-state", row: { resourceId: R, recentlyAcked: [], ackedDurability: null } },
+      { op: "put-resource", row: { ...resourceRow, resourceId: R2 } },
+      {
+        op: "enqueue",
+        item: {
+          itemId: hash32(id(161)),
+          resourceId: R2,
+          kind: "control-record",
+          bytes: Uint8Array.of(2),
+          attempts: 3,
+          lastAttempt: "2026-10-05T12:00:00Z",
+          nextAttempt: null,
+          blocked: null,
+        },
+      },
+      { op: "put-local-mark", key: "apply:x", value: "1" },
+    ];
+
+    test("deletes a Resource never sent, every row of it at once; others, marks and counters stay", async ({
+      storage: s,
+    }) => {
+      const reserved = await s.actorSequences.reserveNext(R, ALICE);
+      await ok(s, unsent(), "stored");
+      await ok(s, [{ op: "delete-resource", resourceId: R }], "deleted");
+      eq(await s.resources.get(R), undefined, "resource");
+      eq(await s.resources.route(R), undefined, "route");
+      eq(await s.control.records(R), [], "records");
+      eq(await s.control.head(R), undefined, "head");
+      eq(await s.control.conflict(R), undefined, "conflict");
+      eq(await s.control.epochs(R), [], "epochs");
+      eq(await s.dataUnits.get(unit(1, 1n).unitId), undefined, "unit");
+      eq(await s.dataUnits.withStatus(R, "merged"), [], "units by status");
+      eq(await s.keyPackages.list(R), [], "key packages");
+      eq(await s.snapshots.list(R), [], "snapshots");
+      eq(await s.outbound.list(R), [], "outbound");
+      eq(await s.profileState.checkpoint(R), undefined, "checkpoint");
+      eq(await s.syncState.get(R), undefined, "sync state");
+      eq(
+        (await s.resources.list()).map((r) => r.resourceId),
+        [R2],
+        "the other Resource",
+      );
+      eq((await s.outbound.list(R2)).length, 1, "its outbound item");
+      eq(await s.localMarks.get("apply:x"), "1", "local marks");
+      const next = await s.actorSequences.reserveNext(R, ALICE);
+      if (next <= reserved) throw new Error(`actor sequence reused: ${next} after ${reserved}`);
+      await ok(s, [{ op: "delete-resource", resourceId: R }], "deleting again is harmless");
+    });
+
+    test("refuses to delete a Resource that may have been sent, writing nothing of the batch", async ({
+      storage: s,
+    }) => {
+      await ok(s, unsent(), "stored");
+      const cases: [StorageWrite, string][] = [
+        [
+          {
+            op: "update-outbound",
+            itemId: hash32(id(160)),
+            attempts: 1,
+            lastAttempt: "2026-10-05T12:00:00Z",
+          },
+          "attempted",
+        ],
+        [
+          {
+            op: "put-sync-state",
+            row: { resourceId: R, recentlyAcked: [hash32(id(160))], ackedDurability: 1n },
+          },
+          "acked",
+        ],
+        [
+          { op: "put-data-unit", unit: unit(2, 1n, BOB), status: "merged", accepted: true },
+          "received",
+        ],
+      ];
+      for (const [shown, detail] of cases) {
+        const h = await s.commit([shown]);
+        eq(h, { ok: true }, `stored: ${detail}`);
+        const refused = await s.commit([
+          { op: "put-local-mark", key: "batch", value: "written" },
+          { op: "delete-resource", resourceId: R },
+        ]);
+        eq(refused, { ok: false, reason: "RESOURCE_SENT", resourceId: R, detail }, detail);
+        eq(await s.localMarks.get("batch"), undefined, `nothing of the batch: ${detail}`);
+        eq((await s.resources.get(R))?.resourceId, R, `still stored: ${detail}`);
+        // Undone for the next case (a unit cannot be removed: it comes last).
+        if (detail === "attempted")
+          await ok(
+            s,
+            [{ op: "update-outbound", itemId: hash32(id(160)), attempts: 0, lastAttempt: null }],
+            "undone",
+          );
+        if (detail === "acked")
+          await ok(
+            s,
+            [
+              {
+                op: "put-sync-state",
+                row: { resourceId: R, recentlyAcked: [], ackedDurability: null },
+              },
+            ],
+            "undone",
+          );
+      }
+    });
+
+    test("deleteUnsentResource deletes the Resource's keys, never the Principal's", async ({
+      storage: s,
+      secrets,
+    }) => {
+      await ok(s, unsent(), "stored");
+      const keys = [
+        dekSecretRef(R, E0),
+        dekSecretRef(R, E1),
+        principalKeySecretRef(ALICE, "signing"),
+      ];
+      for (const k of keys) await secrets.put(k, Uint8Array.of(42));
+      eq(await deleteUnsentResource(s, secrets, R), { ok: true }, "deleted");
+      eq(await secrets.get(dekSecretRef(R, E0)), undefined, "epoch 0 key");
+      eq(await secrets.get(dekSecretRef(R, E1)), undefined, "epoch 1 key");
+      eq(
+        await secrets.get(principalKeySecretRef(ALICE, "signing")),
+        Uint8Array.of(42),
+        "Principal key",
+      );
+      // A Resource that may have been sent: refused, its keys kept.
+      await ok(s, unsent(), "stored again");
+      await ok(
+        s,
+        [{ op: "put-data-unit", unit: unit(2, 1n, BOB), status: "merged", accepted: true }],
+        "received",
+      );
+      await secrets.put(dekSecretRef(R, E1), Uint8Array.of(7));
+      eq(
+        await deleteUnsentResource(s, secrets, R),
+        { ok: false, reason: "RESOURCE_SENT", resourceId: R, detail: "received" },
+        "refused",
+      );
+      eq(await secrets.get(dekSecretRef(R, E1)), Uint8Array.of(7), "key kept");
     });
   });
 }

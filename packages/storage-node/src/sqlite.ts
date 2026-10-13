@@ -44,6 +44,7 @@ import {
   type ResourceRow,
   type RouteRow,
   reseal,
+  resourceSent,
   type SecretRef,
   type SecretStore,
   type SeenRecord,
@@ -467,6 +468,38 @@ export class SqliteLfcpStorage implements LfcpStorage {
           });
       }
       for (const w of writes) {
+        if (w.op !== "delete-resource") continue;
+        const r = blob(w.resourceId);
+        const resource = this.#get(
+          "SELECT local_principal FROM resources WHERE resource_id = ?",
+          r,
+        );
+        const sync = this.#get("SELECT * FROM sync_state WHERE resource_id = ?", r);
+        const detail = resourceSent({
+          local:
+            resource === undefined || resource.local_principal === null
+              ? null
+              : as<PrincipalId>(resource.local_principal),
+          outbound: this.#all("SELECT * FROM outbound WHERE resource_id = ?", r).map(outboundItem),
+          syncState: sync === undefined ? undefined : syncStateRow(sync),
+          actors: this.#all(
+            `SELECT DISTINCT actor AS p FROM data_units WHERE resource_id = ?
+             UNION SELECT DISTINCT sender FROM key_packages WHERE resource_id = ?
+             UNION SELECT DISTINCT publisher FROM snapshots WHERE resource_id = ?`,
+            r,
+            r,
+            r,
+          ).map((x) => as<PrincipalId>(x.p)),
+        });
+        if (detail !== null)
+          return Object.freeze({
+            ok: false,
+            reason: "RESOURCE_SENT",
+            resourceId: Uint8Array.from(w.resourceId) as ResourceId,
+            detail,
+          });
+      }
+      for (const w of writes) {
         if (w.op !== "expect-previous-unit") continue;
         const row = this.#get(
           "SELECT unit_id FROM data_units WHERE resource_id = ? AND actor = ? AND accepted = 1 ORDER BY actor_seq DESC LIMIT 1",
@@ -734,6 +767,24 @@ export class SqliteLfcpStorage implements LfcpStorage {
           db.prepare(
             "INSERT INTO local_marks (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
           ).run(w.key, w.value);
+        return;
+      case "delete-resource":
+        // The sequence counters stay: a number is never reused.
+        for (const table of [
+          "control_records",
+          "control_heads",
+          "control_conflicts",
+          "epochs",
+          "data_units",
+          "key_packages",
+          "snapshots",
+          "resources",
+          "routes",
+          "outbound",
+          "profile_checkpoints",
+          "sync_state",
+        ])
+          db.prepare(`DELETE FROM ${table} WHERE resource_id = ?`).run(blob(w.resourceId));
         return;
       case "put-profile-checkpoint": {
         const c = w.checkpoint;

@@ -15,25 +15,26 @@ import {
   InMemorySnapshotSequenceReservation,
   type SnapshotSequenceReservation,
 } from "./snapshot-sequence.js";
-import type {
-  CommitResult,
-  ControlConflictRow,
-  ControlHeadRow,
-  ControlRecordRow,
-  DataUnitRow,
-  DataUnitStatus,
-  EpochRow,
-  KeyPackageRow,
-  LfcpStorage,
-  OutboundItem,
-  ProfileCheckpoint,
-  ResourceRow,
-  RouteRow,
-  SeenRecord,
-  SnapshotRow,
-  StorageWrite,
-  StoredDataUnit,
-  SyncStateRow,
+import {
+  type CommitResult,
+  type ControlConflictRow,
+  type ControlHeadRow,
+  type ControlRecordRow,
+  type DataUnitRow,
+  type DataUnitStatus,
+  type EpochRow,
+  type KeyPackageRow,
+  type LfcpStorage,
+  type OutboundItem,
+  type ProfileCheckpoint,
+  type ResourceRow,
+  type RouteRow,
+  resourceSent,
+  type SeenRecord,
+  type SnapshotRow,
+  type StorageWrite,
+  type StoredDataUnit,
+  type SyncStateRow,
 } from "./store.js";
 
 /** A deep copy: every Uint8Array copied, everything frozen. Nothing stored aliases a caller's buffer. */
@@ -227,6 +228,26 @@ function apply(s: State, w: StorageWrite): void {
       if (w.value === null) s.marks.delete(w.key);
       else s.marks.set(w.key, w.value);
       return;
+    case "delete-resource": {
+      const r = hex(w.resourceId);
+      const of = (row: { readonly resourceId: Uint8Array }) => hex(row.resourceId) === r;
+      for (const map of [s.records, s.units, s.keyPackages, s.snapshots, s.outbound] as Map<
+        string,
+        { readonly resourceId: Uint8Array }
+      >[])
+        for (const [k, v] of map) if (of(v)) map.delete(k);
+      for (const map of [
+        s.heads,
+        s.conflicts,
+        s.epochs,
+        s.resources,
+        s.routes,
+        s.checkpoints,
+        s.syncStates,
+      ])
+        map.delete(r);
+      return;
+    }
   }
 }
 
@@ -316,6 +337,33 @@ export class InMemoryLfcpStorage implements LfcpStorage {
             reason: "CONTROL_HEAD_MISMATCH",
             resourceId: own(w.resourceId),
             current: current === null ? null : own(current),
+          }),
+        );
+    }
+    for (const w of writes) {
+      if (w.op !== "delete-resource") continue;
+      const r = hex(w.resourceId);
+      const detail = resourceSent({
+        local: next.resources.get(r)?.localPrincipal?.principalId ?? null,
+        outbound: [...next.outbound.values()].filter((o) => hex(o.resourceId) === r),
+        syncState: next.syncStates.get(r),
+        actors: [
+          ...[...next.units.values()].filter((u) => hex(u.resourceId) === r).map((u) => u.actor),
+          ...[...next.keyPackages.values()]
+            .filter((k) => hex(k.resourceId) === r)
+            .map((k) => k.sender),
+          ...[...next.snapshots.values()]
+            .filter((x) => hex(x.resourceId) === r)
+            .map((x) => x.publisher),
+        ],
+      });
+      if (detail !== null)
+        return Promise.resolve(
+          Object.freeze({
+            ok: false,
+            reason: "RESOURCE_SENT",
+            resourceId: own(w.resourceId),
+            detail,
           }),
         );
     }

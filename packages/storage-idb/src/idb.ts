@@ -34,6 +34,7 @@ import {
   type ResourceRow,
   type RouteRow,
   reseal,
+  resourceSent,
   type SecretStore,
   type SeenRecord,
   type SnapshotRow,
@@ -459,6 +460,41 @@ export class IdbLfcpStorage implements LfcpStorage {
             );
         }
         for (const w of writes) {
+          if (w.op !== "delete-resource") continue;
+          const r = hex(w.resourceId);
+          const resource = (await req(tx.objectStore("resources").get(r))) as
+            | ResourceRow
+            | undefined;
+          const of = async <T>(store: Store): Promise<T[]> =>
+            (
+              (await req(tx.objectStore(store).getAll())) as {
+                readonly r: string;
+                readonly row: T;
+              }[]
+            )
+              .filter((v) => v.r === r)
+              .map((v) => v.row);
+          const detail = resourceSent({
+            local: resource?.localPrincipal?.principalId ?? null,
+            outbound: await of<OutboundItem>("outbound"),
+            syncState: (await req(tx.objectStore("syncStates").get(r))) as SyncStateRow | undefined,
+            actors: [
+              ...(await of<StoredDataUnit>("units")).map((u) => u.actor),
+              ...(await of<KeyPackageRow>("keyPackages")).map((k) => k.sender),
+              ...(await of<SnapshotRow>("snapshots")).map((x) => x.publisher),
+            ],
+          });
+          if (detail !== null)
+            throw new HeadMismatch(
+              Object.freeze({
+                ok: false,
+                reason: "RESOURCE_SENT",
+                resourceId: own(w.resourceId),
+                detail,
+              }),
+            );
+        }
+        for (const w of writes) {
           if (w.op !== "expect-previous-unit") continue;
           const [r, a] = [hex(w.resourceId), hex(w.actor)];
           let cursor = await req(
@@ -658,6 +694,35 @@ export class IdbLfcpStorage implements LfcpStorage {
       case "put-sync-state":
         await req(s("syncStates").put(w.row, hex(w.row.resourceId)));
         return;
+      case "delete-resource": {
+        // The sequence counters stay: a number is never reused.
+        const r = hex(w.resourceId);
+        for (const name of [
+          "records",
+          "epochs",
+          "units",
+          "keyPackages",
+          "snapshots",
+          "outbound",
+        ] as const) {
+          let cursor = await req(s(name).openCursor());
+          while (cursor !== null) {
+            if ((cursor.value as { readonly r: string }).r === r) await req(cursor.delete());
+            cursor.continue();
+            cursor = await req(cursor.request as IDBRequest<IDBCursorWithValue | null>);
+          }
+        }
+        for (const name of [
+          "heads",
+          "conflicts",
+          "resources",
+          "routes",
+          "checkpoints",
+          "syncStates",
+        ] as const)
+          await req(s(name).delete(r));
+        return;
+      }
       case "put-local-mark": {
         // Kept in the meta store under "mark:" (no schema change).
         const key = `${MARK}${w.key}`;
