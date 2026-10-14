@@ -246,6 +246,9 @@ export interface OutboundQueueOptions {
   readonly requestTimeout?: { readonly baseMs: number; readonly maxMs: number };
 }
 
+/** How many expired flights are remembered for a late answer. */
+const EXPIRED_KEPT = 1024;
+
 interface Flight {
   readonly resourceId: ResourceId;
   readonly type: CoreMessageType;
@@ -283,6 +286,16 @@ export class OutboundQueue {
   #maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES;
   /** message ID hex → what it carried */
   readonly #flights = new Map<string, Flight>();
+  /**
+   * Flights that expired unanswered (#expire), by message ID, the most
+   * recent {@link EXPIRED_KEPT}: a late answer to one is still an answer to
+   * our message, correlated for §4.1's acceptance evidence. Without them, an
+   * ACK handled after the timeout sweep (a busy event loop: the sweep's
+   * timer runs before the waiting message) dequeued the items as
+   * uncorrelated, their batch was "evidence-unavailable" for good, and no
+   * later ACK could change it (the Shared Tasks soak of 0.4.0-beta.17).
+   */
+  readonly #expired = new Map<string, Flight>();
   /** item ID hex → message ID hex */
   readonly #inFlight = new Map<string, string>();
   /**
@@ -321,6 +334,9 @@ export class OutboundQueue {
     for (const [key, flight] of this.#flights) {
       if (flight.deadline > at) continue;
       this.#flights.delete(key);
+      this.#expired.set(key, flight);
+      if (this.#expired.size > EXPIRED_KEPT)
+        this.#expired.delete(this.#expired.keys().next().value as string);
       for (const id of flight.itemIds)
         if (this.#inFlight.get(toHex(id)) === key) {
           this.#inFlight.delete(toHex(id));
@@ -488,7 +504,12 @@ export class OutboundQueue {
     if (messageId === undefined) return undefined;
     const key = toHex(messageId);
     const flight = this.#flights.get(key);
-    if (flight === undefined) return undefined;
+    if (flight === undefined) {
+      // A late answer to a message whose flight expired: ours, correlated.
+      const late = this.#expired.get(key);
+      this.#expired.delete(key);
+      return late;
+    }
     this.#flights.delete(key);
     for (const id of flight.itemIds) {
       if (this.#inFlight.get(toHex(id)) === key) this.#inFlight.delete(toHex(id));

@@ -296,7 +296,10 @@ describe("OutboundQueue (LFCP-036)", () => {
     expect(third).toBeDefined();
     expect(await q.next(R, at(3000 + 2999))).toEqual([]);
     expect(await q.next(R, at(6000))).toHaveLength(1);
-    // A late ACK of the first message still removes the items it names.
+    // A late ACK of the first message still removes the items it names, and
+    // it answers our message: correlated, so its durability is acceptance
+    // evidence (§4.1). It was taken as uncorrelated, and the batch stayed
+    // "evidence-unavailable" for good (the Shared Tasks soak of 0.4.0-beta.17).
     const r = await q.onAck(
       ack(
         first as OutboundMessage,
@@ -305,6 +308,7 @@ describe("OutboundQueue (LFCP-036)", () => {
       at(6001),
     );
     expect(r.acked).toHaveLength(2);
+    expect(r.correlated).toBe(true);
     expect(await storage.outbound.list(R)).toEqual([]);
   });
 
