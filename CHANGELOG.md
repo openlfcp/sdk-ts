@@ -9,7 +9,7 @@ remove or rename any.
 The 0.2 line is final: published under the npm dist-tag `latest`, which
 moves from 0.1.5 (0.1.4 and 0.1.5 came from the 0.1 maintenance line;
 0.1.5's D1 table guard is rule R10 here). It is the code of
-`0.2.0-beta.8`, with no change but the version. The SDK is read at spec
+`0.2.0-beta.10`, with no change but the version. The SDK is read at spec
 `mvp-0.2-baseline.12` and tested against the reference server at
 `138030a`. The beta sections below give each change in detail; this
 section sums up what 0.2 adds to 0.1.x.
@@ -45,6 +45,20 @@ section sums up what 0.2 adds to 0.1.x.
   accepted own unit exists (beta.8).
 - A send on a connection that closed meanwhile throws `ConnectionNotReady`
   instead of an `INTERNAL` error event (beta.7).
+
+### Fixed
+
+- A section's replica no longer keeps an old copy of the document per
+  unchanged task: memory stays flat as the history grows
+  (`SectionReplica.stage`, `apply`, `revert`) (beta.9).
+- A confirmation that arrives after its request timed out is still matched
+  to its request, so the batch is confirmed instead of staying
+  "confirmation unavailable" (`OutboundQueue.onAck`) (beta.9).
+- A section with deleted tasks stays fast as its history grows: retained
+  concurrent edits are decided with vector clocks, the decoded history is
+  reused from one revision to the next, and the tree and snapshot are
+  derived once per revision's heads (`SectionReplica.snapshot`, `tree`);
+  the results are as before (beta.10).
 
 ### Upgrading from 0.1.x
 
