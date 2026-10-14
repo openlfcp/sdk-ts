@@ -777,8 +777,33 @@ export class SectionReplica {
    * and the problems to show. `revision` is the modelRevision of a commit
    * receipt and the `base` of text.edit.
    */
+  /**
+   * The tree and snapshot derived from the document at one revision (its
+   * heads): both are frozen and depend on the document alone, so a read at
+   * the same revision returns them again. Any change to the document
+   * changes its heads, so every path that changes it (commit, apply,
+   * revert, receive, a rebuild) gives a new revision and a new derivation
+   * (soak #11: the status was derived again on every refresh).
+   */
+  #derived:
+    | { readonly revision: string; tree: SectionTree; snapshot?: SectionSnapshot }
+    | undefined;
+
+  #derivedNow(): { readonly revision: string; tree: SectionTree; snapshot?: SectionSnapshot } {
+    const revision = revisionOf(this.#doc);
+    if (this.#derived?.revision !== revision)
+      this.#derived = { revision, tree: deriveTree(this.#doc) };
+    return this.#derived;
+  }
+
   snapshot(): SectionSnapshot {
-    const tree = deriveTree(this.#doc);
+    const derived = this.#derivedNow();
+    if (derived.snapshot !== undefined) return derived.snapshot;
+    derived.snapshot = this.#snapshotOf(derived.tree);
+    return derived.snapshot;
+  }
+
+  #snapshotOf(tree: SectionTree): SectionSnapshot {
     const root = this.#doc as AMap;
     const section = (root.section ?? {}) as AMap;
     const nodes = (root.nodes ?? {}) as AMap;
@@ -846,7 +871,7 @@ export class SectionReplica {
 
   /** §7, §9, §14.3: the effective tree, hidden nodes and structural facts. */
   tree(): SectionTree {
-    return deriveTree(this.#doc);
+    return this.#derivedNow().tree;
   }
 
   /** The document heads, sorted, as one string. */

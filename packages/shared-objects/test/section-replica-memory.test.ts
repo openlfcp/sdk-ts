@@ -8,7 +8,12 @@ import * as Real from "@automerge/automerge";
 import { principalId, resourceId, toHex } from "@openlfcp/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createTask } from "../src/index.js";
-import { type SectionIntent, SectionIntentError, SectionReplica } from "../src/sections/index.js";
+import {
+  deriveTree,
+  type SectionIntent,
+  SectionIntentError,
+  SectionReplica,
+} from "../src/sections/index.js";
 
 const probe = vi.hoisted(() => ({
   clones: new Set<unknown>(),
@@ -178,5 +183,64 @@ describe("a failed apply leaves the replica as it was", () => {
     const before = r.revision();
     expect(() => r.commit([{ intent: "node.delete", id: id(9999) }])).toThrow(SectionIntentError);
     expect(r.revision()).toBe(before);
+  });
+});
+
+// The tree and snapshot are derived once per revision (soak #11): every
+// path that changes the document gives a new revision, so a read after it
+// derives again, and reads without a change return the same objects.
+describe("the derived tree and snapshot follow every change", () => {
+  const fresh = (r: SectionReplica) =>
+    JSON.stringify(deriveTree(Real.applyChanges(Real.init<unknown>(), r.changes())[0]));
+  /** `r` read (so cached), then `change`d: its reads are the document's now. */
+  const follows = (r: SectionReplica, change: () => void) => {
+    const before = r.snapshot();
+    expect(r.snapshot()).toBe(before);
+    expect(r.tree()).toBe(r.tree());
+    change();
+    const after = r.snapshot();
+    expect(after.revision).toBe(r.revision());
+    expect(JSON.stringify(r.tree())).toBe(fresh(r));
+    return { before, after };
+  };
+
+  it("commit", () => {
+    const r = replica(3);
+    const { before, after } = follows(r, () => r.commit([{ intent: "node.delete", id: id(100) }]));
+    expect(before.nodes[id(100)]?.deleted).toBe(false);
+    expect(after.nodes[id(100)]?.deleted).toBe(true);
+  });
+
+  it("apply, then revert", () => {
+    const r = replica(3);
+    const s = r.stage([{ intent: "node.delete", id: id(101) }]);
+    const { after } = follows(r, () => s?.apply());
+    expect(after.nodes[id(101)]?.deleted).toBe(true);
+    const back = follows(r, () => s?.revert()).after;
+    expect(back.nodes[id(101)]?.deleted).toBe(false);
+  });
+
+  it("receive", () => {
+    const r = replica(3);
+    const other = SectionReplica.empty({
+      resource,
+      principal: principalId(new Uint8Array(32).fill(2)),
+    });
+    other.receiveChanges(r.changes());
+    other.commit([{ intent: "node.delete", id: id(102) }]);
+    const { after } = follows(r, () => r.receiveChanges(other.changes()));
+    expect(after.nodes[id(102)]?.deleted).toBe(true);
+  });
+
+  it("a rebuild after a failed apply", () => {
+    const r = replica(3);
+    const s = r.stage([{ intent: "node.delete", id: id(100) }]);
+    const { before, after } = follows(r, () => {
+      probe.failApply = true;
+      expect(() => s?.apply()).toThrow("injected");
+    });
+    // The same revision as before: the same content, read again from the rebuilt document.
+    expect(after.revision).toBe(before.revision);
+    expect(after.nodes[id(100)]?.deleted).toBe(false);
   });
 });

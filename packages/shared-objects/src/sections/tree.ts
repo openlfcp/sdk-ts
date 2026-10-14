@@ -305,6 +305,65 @@ export function deriveTree(
  * the attention a concurrent edit raised), while two concurrent deletions both
  * count (baseline.9).
  */
+/** What retainedEdits reads of one change: its place in the history and its operations. */
+interface ChangeSummary {
+  readonly hash: string;
+  readonly deps: readonly string[];
+  readonly actor: string;
+  readonly seq: number;
+  readonly ops: readonly {
+    readonly obj: string;
+    readonly action: string;
+    readonly key?: string | undefined;
+    readonly value?: unknown;
+  }[];
+}
+
+const summarise = (bytes: Uint8Array): ChangeSummary => {
+  const c = A.decodeChange(bytes);
+  return {
+    hash: c.hash,
+    deps: c.deps,
+    actor: c.actor,
+    seq: c.seq,
+    ops: c.ops.map((op) => {
+      const o = op as { obj: string; action: string; key?: string; value?: unknown };
+      return { obj: o.obj, action: o.action, key: o.key, value: o.value };
+    }),
+  };
+};
+
+/**
+ * The decoded history of the documents read last, by their heads (a few,
+ * least recently used last out). A change is the same wherever it is, so a
+ * later revision of the same document decodes only the changes since a
+ * revision read before, whose heads it has: decoding the whole history on
+ * every new revision was linear in it, per pass (soak #11).
+ */
+const histories = new Map<string, readonly ChangeSummary[]>();
+const HISTORIES = 16;
+
+function historyOf(doc: A.Doc<unknown>): readonly ChangeSummary[] {
+  const key = [...A.getHeads(doc)].sort().join(",");
+  const known = histories.get(key);
+  if (known !== undefined) {
+    histories.delete(key);
+    histories.set(key, known);
+    return known;
+  }
+  let out: readonly ChangeSummary[] | undefined;
+  for (const [k, list] of [...histories].reverse()) {
+    const heads = k === "" ? [] : k.split(",");
+    if (A.getMissingDeps(doc, heads).length > 0) continue;
+    out = [...list, ...A.getChangesSince(doc, heads).map(summarise)];
+    break;
+  }
+  out ??= A.getAllChanges(doc).map(summarise);
+  histories.set(key, out);
+  while (histories.size > HISTORIES) histories.delete(histories.keys().next().value as string);
+  return out;
+}
+
 function retainedEdits(
   doc: A.Doc<unknown>,
   hidden: ReadonlySet<string>,
@@ -338,13 +397,15 @@ function retainedEdits(
   }
 
   const deps = new Map<string, readonly string[]>();
+  // Each change's actor and sequence number, for its vector clock below.
+  const author = new Map<string, { readonly actor: string; readonly seq: number }>();
   const deletes: { hash: string; node: string }[] = [];
   // Every lifecycle write (any value), to tell whether a deletion is still held.
   const lifecycleWrites: { hash: string; node: string }[] = [];
   const edits: { hash: string; node: string }[] = [];
-  for (const bytes of A.getAllChanges(doc as A.Doc<AMap>)) {
-    const change = A.decodeChange(bytes);
+  for (const change of historyOf(doc)) {
     deps.set(change.hash, change.deps);
+    author.set(change.hash, { actor: change.actor, seq: change.seq });
     const lastLifecycle = new Map<string, unknown>();
     const touched = new Set<string>();
     for (const op of change.ops) {
@@ -373,7 +434,48 @@ function retainedEdits(
   }
   if (deletes.length === 0 || edits.length === 0) return [];
 
-  /** Every change `hash` depends on, transitively, memoized. */
+  /**
+   * Each change's vector clock: the highest sequence number of every actor
+   * in its causal history, itself included. When each change of an actor
+   * has that actor's previous change in its history (as Automerge writes
+   * them), `a` is in the history of `b` exactly when b's clock has a's actor
+   * at a's sequence or later: O(history × actors), where a set of ancestors
+   * per change was O(history²) (soak #11: seconds per pass after ~3,000
+   * changes in a section with deleted Tasks). A history where that does not
+   * hold (a change made without its actor's previous one), or one with more
+   * than 32 actors, falls back to the exact sets.
+   */
+  const clocks = new Map<string, ReadonlyMap<string, number>>();
+  // A clock holds an entry per actor: with many actors (a hostile or unusual
+  // history), the exact sets are cheaper.
+  let regular = new Set([...author.values()].map((x) => x.actor)).size <= 32;
+  for (const start of regular ? deps.keys() : []) {
+    const stack = [start];
+    while (stack.length > 0) {
+      const h = stack[stack.length - 1] as string;
+      if (clocks.has(h)) {
+        stack.pop();
+        continue;
+      }
+      const pending = (deps.get(h) ?? []).filter((d) => deps.has(d) && !clocks.has(d));
+      if (pending.length > 0) {
+        stack.push(...pending);
+        continue;
+      }
+      stack.pop();
+      const clock = new Map<string, number>();
+      for (const d of deps.get(h) ?? [])
+        for (const [actor, seq] of clocks.get(d) ?? [])
+          if (seq > (clock.get(actor) ?? 0)) clock.set(actor, seq);
+      const me = author.get(h);
+      if (me !== undefined) {
+        if ((clock.get(me.actor) ?? 0) !== me.seq - 1) regular = false;
+        if (me.seq > (clock.get(me.actor) ?? 0)) clock.set(me.actor, me.seq);
+      }
+      clocks.set(h, clock);
+    }
+  }
+  /** Every change `hash` depends on, transitively, memoized (the exact fallback). */
   const ancestry = new Map<string, ReadonlySet<string>>();
   const ancestorsOf = (hash: string): ReadonlySet<string> => {
     const known = ancestry.get(hash);
@@ -389,8 +491,14 @@ function retainedEdits(
     ancestry.set(hash, out);
     return out;
   };
-  const concurrent = (a: string, b: string) =>
-    a !== b && !ancestorsOf(a).has(b) && !ancestorsOf(b).has(a);
+  /** Whether change `a` is in the causal history of change `b` (a ≠ b). */
+  const before = (a: string, b: string): boolean => {
+    if (a === b) return false;
+    if (!regular) return ancestorsOf(b).has(a);
+    const me = author.get(a);
+    return me !== undefined && (clocks.get(b)?.get(me.actor) ?? 0) >= me.seq;
+  };
+  const concurrent = (a: string, b: string) => a !== b && !before(a, b) && !before(b, a);
 
   // §9 (baseline.9): a deletion counts only while the lifecycle register still
   // holds it. A later write to the same register — one that has the deletion in
@@ -401,7 +509,7 @@ function retainedEdits(
   const heldDeletes = deletes.filter(
     (d) =>
       !lifecycleWrites.some(
-        (w) => w.node === d.node && w.hash !== d.hash && ancestorsOf(w.hash).has(d.hash),
+        (w) => w.node === d.node && w.hash !== d.hash && before(d.hash, w.hash),
       ),
   );
 
