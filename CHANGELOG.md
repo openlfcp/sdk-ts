@@ -4,6 +4,23 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.0-beta.9 — 2026-10-14
+
+A fix release. The SDK is still read at spec `mvp-0.2-baseline.12` and tested
+against the reference server at `138030a`; nothing else changes. Published
+under the npm dist-tag `beta`, like the earlier 0.2 betas.
+
+### Fixed
+
+- A section's replica no longer keeps an old copy of the document per
+  unchanged task: memory stays flat as the history grows. Each commit made
+  its change on a copy of the document and kept that copy, and every task
+  unchanged since an earlier commit kept that commit's whole document alive:
+  with 170 tasks and 2,000 changes, about 1.6 GB of WebAssembly memory. The
+  replica now applies the change to its own document and frees the copies
+  it makes (`SectionReplica.stage`, `apply`, `revert`); change bytes,
+  refusals and rollback are as before.
+
 ## 0.2.0-beta.8 — 2026-10-13
 
 A fix release. The SDK is still read at spec `mvp-0.2-baseline.12` and tested
