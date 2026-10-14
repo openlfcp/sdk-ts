@@ -20,6 +20,13 @@ under the npm dist-tag `beta`, like the earlier 0.2 betas.
   replica now applies the change to its own document and frees the copies
   it makes (`SectionReplica.stage`, `apply`, `revert`); change bytes,
   refusals and rollback are as before.
+- A confirmation that arrives after its request timed out (a long pause in
+  the app, when the timeout check runs before the waiting answer) is still
+  matched to its request, so the batch is confirmed, instead of staying
+  "confirmation unavailable" for good. Such a late ACK removed the items
+  but was taken as uncorrelated, so it was no acceptance evidence (§4.1),
+  and nothing could confirm the batch afterwards. The outbound queue now
+  remembers the most recent expired requests (`OutboundQueue.onAck`).
 
 ## 0.2.0-beta.8 — 2026-10-13
 
