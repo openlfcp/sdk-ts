@@ -435,6 +435,10 @@ const isListStyle = (s: unknown): s is ListStyle =>
   typeof s === "string" && (LIST_STYLES as readonly string[]).includes(s);
 const revisionOf = (doc: Doc) => [...A.getHeads(doc)].sort().join(",");
 
+/** `changes` without those of `batch` (by hash), in their order. */
+const withoutBatch = (changes: readonly Uint8Array[], batch: ReadonlySet<string>) =>
+  changes.filter((c) => !batch.has(A.decodeChange(c).hash as string));
+
 /** Rebuilds a section document from the changes it held before an aborted apply. */
 function restoreSection(changes: readonly Uint8Array[], actor: string, revision: string): Doc {
   let restored: Doc;
@@ -911,6 +915,9 @@ export class SectionReplica {
     if (A.getActorId(this.#doc) !== this.#actor)
       throw new Error("the document actor is not the §2 actor");
     const affected = new Set<string>();
+    // The validation's own document, freed on every exit (#7: an Automerge
+    // document left to the garbage collector holds its whole history in
+    // wasm memory until the collector happens to run).
     let scratch = A.clone(this.#doc);
     // The validation of the document before the batch: nodes the batch
     // creates are valid by construction, so it is computed again only when
@@ -927,107 +934,160 @@ export class SectionReplica {
     const chunks: Write[][] = [[]];
     const used = { text: 0, nodes: 0 };
     let i = -1;
-    for (const step of steps) {
-      if (step.intent !== "text.continue") i = Math.min(i + 1, intents.length - 1);
-      const cost = { text: 0, nodes: 0 };
-      const write = this.#prepare(scratch, state, step, i, affected, cost);
-      if (cost.text > AUTHORING_BUDGET.textOperations || cost.nodes > AUTHORING_BUDGET.createdNodes)
-        throw new SectionIntentError(
-          "OVER_BUDGET",
-          `one intent is over the §16.2 budgets (${cost.text} Text operations, ${cost.nodes} nodes)`,
-          i,
-        );
-      const current = chunks[chunks.length - 1] as Write[];
-      if (
-        current.length > 0 &&
-        (used.text + cost.text > AUTHORING_BUDGET.textOperations ||
-          used.nodes + cost.nodes > AUTHORING_BUDGET.createdNodes)
-      ) {
-        chunks.push([write]);
-        used.text = cost.text;
-        used.nodes = cost.nodes;
-      } else {
-        current.push(write);
-        used.text += cost.text;
-        used.nodes += cost.nodes;
+    try {
+      for (const step of steps) {
+        if (step.intent !== "text.continue") i = Math.min(i + 1, intents.length - 1);
+        const cost = { text: 0, nodes: 0 };
+        const write = this.#prepare(scratch, state, step, i, affected, cost);
+        if (
+          cost.text > AUTHORING_BUDGET.textOperations ||
+          cost.nodes > AUTHORING_BUDGET.createdNodes
+        )
+          throw new SectionIntentError(
+            "OVER_BUDGET",
+            `one intent is over the §16.2 budgets (${cost.text} Text operations, ${cost.nodes} nodes)`,
+            i,
+          );
+        const current = chunks[chunks.length - 1] as Write[];
+        if (
+          current.length > 0 &&
+          (used.text + cost.text > AUTHORING_BUDGET.textOperations ||
+            used.nodes + cost.nodes > AUTHORING_BUDGET.createdNodes)
+        ) {
+          chunks.push([write]);
+          used.text = cost.text;
+          used.nodes = cost.nodes;
+        } else {
+          current.push(write);
+          used.text += cost.text;
+          used.nodes += cost.nodes;
+        }
+        scratch = A.change(scratch, { time: 0 }, write);
+        if (step.intent === "section.create" || step.intent === "section.mark_ready")
+          state.v = undefined;
+        // Only creations keep every verified ancestor chain as it was.
+        if (!KEEPS_CHAINS.has(step.intent)) state.chainOk.clear();
       }
-      scratch = A.change(scratch, { time: 0 }, write);
-      if (step.intent === "section.create" || step.intent === "section.mark_ready")
-        state.v = undefined;
-      // Only creations keep every verified ancestor chain as it was.
-      if (!KEEPS_CHAINS.has(step.intent)) state.chainOk.clear();
+    } finally {
+      A.free(scratch);
     }
 
     const message = intents.map((x) => x.intent).join(",");
     const before = A.getHeads(this.#doc);
-    // On a clone: A.change outdates the handle it is given, and this
-    // replica keeps its own until apply().
-    let next = A.clone(this.#doc, { actor: this.#actor });
-    const parts: SectionChangePart[] = [];
-    const partChanges: CheckedChange[] = [];
-    for (const chunk of chunks) {
-      if (chunk.length === 0) continue;
-      const heads = A.getHeads(next).join();
-      next = A.change(next, { message, time: 0 }, (d) => {
-        for (const w of chunk) w(d);
-      });
-      if (A.getHeads(next).join() === heads) continue;
-      const bytes = A.getLastLocalChange(next) as Uint8Array;
-      let checked: CheckedChange;
-      try {
-        checkChangeExpansion(bytes);
-        checked = checkChange(bytes);
-      } catch (e) {
-        throw new SectionIntentError(
-          "OVER_BUDGET",
-          `a change of the batch is larger than one change may be (SOP §11.1: ${(e as Error).message})`,
+    // The batch's changes are made on a fork with this replica's §2 actor;
+    // apply() gives #doc the same changes by applyChanges, so #doc keeps its
+    // one Automerge document. (Adopting the fork as #doc kept, through each
+    // object the new document shared with the old one, one old document
+    // alive per unchanged node: a section's memory grew with the number of
+    // Tasks times its history, #7.) The fork is freed on every exit.
+    let work = A.clone(this.#doc, { actor: this.#actor });
+    let handedOver = false;
+    try {
+      const parts: SectionChangePart[] = [];
+      const partChanges: CheckedChange[] = [];
+      for (const chunk of chunks) {
+        if (chunk.length === 0) continue;
+        const heads = A.getHeads(work).join();
+        work = A.change(work, { message, time: 0 }, (d) => {
+          for (const w of chunk) w(d);
+        });
+        if (A.getHeads(work).join() === heads) continue;
+        const bytes = A.getLastLocalChange(work) as Uint8Array;
+        let checked: CheckedChange;
+        try {
+          checkChangeExpansion(bytes);
+          checked = checkChange(bytes);
+        } catch (e) {
+          throw new SectionIntentError(
+            "OVER_BUDGET",
+            `a change of the batch is larger than one change may be (SOP §11.1: ${(e as Error).message})`,
+          );
+        }
+        partChanges.push(checked);
+        parts.push(
+          Object.freeze({
+            change: checked.bytes,
+            plaintext: frameProfilePayload(checked.bytes),
+            hash: checked.hash,
+            seq: checked.seq,
+          }),
         );
       }
-      partChanges.push(checked);
-      parts.push(
-        Object.freeze({
-          change: checked.bytes,
-          plaintext: frameProfilePayload(checked.bytes),
-          hash: checked.hash,
-          seq: checked.seq,
-        }),
-      );
+      if (parts.length === 0 || A.getHeads(work).join() === before.join()) return null;
+      const last = parts[parts.length - 1] as SectionChangePart;
+      const change: SectionLocalChange = Object.freeze({
+        intents: Object.freeze(intents.map((x) => x.intent)),
+        parts: Object.freeze(parts),
+        ...last,
+        affectedNodeIds: Object.freeze([...affected].sort()),
+        modelRevision: revisionOf(work),
+      });
+      const base = revisionOf(this.#doc);
+      const batch = new Set(partChanges.map((c) => c.hash));
+      const priorSeqs = this.#seqs === undefined ? undefined : new Map(this.#seqs);
+      const fork = work;
+      let forkFreed = false;
+      const freeFork = () => {
+        if (forkFreed) return;
+        forkFreed = true;
+        A.free(fork);
+      };
+      let applied = false;
+      handedOver = true;
+      return Object.freeze({
+        change,
+        apply: () => {
+          if (applied) return;
+          if (forkFreed) throw new Error("the batch could not be applied before; stage it again");
+          if (revisionOf(this.#doc) !== base)
+            throw new Error("the replica changed since the batch was staged; stage it again");
+          try {
+            try {
+              this.#doc = A.applyChanges(
+                this.#doc,
+                partChanges.map((c) => c.bytes),
+              )[0] as Doc;
+              if (revisionOf(this.#doc) !== change.modelRevision)
+                throw new Error("the batch did not apply as it was staged");
+            } catch (e) {
+              if (isWasmTrap(e)) throw e;
+              // The document is not trusted after a failed apply: rebuilt from
+              // the changes the fork held before the batch, never from it.
+              this.#doc = this.#rebuilt(withoutBatch(A.getAllChanges(fork), batch), base);
+              throw e;
+            }
+          } finally {
+            freeFork();
+          }
+          if (this.#seqs !== undefined && last.seq > (this.#seqs.get(this.#actor) ?? 0))
+            this.#seqs.set(this.#actor, last.seq);
+          for (const c of partChanges) this.#refs?.add(c.hash, parsedOf(c));
+          applied = true;
+        },
+        revert: () => {
+          if (!applied) return;
+          if (revisionOf(this.#doc) !== change.modelRevision)
+            throw new Error(
+              "the replica changed after the batch was applied; it cannot be reverted",
+            );
+          // The document as it was before the batch: its changes without the batch's.
+          this.#doc = this.#rebuilt(withoutBatch(A.getAllChanges(this.#doc), batch), base);
+          this.#seqs = priorSeqs === undefined ? undefined : new Map(priorSeqs);
+          this.#refs = null;
+          applied = false;
+        },
+      });
+    } finally {
+      if (!handedOver) A.free(work);
     }
-    if (parts.length === 0 || A.getHeads(next).join() === before.join()) return null;
-    const last = parts[parts.length - 1] as SectionChangePart;
-    const change: SectionLocalChange = Object.freeze({
-      intents: Object.freeze(intents.map((x) => x.intent)),
-      parts: Object.freeze(parts),
-      ...last,
-      affectedNodeIds: Object.freeze([...affected].sort()),
-      modelRevision: revisionOf(next),
-    });
-    const base = revisionOf(this.#doc);
-    const prior = this.#doc;
-    const priorSeqs = this.#seqs === undefined ? undefined : new Map(this.#seqs);
-    let applied = false;
-    return Object.freeze({
-      change,
-      apply: () => {
-        if (applied) return;
-        if (revisionOf(this.#doc) !== base)
-          throw new Error("the replica changed since the batch was staged; stage it again");
-        this.#doc = next;
-        if (this.#seqs !== undefined && last.seq > (this.#seqs.get(this.#actor) ?? 0))
-          this.#seqs.set(this.#actor, last.seq);
-        for (const c of partChanges) this.#refs?.add(c.hash, parsedOf(c));
-        applied = true;
-      },
-      revert: () => {
-        if (!applied) return;
-        if (this.#doc !== next)
-          throw new Error("the replica changed after the batch was applied; it cannot be reverted");
-        this.#doc = prior;
-        this.#seqs = priorSeqs === undefined ? undefined : new Map(priorSeqs);
-        this.#refs = null;
-        applied = false;
-      },
-    });
+  }
+
+  /** A document of exactly `changes`, with this replica's §2 actor, at `revision` (checked). */
+  #rebuilt(changes: readonly Uint8Array[], revision: string): Doc {
+    const doc = restoreSection(changes, this.#actor, revision);
+    if (A.getActorId(doc) !== this.#actor)
+      throw new Error("the section replica could not be restored: another actor");
+    return doc;
   }
 
   /**
