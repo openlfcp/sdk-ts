@@ -4,6 +4,58 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.0 — unreleased
+
+The 0.2 line is final: published under the npm dist-tag `latest`, which
+moves from 0.1.5 (0.1.4 and 0.1.5 came from the 0.1 maintenance line;
+0.1.5's D1 table guard is rule R10 here). It is the code of
+`0.2.0-beta.8`, with no change but the version. The SDK is read at spec
+`mvp-0.2-baseline.12` and tested against the reference server at
+`138030a`. The beta sections below give each change in detail; this
+section sums up what 0.2 adds to 0.1.x.
+
+### Added
+
+- Shared Sections (SHARED-SECTIONS-PROFILE-01, `@openlfcp/shared-objects/sections`):
+  `SectionReplica`, the section writer and reader: sections with Tasks,
+  paragraphs, list items and raw blocks; moves, deletion and restore; Text
+  edits, splits and joins; the effective tree with its structural facts
+  (placement conflicts, parent cycles, lifecycle conflicts, retained
+  concurrent edits) and their explicit resolutions; section Snapshots; and
+  `validateSection` and the schema checks against the whole corpus (SS01 to
+  SS94) (beta.1 to beta.7).
+- The Shared Objects admission as a module every profile shares
+  (`@openlfcp/shared-objects/admission`), with the §11.4 reference rules R8 to
+  R10 and the later byte, sequence and actor checks (beta.1, beta.2).
+- The section-aware sync client: batch status and the status stream, commit
+  receipts, write access with its reason (`canWrite`, `accessState`), the
+  catch-up fact, the `TypingCoalescer`, access recovery after a server
+  restore, `revokeAccess` with Data Epoch rotation, re-proposal of Control
+  Records a moved head refused (`reproposeControlRecords`, the `repropose`
+  event, `localControlChain`), and `deleteUnsentResource` (beta.1, beta.6,
+  beta.7).
+
+### Changed
+
+- Concurrent equal values of a scalar register agree (§45; SS86): no
+  conflict for two equal completions, restores, placements or titles
+  (beta.7).
+- After a member's first unit went stale, its next unit names no previous
+  unit (LFCP-WIRE-01 §26.2); an explicit null previous is refused while an
+  accepted own unit exists (beta.8).
+- A send on a connection that closed meanwhile throws `ConnectionNotReady`
+  instead of an `INTERNAL` error event (beta.7).
+
+### Upgrading from 0.1.x
+
+- `@openlfcp/storage-idb` opens its database at version 2: a 0.1.x database
+  is kept as it is and opens; a 0.1.x client then refuses the upgraded
+  database (VersionError). Going back is supported only to a client that
+  knows version 2. README "Local storage upgrades" gives the matrix, and
+  `conformance/upgrade/` covers 0.1.3 storage (beta.1).
+- Until 1.0 a minor version may change APIs: the Shared Sections API is
+  new in 0.2, and the Shared Objects API of 0.1.x is kept.
+
 ## 0.2.0-beta.10 — 2026-10-14
 
 A fix release. The SDK is still read at spec `mvp-0.2-baseline.12` and tested
