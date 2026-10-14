@@ -4,6 +4,22 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.0-beta.10 — 2026-10-14
+
+A fix release. The SDK is still read at spec `mvp-0.2-baseline.12` and tested
+against the reference server at `138030a`; nothing else changes. Published
+under the npm dist-tag `beta`, like the earlier 0.2 betas.
+
+### Fixed
+
+- A section with deleted tasks stays fast as its history grows. Deciding
+  which edits were concurrent with a deletion compared every change with
+  all its ancestors, on every read of the section's tree: after a few
+  thousand changes, each read took a second or more. Concurrency is now
+  decided with vector clocks, the decoded history is reused from one
+  revision to the next, and the tree and snapshot are derived once per
+  revision (`SectionReplica.snapshot`, `tree`). The results are as before.
+
 ## 0.2.0-beta.9 — 2026-10-14
 
 A fix release. The SDK is still read at spec `mvp-0.2-baseline.12` and tested
