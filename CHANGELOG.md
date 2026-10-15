@@ -24,8 +24,13 @@ remove or rename any.
 - `publishSnapshot` and `revokeAccess` no longer fail after they queued
   their objects when a listener throws or the connection drops before the
   send; the Snapshot or the revocation stands and is sent later.
-- A listener that throws no longer keeps the session's later listeners
-  from getting the same event.
+- A `SyncClient` listener that throws no longer interrupts the SDK's own
+  work: an ACK still dequeues and records what it acknowledges, received
+  units and a loaded Snapshot still finish their catch-up, and every other
+  listener still gets the event. The failure is reported as an `error` event
+  (`INTERNAL`, with the Resource when the event has one); a listener that
+  throws on that report too is not reported again. An engine trap in a
+  listener still stops the session.
 
 ## 0.2.0 — unreleased
 
