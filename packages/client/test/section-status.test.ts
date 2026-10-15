@@ -41,6 +41,7 @@ import {
   dekResolver,
   OutboundQueue,
   queueControlRecord,
+  type Receipt,
   receiptOf,
   receiptsOf,
   releaseReceipt,
@@ -207,7 +208,12 @@ async function device(
     },
     exclude: () => ({ objects: [], pending: [] }),
   };
-  const model = { section: undefined as "ready" | "importing" | undefined, revision: 0 };
+  const model = {
+    section: undefined as "ready" | "importing" | undefined,
+    revision: 0,
+    /** committed() throws, as a profile's model listener might. */
+    failCommitted: false,
+  };
   const clock = { t: 0 };
   const commit: CommitBinding<string> = {
     codec: TEXT,
@@ -223,7 +229,9 @@ async function device(
         model.revision -= 1;
       },
       writes: () => [],
-      committed: () => {},
+      committed: () => {
+        if (model.failCommitted) throw new Error("a model listener fails");
+      },
     }),
   };
   const sync = new SyncClient({
@@ -453,6 +461,150 @@ describe("pending again after a server loss (§4.2)", () => {
       "reoffered",
       "batch:accepted",
     ]);
+  });
+});
+
+describe("a commit stands once it is stored (LFCP-03-034)", () => {
+  const errors = (d: { sync: SyncClient }) => {
+    const out: string[] = [];
+    d.sync.on((e) => {
+      if (e.type === "error") out.push(e.code);
+    });
+    return out;
+  };
+
+  it("keeps the batch when the connection drops while it is sent, and sends it after reconnecting", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(240);
+    const srv = serve(server, chain);
+    const d = await device(server, chain);
+    await d.live();
+    // The connection drops while the commit reads the outbound queue: the
+    // send that follows finds it not READY (ConnectionNotReady).
+    const next = OutboundQueue.prototype.next;
+    let armed = true;
+    OutboundQueue.prototype.next = async function (this: OutboundQueue, ...args) {
+      if (armed) {
+        armed = false;
+        server.current.drop();
+        await settle(20);
+      }
+      return next.apply(this, args);
+    };
+    let receipt: Receipt;
+    try {
+      receipt = await d.sync.commit(chain.R, ["a"], { operationId: "op-1" });
+    } finally {
+      OutboundQueue.prototype.next = next;
+    }
+    expect(armed).toBe(false);
+    expect(d.sync.connectionState).not.toBe("READY");
+    // Stored and kept in the profile state; nothing reached the server.
+    expect(receipt.unitIds).toHaveLength(1);
+    expect(d.model.revision).toBe(1);
+    expect(await receiptOf(d.storage, chain.R, "op-1")).toEqual(receipt);
+    expect(srv.stored).toHaveLength(0);
+    // The next connection sends it (once its retry is due), and the server accepts it.
+    await d.at(5_000);
+    await d.at(6_000);
+    await d.at(60_000);
+    expect(server.sockets).toHaveLength(2);
+    expect(d.sync.resourceState(chain.R)).toBe("LIVE");
+    expect(srv.stored.map((u) => toHex(hash32(sha(u))))).toEqual(receipt.unitIds.map(toHex));
+    expect((await batchStatus(d.storage, chain.R, "op-1", 2n))?.status).toBe("accepted");
+    expect(d.model.revision).toBe(1);
+  });
+
+  it("keeps and sends the batch when a status listener throws on its report", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(241);
+    const srv = serve(server, chain);
+    const d = await device(server, chain);
+    await d.live();
+    const seen = errors(d);
+    let armed = true;
+    d.sync.on((e) => {
+      if (armed && e.type === "status" && e.event.kind === "batch") {
+        armed = false;
+        throw new Error("a listener fails");
+      }
+    });
+    const receipt = await d.sync.commit(chain.R, ["a"], { operationId: "op-1" });
+    await settle(50);
+    await d.sync.idle();
+    expect(armed).toBe(false);
+    expect(d.model.revision).toBe(1);
+    // The listener before it got the report; the failure is an error event.
+    expect(kinds(d.events)).toContain("batch:pending");
+    expect(seen).toEqual(["INTERNAL"]);
+    // Sent by the commit itself, not only at a later tick.
+    expect(srv.stored.map((u) => toHex(hash32(sha(u))))).toEqual(receipt.unitIds.map(toHex));
+    expect((await batchStatus(d.storage, chain.R, "op-1", 2n))?.status).toBe("accepted");
+  });
+
+  it("keeps and sends the batch when the profile's committed() throws", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(242);
+    const srv = serve(server, chain);
+    const d = await device(server, chain);
+    await d.live();
+    const seen = errors(d);
+    d.model.failCommitted = true;
+    const receipt = await d.sync.commit(chain.R, ["a"], { operationId: "op-1" });
+    await settle(50);
+    await d.sync.idle();
+    expect(d.model.revision).toBe(1);
+    expect(seen).toEqual(["INTERNAL"]);
+    expect(srv.stored.map((u) => toHex(hash32(sha(u))))).toEqual(receipt.unitIds.map(toHex));
+  });
+
+  it("publishes a Snapshot when a listener throws on its event", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(244);
+    serve(server, chain);
+    const d = await device(server, chain, chain.records.length, () => false);
+    await d.live();
+    const seen = errors(d);
+    d.sync.on((e) => {
+      if (e.type === "snapshot-published") throw new Error("a listener fails");
+    });
+    const id = await d.sync.publishSnapshot(chain.R);
+    await settle(50);
+    await d.sync.idle();
+    expect(seen).toEqual(["INTERNAL"]);
+    // Queued and sent.
+    expect(server.of("SNAPSHOT_PUT").map((m) => toHex(sha(m.body.snapshot)))).toEqual([toHex(id)]);
+  });
+
+  it("still reverts the staged batch when it is not stored", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(243);
+    const srv = serve(server, chain);
+    const d = await device(server, chain);
+    await d.live();
+    const commit = d.storage.commit.bind(d.storage);
+    let armed = true;
+    d.storage.commit = async (writes) => {
+      if (armed && writes.some((w) => w.op === "put-data-unit")) {
+        armed = false;
+        throw new Error("the disk is full");
+      }
+      return commit(writes);
+    };
+    await expect(d.sync.commit(chain.R, ["a"], { operationId: "op-1" })).rejects.toThrow(
+      "the disk is full",
+    );
+    expect(armed).toBe(false);
+    expect(d.model.revision).toBe(0);
+    expect(await receiptOf(d.storage, chain.R, "op-1")).toBeUndefined();
+    expect(await d.storage.outbound.list(chain.R)).toEqual([]);
+    expect(srv.stored).toHaveLength(0);
+    // A retry under the same operation commits once.
+    const receipt = await d.sync.commit(chain.R, ["a"], { operationId: "op-1" });
+    await settle(50);
+    await d.sync.idle();
+    expect(d.model.revision).toBe(1);
+    expect(srv.stored.map((u) => toHex(hash32(sha(u))))).toEqual(receipt.unitIds.map(toHex));
   });
 });
 
