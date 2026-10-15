@@ -246,7 +246,7 @@ export interface StagedOperation<T> {
   revert(): void;
   /** Writes stored with the units: the profile checkpoint that includes them. */
   writes(units: readonly { readonly unitId: DataUnitId }[]): readonly StorageWrite[];
-  /** Called once the commit is durable, with the units in order. */
+  /** Called once the commit is durable, with the units in order; revert() is never called after it. */
   committed(unitIds: readonly DataUnitId[]): void;
 }
 
@@ -659,8 +659,16 @@ export class SyncClient {
     return () => this.#listeners.delete(listener);
   }
 
+  /** Every listener gets the event, even after one throws; then the first error is thrown. */
   #emit(event: SyncEvent): void {
-    for (const l of this.#listeners) l(event);
+    let failed: { readonly error: unknown } | undefined;
+    for (const l of this.#listeners)
+      try {
+        l(event);
+      } catch (error) {
+        failed ??= { error };
+      }
+    if (failed !== undefined) throw failed.error;
   }
 
   // -------------------------------------------------------------------------
@@ -2027,8 +2035,9 @@ export class SyncClient {
       ...plan.keyPackages.flatMap(keyPackageWrites),
     ]);
     if (!r.ok) throw new Error(`the revocation was not queued: ${r.reason}`);
-    await this.#refreshAccess(ctx);
-    await this.#flush(ctx);
+    // Queued: the revocation stands whatever the report or the send does.
+    await this.#afterStored(resource, () => this.#refreshAccess(ctx));
+    await this.#afterStored(resource, () => this.#flush(ctx));
     return Object.freeze({
       kind: "queued" as const,
       revoked: plan.revoked,
@@ -2044,7 +2053,10 @@ export class SyncClient {
    * SDK-SECTIONS-INTEGRATION-01 §3.1: commits a batch of intents on an open
    * Resource and returns its receipt once the batch is durable: its Data
    * Units, outbound entries, the profile checkpoint and the receipt are
-   * stored in one transaction, then the batch is sent. An operation that
+   * stored in one transaction, then the batch is sent. Once it is stored
+   * the batch stands: a send that fails leaves it queued for the next
+   * connection, and a throwing listener is reported as an error event;
+   * neither reverts it or fails the commit (LFCP-03-034). An operation that
    * has a receipt returns it for the same intents and writes nothing, and
    * throws OperationIdReusedError for different ones (§3.3). Runs between
    * received units, never during their merge.
@@ -2224,8 +2236,9 @@ export class SyncClient {
     await this.#guardCreate(ctx, view, intents);
     const staged = binding.stage(intents);
     staged?.apply();
+    let stored: Awaited<ReturnType<typeof commitOperation>>;
     try {
-      const { receipt, committed } = await commitOperation(
+      stored = await commitOperation(
         storage,
         {
           view,
@@ -2241,19 +2254,52 @@ export class SyncClient {
         },
         (units) => staged?.writes(units) ?? [],
       );
-      if (!committed) staged?.revert();
-      else staged?.committed(receipt.unitIds);
-      if (committed) {
-        // Our own units grow the history a Snapshot covers, as received ones do.
-        ctx.unitsSinceSnapshot += receipt.unitIds.length;
-        await this.#reportBatches(R, [receipt.operationId]);
-        this.#refreshSection(ctx);
-      }
-      await this.#flush(ctx);
-      return receipt;
     } catch (e) {
+      // Not stored: the batch did not happen.
       staged?.revert();
       throw e;
+    }
+    const { receipt, committed } = stored;
+    // The operation had a receipt already (a concurrent commit of it): this
+    // staging did not happen.
+    if (!committed) staged?.revert();
+    // LFCP-03-034: from here the batch is durable and will be sent; nothing
+    // below may undo it in the profile state or fail the commit. A failed
+    // step is reported, and a failed send means the queue sends it later.
+    else {
+      await this.#afterStored(R, () => staged?.committed(receipt.unitIds));
+      // Our own units grow the history a Snapshot covers, as received ones do.
+      ctx.unitsSinceSnapshot += receipt.unitIds.length;
+      await this.#afterStored(R, () => this.#reportBatches(R, [receipt.operationId]));
+      await this.#afterStored(R, () => this.#refreshSection(ctx));
+    }
+    await this.#afterStored(R, () => this.#flush(ctx));
+    return receipt;
+  }
+
+  /**
+   * LFCP-03-034: a step after a local write is durable (the profile's
+   * bookkeeping, status reports, the send). Its failure never undoes the
+   * write or fails the call that made it: a lost connection leaves the
+   * write in the outbound queue for the next one, and anything else (a
+   * throwing listener, say) is reported as an error event. An engine trap
+   * still stops the session.
+   */
+  async #afterStored(resource: ResourceId, step: () => unknown): Promise<void> {
+    try {
+      await step();
+    } catch (e) {
+      if (isEngineTrap(e)) throw e;
+      if (e instanceof ConnectionNotReady) return;
+      try {
+        this.#error(
+          "INTERNAL",
+          `a step after a durable local write failed; the write stands (${e instanceof Error ? e.message : String(e)})`,
+          resource,
+        );
+      } catch {
+        // A listener throws on the report too: the write still stands.
+      }
     }
   }
 
@@ -2299,8 +2345,11 @@ export class SyncClient {
       value: binding.current(),
     });
     ctx.unitsSinceSnapshot = 0;
-    this.#emit({ type: "snapshot-published", resourceId: R, snapshotId: created.snapshotId });
-    await this.#flush(ctx);
+    // Queued: the Snapshot stands whatever a listener or the send does.
+    await this.#afterStored(R, () =>
+      this.#emit({ type: "snapshot-published", resourceId: R, snapshotId: created.snapshotId }),
+    );
+    await this.#afterStored(R, () => this.#flush(ctx));
     return created.snapshotId;
   }
 
