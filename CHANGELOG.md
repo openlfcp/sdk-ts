@@ -4,6 +4,29 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.1 — unreleased
+
+### Fixed
+
+- `SyncClient.commit` no longer reverts a batch it has stored (LFCP-03-034).
+  It used to call `StagedOperation.revert()` when a step after the durable
+  store threw: the send, when the connection dropped while the outbound
+  queue was read (`ConnectionNotReady`), or a listener of the batch's status
+  event or of the profile's `committed()`. The stored units still went out,
+  so collaborators got the change while this device's model lost it, and
+  the revert rewound the section replica's own change sequence, so a later
+  local change could reuse the lost change's sequence and collaborators
+  could not apply it. Once stored,
+  a batch now stands: a failed send leaves it queued for the next
+  connection, any other failure after the store is reported as an `error`
+  event (`INTERNAL`), and the commit returns its receipt. A failure before
+  the store still reverts the staged batch.
+- `publishSnapshot` and `revokeAccess` no longer fail after they queued
+  their objects when a listener throws or the connection drops before the
+  send; the Snapshot or the revocation stands and is sent later.
+- A listener that throws no longer keeps the session's later listeners
+  from getting the same event.
+
 ## 0.2.0 — unreleased
 
 The 0.2 line is final: published under the npm dist-tag `latest`, which
