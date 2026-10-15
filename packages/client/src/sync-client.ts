@@ -611,6 +611,8 @@ export class SyncClient {
   readonly #sentAt = new Map<string, number>();
   readonly #requestTimeoutMs: number;
   readonly #listeners = new Set<(event: SyncEvent) => void>();
+  /** #emit is reporting a listener's failure: a failure in that report is dropped. */
+  #reportingListenerError = false;
   /** Re-proposal attempts per Control Record (item ID hex), bounded; cleared on ACK (repropose.ts). */
   readonly #reproposeAttempts = new Map<string, number>();
   readonly #antiEntropyMs: number;
@@ -659,16 +661,37 @@ export class SyncClient {
     return () => this.#listeners.delete(listener);
   }
 
-  /** Every listener gets the event, even after one throws; then the first error is thrown. */
+  /**
+   * LFCP-03-034: every listener gets the event, and a listener that throws
+   * never interrupts the SDK's own work (a commit, an ACK, received units,
+   * a loaded Snapshot): its failure is reported as an INTERNAL error event,
+   * and a failure while reporting one is dropped (no recursion). An engine
+   * trap is the exception: the engine is gone, so it still stops the session.
+   */
   #emit(event: SyncEvent): void {
     let failed: { readonly error: unknown } | undefined;
+    let trap: { readonly error: unknown } | undefined;
     for (const l of this.#listeners)
       try {
         l(event);
       } catch (error) {
-        failed ??= { error };
+        if (isEngineTrap(error)) trap ??= { error };
+        else failed ??= { error };
       }
-    if (failed !== undefined) throw failed.error;
+    if (trap !== undefined) throw trap.error;
+    if (failed === undefined || this.#reportingListenerError) return;
+    this.#reportingListenerError = true;
+    try {
+      const e = failed.error;
+      const resourceId = "resourceId" in event ? event.resourceId : undefined;
+      this.#error(
+        "INTERNAL",
+        `a listener of a ${event.type} event failed: ${e instanceof Error ? e.message : String(e)}`,
+        resourceId,
+      );
+    } finally {
+      this.#reportingListenerError = false;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -2281,9 +2304,9 @@ export class SyncClient {
    * LFCP-03-034: a step after a local write is durable (the profile's
    * bookkeeping, status reports, the send). Its failure never undoes the
    * write or fails the call that made it: a lost connection leaves the
-   * write in the outbound queue for the next one, and anything else (a
-   * throwing listener, say) is reported as an error event. An engine trap
-   * still stops the session.
+   * write in the outbound queue for the next one, and anything else (the
+   * profile's committed() throwing, say) is reported as an error event, as
+   * #emit reports a throwing listener. An engine trap still stops the session.
    */
   async #afterStored(resource: ResourceId, step: () => unknown): Promise<void> {
     try {
@@ -2291,15 +2314,12 @@ export class SyncClient {
     } catch (e) {
       if (isEngineTrap(e)) throw e;
       if (e instanceof ConnectionNotReady) return;
-      try {
-        this.#error(
-          "INTERNAL",
-          `a step after a durable local write failed; the write stands (${e instanceof Error ? e.message : String(e)})`,
-          resource,
-        );
-      } catch {
-        // A listener throws on the report too: the write still stands.
-      }
+      // #emit does not throw a listener's failure: the report cannot undo the write.
+      this.#error(
+        "INTERNAL",
+        `a step after a durable local write failed; the write stands (${e instanceof Error ? e.message : String(e)})`,
+        resource,
+      );
     }
   }
 
