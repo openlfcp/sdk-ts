@@ -6,6 +6,9 @@ remove or rename any.
 
 ## 0.2.1 — unreleased
 
+A patch of the 0.2 line, published under the npm dist-tag `latest`: it is 0.2.0
+plus the fixes below, with no API change. Dated when tagged.
+
 ### Fixed
 
 - `SyncClient.commit` no longer reverts a batch it has stored (LFCP-03-034).
@@ -35,7 +38,7 @@ remove or rename any.
   `publishSnapshot` or `revokeAccess` rejects with it, without stopping
   the session.
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-10-14
 
 The 0.2 line is final: published under the npm dist-tag `latest`, which
 moves from 0.1.5 (0.1.4 and 0.1.5 came from the 0.1 maintenance line;
