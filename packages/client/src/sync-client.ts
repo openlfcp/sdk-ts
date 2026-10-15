@@ -666,7 +666,10 @@ export class SyncClient {
    * never interrupts the SDK's own work (a commit, an ACK, received units,
    * a loaded Snapshot): its failure is reported as an INTERNAL error event,
    * and a failure while reporting one is dropped (no recursion). An engine
-   * trap is the exception: the engine is gone, so it still stops the session.
+   * trap is the exception and is thrown on, as before: reached from message
+   * handling (#serial) it stops the session; a call such as commit,
+   * publishSnapshot or revokeAccess rejects with it, and the session is not
+   * stopped.
    */
   #emit(event: SyncEvent): void {
     let failed: { readonly error: unknown } | undefined;
@@ -2306,7 +2309,8 @@ export class SyncClient {
    * write or fails the call that made it: a lost connection leaves the
    * write in the outbound queue for the next one, and anything else (the
    * profile's committed() throwing, say) is reported as an error event, as
-   * #emit reports a throwing listener. An engine trap still stops the session.
+   * #emit reports a throwing listener. An engine trap is thrown on: the
+   * call rejects with it.
    */
   async #afterStored(resource: ResourceId, step: () => unknown): Promise<void> {
     try {

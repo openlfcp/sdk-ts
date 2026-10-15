@@ -30,7 +30,10 @@ remove or rename any.
   listener still gets the event. The failure is reported as an `error` event
   (`INTERNAL`, with the Resource when the event has one); a listener that
   throws on that report too is not reported again. An engine trap in a
-  listener still stops the session.
+  listener is thrown on, as in 0.2.0: reached from message handling it
+  stops the session (`ENGINE_TRAP`); a call such as `commit`,
+  `publishSnapshot` or `revokeAccess` rejects with it, without stopping
+  the session.
 
 ## 0.2.0 — unreleased
 
