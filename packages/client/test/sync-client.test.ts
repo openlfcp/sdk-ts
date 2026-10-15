@@ -1411,3 +1411,136 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     expect(server.of("RESOURCE_HOST")).toHaveLength(1);
   });
 });
+
+describe("a throwing listener (LFCP-03-034)", () => {
+  /** A listener that throws on every event, the error events included. */
+  const hostile = (c: ReturnType<typeof client>) => {
+    let calls = 0;
+    c.sync.on(() => {
+      calls += 1;
+      throw new Error("a listener fails");
+    });
+    return () => calls;
+  };
+  const internal = (c: ReturnType<typeof client>) =>
+    c.events.filter((e) => e.type === "error" && e.code === "INTERNAL");
+
+  it("never stops a Snapshot load, received units or the catch-up", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(250);
+    const c = client(OWNER, server, clock);
+    await ownerState(c, chain);
+    const calls = hostile(c);
+    const v = chain.view();
+    // Remote units 1 and 2; a Snapshot covers unit 1.
+    const remote = new InMemoryLfcpStorage();
+    const base = {
+      view: v,
+      controlHead: v.state.head,
+      actor: OWNER.signer,
+      dek: DEK0,
+      profile: TEXT,
+    };
+    const u1 = await createQueuedDataUnit(remote, { ...base, previousUnitId: null, value: "one" });
+    const u2 = await createQueuedDataUnit(remote, {
+      ...base,
+      previousUnitId: u1.unitId,
+      value: "two",
+    });
+    const covered = [{ principalId: OWNER.signer.descriptor.principalId, contiguous: 1n }];
+    const snapshot = await createSnapshot({
+      view: v,
+      controlHead: v.state.head,
+      publisher: OWNER.signer,
+      dek: DEK0,
+      frontier: covered,
+      profile: TEXT,
+      value: "snap",
+      sequences: new InMemorySnapshotSequenceReservation(),
+    });
+    hostOf(server, chain, [u1.bytes, u2.bytes]);
+    const answer = server.onMessage;
+    server.onMessage = (m, sv) => {
+      if (m.type === "RESOURCE_OPEN") {
+        sv.reply(m, "RESOURCE_OPENED", {
+          resourceId: chain.R,
+          heads: [{ seq: v.state.seq, recordId: v.state.head }],
+          haves: [{ principalId: OWNER.signer.descriptor.principalId, contiguous: 2n }],
+          snapshot: { snapshotId: snapshot.snapshotId, dataEpoch: 0n, frontier: covered },
+        });
+        return [];
+      }
+      if (m.type === "SNAPSHOT_GET") {
+        sv.reply(m, "SNAPSHOT", { resourceId: chain.R, snapshot: snapshot.bytes });
+        return [];
+      }
+      return answer(m, sv);
+    };
+    const loaded: string[] = [];
+    c.sync.open({
+      ...c.binding(chain.R),
+      snapshot: { codec: TEXT, load: (value: string) => loaded.push(value), current: () => "" },
+    } as never);
+    c.sync.start();
+    await settle(300);
+    await c.sync.idle();
+    // The Snapshot loaded, then only unit 2 merged, and the Resource is LIVE.
+    expect(loaded).toEqual(["snap"]);
+    expect(c.merged).toEqual(["two"]);
+    expect(c.sync.resourceState(chain.R)).toBe("LIVE");
+    expect(c.events.some((e) => e.type === "snapshot-loaded")).toBe(true);
+    expect(states(c.events).at(-1)).toBe("LIVE");
+    // Both units are accepted in storage: the state is consistent.
+    for (const u of [u1, u2])
+      expect((await c.storage.dataUnits.get(u.unitId))?.accepted).toBe(true);
+    // Every failure was reported once as INTERNAL; the failing reports were dropped.
+    expect(calls()).toBeGreaterThan(0);
+    expect(internal(c).length).toBeGreaterThan(0);
+    expect(c.events.filter((e) => e.type === "error" && e.code !== "INTERNAL")).toEqual([]);
+  });
+
+  it("never stops an ACK from dequeuing what it acknowledges", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(251);
+    const c = client(OWNER, server, clock);
+    await ownerState(c, chain);
+    hostile(c);
+    const v = chain.view();
+    const unit = await createQueuedDataUnit(c.storage, {
+      view: v,
+      controlHead: v.state.head,
+      actor: OWNER.signer,
+      dek: DEK0,
+      profile: TEXT,
+      previousUnitId: null,
+      value: "mine",
+    });
+    hostOf(server, chain);
+    const answer = server.onMessage;
+    server.onMessage = (m, sv) => {
+      if (m.type === "DATA_PUT") {
+        sv.reply(m, "ACK", {
+          requestType: 33n,
+          objectIds: m.body.objects.map((o) => hash32(sha(o))),
+          durable: true,
+        });
+        return [];
+      }
+      return answer(m, sv);
+    };
+    c.sync.open(c.binding(chain.R));
+    c.sync.start();
+    await settle(300);
+    await c.sync.idle();
+    expect(c.sync.resourceState(chain.R)).toBe("LIVE");
+    expect(server.of("DATA_PUT").flatMap((m) => m.body.objects.map((o) => toHex(sha(o))))).toEqual([
+      toHex(unit.unitId),
+    ]);
+    // Acknowledged and dequeued, the ack event delivered to the other listeners.
+    expect(await c.storage.outbound.list(chain.R)).toEqual([]);
+    expect(c.events.some((e) => e.type === "ack" && e.outcome.acked.length === 1)).toBe(true);
+    expect(internal(c).length).toBeGreaterThan(0);
+  });
+});
