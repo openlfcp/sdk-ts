@@ -127,6 +127,28 @@ export interface SectionsNodesChanged {
   readonly modelRevision: string;
 }
 
+/** A nodes-changed listener that threw: the error, and the event it was given. */
+export interface SectionsListenerFailure {
+  readonly error: unknown;
+  readonly event: SectionsNodesChanged;
+}
+
+/**
+ * A thrown value that looks like an engine trap (WebAssembly RuntimeError, a
+ * terminated module): the rule of the client's isEngineTrap, which this
+ * package cannot import.
+ */
+function isEngineTrap(e: unknown): boolean {
+  const wasm = (globalThis as { WebAssembly?: { RuntimeError?: abstract new () => unknown } })
+    .WebAssembly?.RuntimeError;
+  if (wasm !== undefined && e instanceof wasm) return true;
+  if (!(e instanceof Error)) return false;
+  return (
+    e.name === "RuntimeError" ||
+    /\b(module|instance)\b.*\bterminated\b|\bunreachable\b executed|\bwasm trap\b/i.test(e.message)
+  );
+}
+
 interface Buffered {
   readonly unitId: DataUnitId;
   readonly change: CheckedChange;
@@ -205,6 +227,8 @@ export class SharedSectionsDataProfile {
   /** LFCP-accepted units whose actor sequence a different change has (SOP §14.1), by unit ID hex. */
   readonly #held = new Map<string, Buffered>();
   readonly #listeners = new Set<(event: SectionsNodesChanged) => void>();
+  readonly #errorHandlers = new Set<(failure: SectionsListenerFailure) => void>();
+  #reportingListenerError = false;
 
   constructor(replica: SectionReplica) {
     this.#replica = replica;
@@ -221,10 +245,61 @@ export class SharedSectionsDataProfile {
     return () => this.#listeners.delete(listener);
   }
 
+  /**
+   * Called when a nodes-changed listener throws (REVIEW-20261015-03), with
+   * the error and the event. Without a handler the error goes to the
+   * runtime's reportError where there is one (a browser, Electron), else it
+   * is dropped. A handler that throws is not reported again.
+   */
+  onListenerError(handler: (failure: SectionsListenerFailure) => void): () => void {
+    this.#errorHandlers.add(handler);
+    return () => this.#errorHandlers.delete(handler);
+  }
+
+  /**
+   * Every listener gets the event, and a listener that throws never turns
+   * the operation that changed the model (a merge, a recorded local change,
+   * a rebuild, a loaded Snapshot) into a failure: the change stands and the
+   * error is reported (onListenerError), never recursively. An engine trap
+   * is the exception and is thrown on once every listener has had the
+   * event, as before and as SyncClient does: the engine is dead.
+   */
   #emit(nodeIds: readonly string[], origin: SectionsNodesChanged["origin"]): void {
     if (nodeIds.length === 0) return;
     const event = Object.freeze({ nodeIds, origin, modelRevision: this.#replica.revision() });
-    for (const l of this.#listeners) l(event);
+    let trap: { readonly error: unknown } | undefined;
+    const failed: unknown[] = [];
+    for (const l of [...this.#listeners])
+      try {
+        l(event);
+      } catch (error) {
+        if (isEngineTrap(error)) trap ??= { error };
+        else failed.push(error);
+      }
+    for (const error of failed) this.#reportListenerError(Object.freeze({ error, event }));
+    if (trap !== undefined) throw trap.error;
+  }
+
+  #reportListenerError(failure: SectionsListenerFailure): void {
+    if (this.#reportingListenerError) return;
+    this.#reportingListenerError = true;
+    try {
+      const report = (globalThis as { reportError?: (e: unknown) => void }).reportError;
+      if (this.#errorHandlers.size === 0) {
+        if (typeof report === "function") report(failure.error);
+        return;
+      }
+      for (const h of [...this.#errorHandlers])
+        try {
+          h(failure);
+        } catch {
+          // A failing error handler is not reported again (no recursion).
+        }
+    } catch {
+      // reportError itself failed: nothing left to report to.
+    } finally {
+      this.#reportingListenerError = false;
+    }
   }
 
   /** The codec of one unit, bound to its signer's section actor (§2). */
