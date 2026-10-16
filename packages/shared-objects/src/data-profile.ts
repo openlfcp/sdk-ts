@@ -192,7 +192,12 @@ export class SharedObjectsDataProfile {
     return this.#replica;
   }
 
-  /** §98, §100: object change notifications for remote merges and rebuilds. */
+  /**
+   * §98, §100: object change notifications for remote merges and rebuilds.
+   * A listener that changes the model again (re-entrantly) makes the
+   * nested event reach the listeners after it before the outer one does,
+   * as in 0.2.1.
+   */
   onObjectChanged(listener: (change: ObjectChange) => void): () => void {
     return this.#listeners.add(listener);
   }
