@@ -20,6 +20,7 @@ export {
   type SectionsCodec,
   type SectionsCommitBinding,
   type SectionsExcludeResult,
+  type SectionsListenerFailure,
   type SectionsNodesChanged,
   type SectionsSnapshotBinding,
   type SectionsSnapshotCodec,
