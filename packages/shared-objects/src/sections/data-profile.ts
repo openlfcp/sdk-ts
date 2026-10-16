@@ -224,7 +224,12 @@ export class SharedSectionsDataProfile {
     return this.#replica;
   }
 
-  /** §5 nodes-changed for remote merges, rebuilds and recorded local changes. */
+  /**
+   * §5 nodes-changed for remote merges, rebuilds and recorded local changes.
+   * A listener that changes the model again (re-entrantly) makes the
+   * nested event reach the listeners after it before the outer one does,
+   * as in 0.2.1.
+   */
   onNodesChanged(listener: (event: SectionsNodesChanged) => void): () => void {
     return this.#listeners.add(listener);
   }

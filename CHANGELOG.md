@@ -30,6 +30,10 @@ remove or rename any.
   longer throws after the replica changed, every listener gets every
   change, and the error goes to `onListenerError` (or `reportError`), with
   the same engine-trap rule.
+- For both profiles: without an `onListenerError` handler, a listener's
+  error goes to the runtime's `reportError` where there is one (a browser,
+  Electron), and is dropped otherwise. Node has no `reportError`: register
+  `onListenerError` there to see these errors.
 
 ### Added
 
