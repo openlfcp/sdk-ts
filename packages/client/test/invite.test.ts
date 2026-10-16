@@ -215,6 +215,121 @@ describe("createInvitation (§18, §73)", () => {
   });
 });
 
+// REVIEW-20261015-02: the grant and its Key Package are one commit.
+type Writes = Parameters<InMemoryLfcpStorage["commit"]>[0];
+const hasKeyPackage = (writes: Writes) => writes.some((w) => w.op === "put-key-package");
+/** The storage, but a commit that stores a Key Package fails as `fault` says (until cleared). */
+function faulty(storage: InMemoryLfcpStorage, fault: { mode: "throw" | "refuse" | null }) {
+  return {
+    control: storage.control,
+    outbound: storage.outbound,
+    commit: async (writes: Writes) => {
+      if (fault.mode !== null && hasKeyPackage(writes)) {
+        if (fault.mode === "throw") throw new Error("injected: disk full");
+        return {
+          ok: false,
+          reason: "CONTROL_HEAD_MISMATCH",
+          resourceId: R,
+          current: null,
+        } as const;
+      }
+      return storage.commit(writes);
+    },
+  };
+}
+
+describe("createInvitation is atomic (REVIEW-20261015-02)", () => {
+  for (const mode of ["throw", "refuse"] as const)
+    it(`queues neither part when the commit ${mode === "throw" ? "throws" : "is refused"}; a retry queues both`, async () => {
+      const { storage, chain } = await owned();
+      const fault: { mode: "throw" | "refuse" | null } = { mode };
+      const store = faulty(storage, fault);
+      const base = { storage: store, resourceId: R, inviter: OWNER, dek: DEK, endpoints: [URL] };
+      const error = await createInvitation(base).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(Error);
+      // Nothing of the invitation is queued or stored, and no secret leaks into the error.
+      expect(await storage.outbound.list(R)).toEqual([]);
+      expect(await storage.keyPackages.list(R)).toEqual([]);
+      expect(String((error as Error).message)).not.toContain("secret");
+      // The local head did not move: the retry builds on the committed head.
+      fault.mode = null;
+      const created = await createInvitation(base);
+      const queued = await storage.outbound.list(R);
+      expect(queued.map((q) => q.kind)).toEqual(["control-record", "key-package"]);
+      const grant = parseControlRecord(queued[0]?.bytes as Uint8Array);
+      expect(grant.payload.controlSeq).toBe(2n);
+      expect(toHex(grant.payload.prevControlId as Uint8Array)).toBe(toHex(chain.state.head));
+      expect(toHex(grant.signed.id)).toBe(toHex(created.grantId));
+      const kp = parseKeyPackage(queued[1]?.bytes as Uint8Array);
+      expect(toHex(kp.payload.controlHead)).toBe(toHex(created.grantId));
+      expect(toHex(queued[1]?.itemId as Uint8Array)).toBe(toHex(created.keyPackageId));
+    });
+
+  it("leaves earlier queued invitations as they were when a later one fails", async () => {
+    const { storage } = await owned();
+    const fault: { mode: "throw" | "refuse" | null } = { mode: null };
+    const store = faulty(storage, fault);
+    const base = { storage: store, resourceId: R, inviter: OWNER, dek: DEK, endpoints: [URL] };
+    const first = await createInvitation(base);
+    const before = await storage.outbound.list(R);
+    fault.mode = "throw";
+    expect(await codeOf(createInvitation(base))).toContain("injected");
+    expect(await storage.outbound.list(R)).toEqual(before);
+    fault.mode = null;
+    const second = await createInvitation(base);
+    const queued = await storage.outbound.list(R);
+    expect(queued.map((q) => q.kind)).toEqual([
+      "control-record",
+      "key-package",
+      "control-record",
+      "key-package",
+    ]);
+    const g2 = parseControlRecord(queued[2]?.bytes as Uint8Array);
+    expect(g2.payload.controlSeq).toBe(3n);
+    expect(toHex(g2.payload.prevControlId as Uint8Array)).toBe(toHex(first.grantId));
+    expect(toHex(g2.signed.id)).toBe(toHex(second.grantId));
+  });
+
+  it("queues nothing for endpoints the link cannot carry", async () => {
+    const { storage } = await owned();
+    const base = { storage, resourceId: R, inviter: OWNER, dek: DEK };
+    for (const endpoints of [[], ["not a url"], ["http://plain.example.test/v1/ws"]])
+      expect(await codeOf(createInvitation({ ...base, endpoints }))).toBe("INVALID_INVITATION");
+    expect(await storage.outbound.list(R)).toEqual([]);
+    // The local head did not move.
+    const created = await createInvitation({ ...base, endpoints: [URL] });
+    const queued = await storage.outbound.list(R);
+    expect(parseControlRecord(queued[0]?.bytes as Uint8Array).payload.controlSeq).toBe(2n);
+    expect(toHex(queued[0]?.itemId as Uint8Array)).toBe(toHex(created.grantId));
+  });
+
+  it("stores the grant and the Key Package in one commit, grant first", async () => {
+    const { storage } = await owned();
+    const commits: Writes[] = [];
+    const store = {
+      control: storage.control,
+      outbound: storage.outbound,
+      commit: (writes: Writes) => {
+        commits.push(writes);
+        return storage.commit(writes);
+      },
+    };
+    await createInvitation({
+      storage: store,
+      resourceId: R,
+      inviter: OWNER,
+      dek: DEK,
+      endpoints: [URL],
+    });
+    expect(
+      commits.map((w) => w.map((x) => (x.op === "enqueue" ? `enqueue:${x.item.kind}` : x.op))),
+    ).toEqual([["enqueue:control-record", "put-key-package", "enqueue:key-package"]]);
+  });
+});
+
 describe("acceptInvitation (§18.2)", () => {
   it("refuses a targeted link (no secret) and a malformed one before connecting", async () => {
     const base = {
