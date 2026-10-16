@@ -25,11 +25,19 @@ remove or rename any.
   `reportError` where it has one); a handler that throws is not reported
   again. An engine trap in a listener is still thrown on, once every
   listener has had the event.
+- The same for a `SharedObjectsDataProfile` object-changed listener
+  (LFCP-03-044): a merge, an exclusion, a reset or a loaded Snapshot no
+  longer throws after the replica changed, every listener gets every
+  change, and the error goes to `onListenerError` (or `reportError`), with
+  the same engine-trap rule.
 
 ### Added
 
-- `SharedSectionsDataProfile.onListenerError` and the
-  `SectionsListenerFailure` type (`@openlfcp/shared-objects/sections`).
+- `onListenerError(handler)` on `SharedSectionsDataProfile` (failure type
+  `SectionsListenerFailure`, `@openlfcp/shared-objects/sections`) and on
+  `SharedObjectsDataProfile` (`SharedObjectsListenerFailure`,
+  `@openlfcp/shared-objects`): where a throwing change listener's error is
+  reported. Additive; nothing else in the API changes.
 
 ## 0.2.1 — unreleased
 
