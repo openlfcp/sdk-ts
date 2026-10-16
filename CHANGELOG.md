@@ -6,6 +6,10 @@ remove or rename any.
 
 ## 0.2.2 — unreleased
 
+A patch of the 0.2 line, published under the npm dist-tag `latest`: it is 0.2.1
+plus the fixes below and one additive method, `onListenerError`; nothing is
+removed or renamed. Dated when tagged.
+
 ### Fixed
 
 - `createInvitation` is atomic (LFCP-03-044). It used to queue the
@@ -43,7 +47,7 @@ remove or rename any.
   `@openlfcp/shared-objects`): where a throwing change listener's error is
   reported. Additive; nothing else in the API changes.
 
-## 0.2.1 — unreleased
+## 0.2.1 — 2026-10-15
 
 A patch of the 0.2 line, published under the npm dist-tag `latest`: it is 0.2.0
 plus the fixes below, with no API change. Dated when tagged.
