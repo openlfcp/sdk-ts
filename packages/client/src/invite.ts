@@ -51,7 +51,7 @@ import {
   writeClaimJournal,
 } from "./claim-journal.js";
 import { LfcpConnection, type WebSocketFactory } from "./connection.js";
-import { queueControlRecord, queueKeyPackage } from "./queue.js";
+import { controlRecordWrites, keyPackageWrites } from "./queue.js";
 import { loadControlChain, localControlChain, saveControlChain } from "./storage.js";
 
 /**
@@ -190,7 +190,9 @@ export interface CreatedInvitation {
 /**
  * The inviter's side (§18, §73). The grant must validate on the stored
  * chain and the package must pass §25.2 at the grant's head, both checked
- * before anything is queued; the grant is queued before the package.
+ * before anything is queued, and so is the link. The grant and the package
+ * are queued in one atomic commit, the grant first: a refused or failed
+ * commit queues neither, and a retry starts afresh.
  * Share the link once both are ACKed: until then the grant is not on the
  * coordinator's chain.
  */
@@ -246,16 +248,26 @@ export async function createInvitation(
   const check = verifyKeyPackage(next, parseKeyPackage(sealed.bytes));
   if (check.kind !== "authorized")
     fail("AUTHORIZATION_FAILED", `the invitation Key Package is refused: ${check.message}`);
-  await queueControlRecord(options.storage, grant.bytes);
-  const keyPackageId = await queueKeyPackage(options.storage, sealed.bytes);
+  // The link is built (and its endpoints checked) before storage changes, so
+  // a refused link leaves nothing queued; then the grant and its Key Package
+  // go into ONE commit, grant first, so either both are queued, in sending
+  // order, or neither is (no grant without its package).
   const uri = assembleInviteUri({
     resourceId: R,
     endpoints: options.endpoints,
     grantId: grant.recordId,
     secret,
   });
+  const link = new InvitationLink(uri);
+  const keyPackageId = hash32(parseKeyPackage(sealed.bytes).signed.id);
+  const r = await options.storage.commit([
+    ...controlRecordWrites(grant.bytes),
+    ...keyPackageWrites(sealed.bytes),
+  ]);
+  // The same refusal as the queue helpers (queue.ts): a plain Error.
+  if (!r.ok) throw new Error(`the object was not queued: ${r.reason}`);
   return Object.freeze({
-    link: new InvitationLink(uri),
+    link,
     grantId: grant.recordId,
     invitationPrincipal: invitee,
     keyPackageId,
