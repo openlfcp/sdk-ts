@@ -4,6 +4,33 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.2.2 — unreleased
+
+### Fixed
+
+- `createInvitation` is atomic (LFCP-03-044). It used to queue the
+  invitation grant and its Key Package in two commits and build the link
+  after both, so a failing second commit left the grant queued without its
+  package, and endpoints the link cannot carry were refused only after both
+  were queued. The link is now built and checked first, and the grant and
+  the Key Package are stored in one commit, the grant first: a commit that
+  throws or is refused queues neither, and the call can simply be repeated.
+- A `SharedSectionsDataProfile` nodes-changed listener that throws no longer
+  interrupts the operation that changed the model (LFCP-03-044). A remote
+  merge, a recorded local batch, an exclusion, a reset or a loaded Snapshot
+  used to throw although its change was already applied, and the listeners
+  after the throwing one missed the event. Every listener now gets the
+  event, the operation completes, and the error goes to the new
+  `onListenerError` handler (or, without one, to the runtime's
+  `reportError` where it has one); a handler that throws is not reported
+  again. An engine trap in a listener is still thrown on, once every
+  listener has had the event.
+
+### Added
+
+- `SharedSectionsDataProfile.onListenerError` and the
+  `SectionsListenerFailure` type (`@openlfcp/shared-objects/sections`).
+
 ## 0.2.1 — unreleased
 
 A patch of the 0.2 line, published under the npm dist-tag `latest`: it is 0.2.0
