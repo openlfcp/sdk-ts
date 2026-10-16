@@ -18,6 +18,7 @@ import {
   PROFILE_ID,
   ProfileInvalidError,
   SharedObjectsDataProfile,
+  type SharedObjectsListenerFailure,
   SharedObjectsReplica,
   setStatus,
   type Task,
@@ -187,6 +188,130 @@ describe("SharedObjectsDataProfile", () => {
     expect(bob.replica.task(ID_B)?.task?.status).toBe("done");
     expect(() => codec.decode(frameProfilePayload(init.change))).toThrow(/document/);
     expect(bob.snapshotState()).toEqual(bob.replica.save());
+  });
+});
+
+describe("a throwing object-changed listener (REVIEW-20261015-03)", () => {
+  /** Two listeners around one that throws, with an error handler: what each saw. */
+  function watched(p: SharedObjectsDataProfile, error: unknown = new Error("listener bug")) {
+    const first: ObjectChange[] = [];
+    const last: ObjectChange[] = [];
+    const failures: SharedObjectsListenerFailure[] = [];
+    p.onObjectChanged((c) => first.push(c));
+    p.onObjectChanged(() => {
+      throw error;
+    });
+    p.onObjectChanged((c) => last.push(c));
+    p.onListenerError((f) => failures.push(f));
+    return { first, last, failures };
+  }
+  const bobProfile = () => new SharedObjectsDataProfile(SharedObjectsReplica.empty(opts(BOB)));
+
+  it("remote apply: the units merge, every other listener gets every change, each error is reported", () => {
+    const { init, a, b } = source();
+    const p = bobProfile();
+    const { first, last, failures } = watched(p);
+    p.apply(unit(1), checkChange(init.change));
+    const r = p.applyBatch([
+      { unit: unit(2), value: checkChange(a.change) },
+      { unit: unit(3), value: checkChange(b.change) },
+    ]);
+    expect(r.merged.map(toHex)).toEqual([unit(2).unitId, unit(3).unitId].map(toHex));
+    expect(r.objects).toEqual([ID_A, ID_B]);
+    expect([2, 3].map((n) => p.has(unit(n).unitId))).toEqual([true, true]);
+    expect(p.replica.task(ID_B)?.task?.title).toBe("B");
+    expect(first.map((c) => c.objectId)).toEqual([ID_A, ID_B]);
+    expect(last).toEqual(first);
+    expect(failures.map((f) => f.change)).toEqual(first);
+    expect(failures[0]?.error).toMatchObject({ message: "listener bug" });
+  });
+
+  it("rebuild: exclude, reset and a loaded Snapshot finish their work", () => {
+    const { init, a, b } = source();
+    const p = bobProfile();
+    for (const [i, c] of [init, a, b].entries()) p.apply(unit(i + 1), checkChange(c.change));
+    const { last, failures } = watched(p);
+    const out = p.exclude([unit(2).unitId]);
+    expect(out.pending).toEqual([unit(3).unitId]);
+    expect(p.replica.objectIds()).toEqual([]);
+    expect(last.map((c) => [c.objectId, c.origin])).toEqual([
+      [ID_A, "rebuild"],
+      [ID_B, "rebuild"],
+    ]);
+    const loaded = p.loadSnapshot(saveOf([init, a, b]));
+    expect(loaded.objects).toEqual([ID_A, ID_B]);
+    expect(loaded.merged).toEqual([unit(3).unitId]);
+    expect(p.replica.objectIds()).toEqual([ID_A, ID_B]);
+    p.reset();
+    expect(p.has(unit(1).unitId)).toBe(false);
+    expect(p.replica.objectIds()).toEqual([]);
+    expect(last.map((c) => c.origin)).toEqual([
+      "rebuild",
+      "rebuild",
+      "remote",
+      "remote",
+      "rebuild",
+      "rebuild",
+    ]);
+    expect(failures).toHaveLength(6);
+  });
+
+  it("a throwing error handler is not reported again, and a re-entrant failure does not recurse", () => {
+    const { replica, init, a, b } = source();
+    const done = replica.apply(setStatus(taskOf(replica, ID_A), "done").intent) as LocalChange;
+    const p = bobProfile();
+    p.apply(unit(1), checkChange(init.change));
+    p.apply(unit(2), checkChange(a.change));
+    const seen: string[] = [];
+    let handled = 0;
+    p.onObjectChanged(() => {
+      throw new Error("listener bug");
+    });
+    p.onObjectChanged((c) => seen.push(c.objectId));
+    p.onListenerError(() => {
+      handled++;
+      // A handler that changes the model again (its listener fails too), and throws.
+      if (handled === 1) p.apply(unit(4), checkChange(done.change));
+      throw new Error("handler bug");
+    });
+    expect(() => p.apply(unit(3), checkChange(b.change))).not.toThrow();
+    expect([3, 4].map((n) => p.has(unit(n).unitId))).toEqual([true, true]);
+    expect(p.replica.task(ID_A)?.task?.status).toBe("done");
+    expect(seen).toEqual([ID_B, ID_A]);
+    expect(handled).toBe(1);
+  });
+
+  it("without a handler, the error goes to reportError where the runtime has one", () => {
+    const { init, a } = source();
+    const p = bobProfile();
+    const reported: unknown[] = [];
+    const g = globalThis as { reportError?: (e: unknown) => void };
+    const had = g.reportError;
+    g.reportError = (e) => reported.push(e);
+    try {
+      p.onObjectChanged(() => {
+        throw new Error("listener bug");
+      });
+      p.apply(unit(1), checkChange(init.change));
+      p.apply(unit(2), checkChange(a.change));
+    } finally {
+      if (had === undefined) delete g.reportError;
+      else g.reportError = had;
+    }
+    expect(p.has(unit(2).unitId)).toBe(true);
+    expect(reported).toEqual([expect.objectContaining({ message: "listener bug" })]);
+  });
+
+  it("an engine trap is thrown on once every listener has had the change (unchanged policy)", () => {
+    const { init, a } = source();
+    const p = bobProfile();
+    p.apply(unit(1), checkChange(init.change));
+    const trap = Object.assign(new Error("wasm trap: unreachable"), { name: "RuntimeError" });
+    const { last, failures } = watched(p, trap);
+    expect(() => p.apply(unit(2), checkChange(a.change))).toThrow(trap);
+    expect(p.has(unit(2).unitId)).toBe(true);
+    expect(last.map((c) => c.objectId)).toEqual([ID_A]);
+    expect(failures).toEqual([]);
   });
 });
 

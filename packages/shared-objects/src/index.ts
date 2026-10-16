@@ -31,6 +31,7 @@ export {
   SharedObjectsDataProfile,
   type SharedObjectsDiagnostic,
   type SharedObjectsExcludeResult,
+  type SharedObjectsListenerFailure,
   type SharedObjectsSnapshotCodec,
   type SharedObjectsUnit,
 } from "./data-profile.js";
