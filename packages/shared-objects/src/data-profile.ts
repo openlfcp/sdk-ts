@@ -13,6 +13,7 @@ import {
   unframeChange,
   unframeSnapshot,
 } from "./admission/framing.js";
+import { GuardedListeners } from "./listeners.js";
 import { type ObjectChange, type ReplicaOptions, SharedObjectsReplica } from "./replica.js";
 import type { Json } from "./validate.js";
 import { deriveActorId, PROFILE_ID } from "./values.js";
@@ -111,6 +112,12 @@ interface Buffered {
   readonly change: CheckedChange;
 }
 
+/** An object-changed listener that threw: the error, and the change it was given. */
+export interface SharedObjectsListenerFailure {
+  readonly error: unknown;
+  readonly change: ObjectChange;
+}
+
 export class SharedObjectsDataProfile {
   readonly dataProfile = PROFILE_ID;
   #replica: SharedObjectsReplica;
@@ -120,7 +127,9 @@ export class SharedObjectsDataProfile {
   readonly #pending = new Map<string, Buffered>();
   /** LFCP-accepted units whose actor and sequence number a different change has (§14.1), by unit ID hex. */
   readonly #held = new Map<string, Buffered>();
-  readonly #listeners = new Set<(change: ObjectChange) => void>();
+  readonly #listeners = new GuardedListeners<ObjectChange, SharedObjectsListenerFailure>(
+    (error, change) => Object.freeze({ error, change }),
+  );
 
   constructor(replica: SharedObjectsReplica) {
     this.#replica = replica;
@@ -185,12 +194,29 @@ export class SharedObjectsDataProfile {
 
   /** §98, §100: object change notifications for remote merges and rebuilds. */
   onObjectChanged(listener: (change: ObjectChange) => void): () => void {
-    this.#listeners.add(listener);
-    return () => this.#listeners.delete(listener);
+    return this.#listeners.add(listener);
   }
 
+  /**
+   * Called when an object-changed listener throws (REVIEW-20261015-03),
+   * with the error and the change. Without a handler the error goes to the
+   * runtime's reportError where there is one (a browser, Electron), else it
+   * is dropped. A handler that throws is not reported again.
+   */
+  onListenerError(handler: (failure: SharedObjectsListenerFailure) => void): () => void {
+    return this.#listeners.onError(handler);
+  }
+
+  /**
+   * Every listener gets every change, and a listener that throws never
+   * turns the operation that changed the model (a merge, a rebuild, a
+   * loaded Snapshot, a reset) into a failure: the change stands and the
+   * error is reported (onListenerError), never recursively. An engine trap
+   * is thrown on once every listener has had every change, as SyncClient
+   * does: the engine is dead.
+   */
   #emit(changes: readonly ObjectChange[]): void {
-    for (const c of changes) for (const l of this.#listeners) l(c);
+    this.#listeners.emit(changes);
   }
 
   /**
