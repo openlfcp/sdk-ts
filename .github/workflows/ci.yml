@@ -54,7 +54,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server -> ../server-target
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: sdk-ts/package.json
       - uses: actions/setup-node@v5
