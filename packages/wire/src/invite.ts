@@ -4,6 +4,8 @@ import {
   controlRecordId,
   fromBase64url,
   LfcpError,
+  type PrincipalId,
+  principalId,
   type ResourceId,
   resourceId,
   toBase64url,
@@ -14,6 +16,7 @@ import {
   InvitationSecret,
   importAgreementKey,
   importSigningKey,
+  sha256,
 } from "@openlfcp/crypto";
 import { ABILITY } from "./capability.js";
 import { cborMap, decodeDeterministic, encode } from "./cbor/index.js";
@@ -192,55 +195,51 @@ function id32(text: string, what: string): Uint8Array {
  * percent-encoded (G-RS4).
  */
 export function assembleInviteUri(invitation: Invitation): string {
-  if (invitation.endpoints.length === 0) invalid("at least one endpoint is required (§18.2)");
-  for (const url of invitation.endpoints) {
-    try {
-      checkWriterUrl(url);
-    } catch {
-      invalid("an endpoint is not a URL a writer may use (§16)");
-    }
-  }
-  const query = [
-    ...invitation.endpoints.map((url) => `endpoint=${percentEncode(url)}`),
-    `grant=${toBase64url(invitation.grantId)}`,
-  ].join("&");
-  const fragment =
-    invitation.secret === undefined
-      ? ""
-      : `#secret=${toBase64url(encodeInviteSecret(invitation.secret))}`;
-  return `${PREFIX}${toBase64url(invitation.resourceId)}?${query}${fragment}`;
+  return assembleLink(
+    PREFIX,
+    invitation.resourceId,
+    invitation.endpoints,
+    "grant",
+    invitation.grantId,
+    invitation.secret,
+  );
+}
+
+/** The parts of an lfcp://join or lfcp://pair link (§18.2 rules). */
+interface LinkParts {
+  readonly resource: ResourceId;
+  readonly endpoints: readonly string[];
+  /** The value of the one ID parameter (`grant` or `device`), 32 bytes. */
+  readonly id: Uint8Array;
+  readonly secret?: InvitationSecret;
 }
 
 /**
- * Parses a §18.2 invitation URI. The scheme and host compare
- * case-insensitively (RFC 3986 §3.1, §3.2.2); the path is one Resource ID;
- * the query has one or more `endpoint` parameters and exactly one `grant`;
- * other parameters are ignored, for forward compatibility, once their
- * percent-encoding is checked; a fragment, if present, is exactly
- * `secret=<b64url>`.
- * Endpoints are percent-decoded and must use ws or wss (§16). Throws
- * INVALID_INVITATION, never with the URI or the secret in the message.
- * Verify a bearer secret against the grant (verifyInvitationSecret) before
- * using it.
+ * The §18.2 parser shared by invitation and pairing links: `prefix` and
+ * its one required 32-byte ID parameter `param`. The scheme and host
+ * compare case-insensitively (RFC 3986 §3.1, §3.2.2); the path is one
+ * Resource ID; one or more `endpoint` parameters; other parameters are
+ * ignored once their percent-encoding is checked; a fragment, if present,
+ * is exactly `secret=<b64url>`.
  */
-export function parseInviteUri(uri: string): Invitation {
+function parseLink(uri: string, prefix: string, param: string, label: string): LinkParts {
   if (typeof uri !== "string") invalid("the URI is not a string");
-  if (uri.slice(0, PREFIX.length).toLowerCase() !== PREFIX)
-    invalid("the URI does not start with lfcp://join/");
+  if (uri.slice(0, prefix.length).toLowerCase() !== prefix)
+    invalid(`the URI does not start with ${prefix}`);
   const hash = uri.indexOf("#");
   const beforeFragment = hash === -1 ? uri : uri.slice(0, hash);
   const question = beforeFragment.indexOf("?");
   if (question === -1) invalid("the URI has no query");
-  const path = beforeFragment.slice(PREFIX.length, question);
+  const path = beforeFragment.slice(prefix.length, question);
   const resource = resourceId(id32(path, "the Resource ID"));
 
   const endpoints: string[] = [];
-  let grant: ControlRecordId | undefined;
+  let id: Uint8Array | undefined;
   for (const parameter of beforeFragment.slice(question + 1).split("&")) {
     const eq = parameter.indexOf("=");
     const name = eq === -1 ? parameter : parameter.slice(0, eq);
     const value = eq === -1 ? "" : parameter.slice(eq + 1);
-    if ((name === "endpoint" || name === "grant") && value === "")
+    if ((name === "endpoint" || name === param) && value === "")
       invalid(`the ${name} parameter has no value`);
     if (name === "endpoint") {
       const url = percentDecode(value, "an endpoint");
@@ -250,9 +249,9 @@ export function parseInviteUri(uri: string): Invitation {
         invalid("an endpoint is not a ws or wss URL (§16)");
       }
       endpoints.push(url);
-    } else if (name === "grant") {
-      if (grant !== undefined) invalid("the grant parameter appears twice");
-      grant = controlRecordId(id32(value, "the grant ID"));
+    } else if (name === param) {
+      if (id !== undefined) invalid(`the ${param} parameter appears twice`);
+      id = id32(value, label);
     } else {
       // Not defined by §18.2: ignored, but still a well-formed query parameter.
       percentDecode(name, "a query parameter name");
@@ -260,7 +259,7 @@ export function parseInviteUri(uri: string): Invitation {
     }
   }
   if (endpoints.length === 0) invalid("the URI has no endpoint parameter");
-  if (grant === undefined) invalid("the URI has no grant parameter");
+  if (id === undefined) invalid(`the URI has no ${param} parameter`);
 
   let secret: InvitationSecret | undefined;
   if (hash !== -1) {
@@ -274,10 +273,153 @@ export function parseInviteUri(uri: string): Invitation {
     }
     secret = decodeInviteSecret(bytes);
   }
-  return Object.freeze({
-    resourceId: resource,
+  return {
+    resource,
     endpoints: Object.freeze(endpoints),
-    grantId: grant as ControlRecordId,
+    id: id as Uint8Array,
     ...(secret !== undefined ? { secret } : {}),
+  };
+}
+
+/** The §18.2 query and fragment of a link: endpoints, the ID parameter, the optional secret. */
+function assembleLink(
+  prefix: string,
+  resource: ResourceId,
+  endpoints: readonly string[],
+  param: string,
+  id: Uint8Array,
+  secret: InvitationSecret | undefined,
+): string {
+  if (endpoints.length === 0) invalid("at least one endpoint is required (§18.2)");
+  for (const url of endpoints) {
+    try {
+      checkWriterUrl(url);
+    } catch {
+      invalid("an endpoint is not a URL a writer may use (§16)");
+    }
+  }
+  const query = [
+    ...endpoints.map((url) => `endpoint=${percentEncode(url)}`),
+    `${param}=${toBase64url(id)}`,
+  ].join("&");
+  const fragment = secret === undefined ? "" : `#secret=${toBase64url(encodeInviteSecret(secret))}`;
+  return `${prefix}${toBase64url(resource)}?${query}${fragment}`;
+}
+
+/**
+ * Parses a §18.2 invitation URI: lfcp://join/<resource>, one or more
+ * `endpoint` parameters and exactly one `grant` (see parseLink).
+ * Endpoints are percent-decoded and must use ws or wss (§16). Throws
+ * INVALID_INVITATION, never with the URI or the secret in the message.
+ * Verify a bearer secret against the grant (verifyInvitationSecret) before
+ * using it. A pairing link (lfcp://pair/) is not an invitation.
+ */
+export function parseInviteUri(uri: string): Invitation {
+  const link = parseLink(uri, PREFIX, "grant", "the grant ID");
+  return Object.freeze({
+    resourceId: link.resource,
+    endpoints: link.endpoints,
+    grantId: controlRecordId(link.id),
+    ...(link.secret !== undefined ? { secret: link.secret } : {}),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Pairing links (IDENTITY-PROFILE-01 §5.2)
+
+const PAIR_PREFIX = "lfcp://pair/";
+
+/**
+ * A pairing link (IDENTITY-PROFILE-01 §5.2): the keys of a pairing device
+ * `J` (kind 2) registered in the Identity Resource. The secret reuses the
+ * §18.2 invite-secret codec; `J` is not an Invitation Principal (no grant,
+ * no claim). The link always carries the secret: treat it like a key.
+ */
+export interface PairingLink {
+  /** The Identity Resource `I`. */
+  readonly identityResourceId: ResourceId;
+  /** One or more endpoint URLs, in URI order. */
+  readonly endpoints: readonly string[];
+  /** `J`'s Principal ID. */
+  readonly pairingDevice: PrincipalId;
+  readonly secret: InvitationSecret;
+}
+
+/**
+ * The canonical pairing link: lfcp://pair/<I>?endpoint=…[&endpoint=…]&device=<J>#secret=<secret>.
+ * `pairingDevice` must be the Principal the secret determines.
+ */
+export function assemblePairingUri(link: PairingLink): string {
+  if (!bytesEqual(invitationPrincipal(link.secret).principalId, link.pairingDevice))
+    invalid("the secret is not the pairing device's (IDENTITY-PROFILE-01 §5.2)");
+  return assembleLink(
+    PAIR_PREFIX,
+    link.identityResourceId,
+    link.endpoints,
+    "device",
+    link.pairingDevice,
+    link.secret,
+  );
+}
+
+/**
+ * Parses a pairing link (IDENTITY-PROFILE-01 §5.2) with the §18.2 rules
+ * (percent-encoding, several `endpoint` parameters, unknown parameters
+ * ignored) and exactly one `device`. The `#secret=` fragment is required,
+ * and the Principal recomputed from it must be `device`: a receiver MUST
+ * check that before using the secret. An lfcp://join/ link is rejected.
+ * Throws INVALID_INVITATION, never with the URI or the secret in the
+ * message. Opening `I` as `J` and checking that `J` is a registered,
+ * active kind-2 device of `I`'s owner is the client's next step.
+ */
+export function parsePairingUri(uri: string): PairingLink {
+  const link = parseLink(uri, PAIR_PREFIX, "device", "the pairing device ID");
+  const secret = link.secret ?? invalid("a pairing link carries #secret=<b64url>");
+  const device = principalId(link.id);
+  if (!bytesEqual(invitationPrincipal(secret).principalId, device))
+    invalid("the secret is not the device's (IDENTITY-PROFILE-01 §5.2)");
+  return Object.freeze({
+    identityResourceId: link.resource,
+    endpoints: link.endpoints,
+    pairingDevice: device,
+    secret,
+  });
+}
+
+/** The pairing device as a signer, recomputed from the link's secret (IDENTITY-PROFILE-01 §5.2). */
+export function pairingDeviceSigner(link: PairingLink): Signer {
+  const descriptor = invitationPrincipal(link.secret);
+  if (!bytesEqual(descriptor.principalId, link.pairingDevice))
+    invalid("the secret is not the device's (IDENTITY-PROFILE-01 §5.2)");
+  return Object.freeze({ key: link.secret.signingKey, descriptor });
+}
+
+const FP_DOMAIN = utf8Encoder.encode("LFCP-DEVICE-FP-v1");
+const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
+
+/**
+ * The device fingerprint shown during pairing (IDENTITY-PROFILE-01 §5.2):
+ * base32-lower-nopad(SHA-256("LFCP-DEVICE-FP-v1" || principal_id)[0..10]),
+ * as four groups of four characters joined by "-". A display convention,
+ * not a wire object.
+ */
+export function deviceFingerprint(device: PrincipalId): string {
+  if (!(device instanceof Uint8Array) || device.length !== ID_LENGTH)
+    throw new LfcpError("INVALID_LENGTH", "a Principal ID is 32 bytes");
+  const input = new Uint8Array(FP_DOMAIN.length + ID_LENGTH);
+  input.set(FP_DOMAIN, 0);
+  input.set(device, FP_DOMAIN.length);
+  const digest = sha256(input).subarray(0, 10);
+  let bits = 0;
+  let value = 0;
+  let out = "";
+  for (const byte of digest) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += BASE32[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  return (out.match(/.{4}/g) as string[]).join("-");
 }

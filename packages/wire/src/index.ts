@@ -194,12 +194,17 @@ export {
 } from "./have.js";
 export {
   assembleInviteUri,
+  assemblePairingUri,
   decodeInviteSecret,
+  deviceFingerprint,
   encodeInviteSecret,
   INVITE_SECRET_VERSION,
   type Invitation,
   invitationPrincipal,
+  type PairingLink,
+  pairingDeviceSigner,
   parseInviteUri,
+  parsePairingUri,
   verifyInvitationSecret,
 } from "./invite.js";
 export {
