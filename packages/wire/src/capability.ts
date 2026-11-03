@@ -174,19 +174,18 @@ function direct(state: ControlState, principal: PrincipalId, ability: bigint): b
  * the owner, else what its mask lists and its root holds. Unknown codes,
  * the reserved 9, and 12 and 13 (mask-only codes) are held by no one.
  *
- * Mask code 11 confers nothing to an ordinary device (§7.3 rule 4), as in
- * sdk-rs; §80.1's pseudocode could be read as allowing it when the root
- * holds `invite/claim`. PENDING spec clarification (spec#2 review).
+ * `holds(P, 11)` is false for every bound Principal, `owner/act` included
+ * (§80.1, spec#2 1cfe51b): invite/claim belongs to invitation grants, and
+ * owner/act confers the standard abilities 1-10 only.
  */
 export function hasAbility(state: ControlState, principal: PrincipalId, ability: bigint): boolean {
   if (!confers(ability)) return false;
   if (!isBound(state, principal)) return direct(state, principal, ability);
+  if (ability === ABILITY.INVITE_CLAIM) return false;
   const d = activeDevice(state, principal);
   if (d === undefined) return false;
   if (ownerAction(state, principal)) return true;
-  return (
-    ability !== ABILITY.INVITE_CLAIM && d.mask.includes(ability) && direct(state, d.root, ability)
-  );
+  return d.mask.includes(ability) && direct(state, d.root, ability);
 }
 
 /** Every standard ability `principal` holds at the head of `state`, ascending. */
