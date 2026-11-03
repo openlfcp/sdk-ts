@@ -393,7 +393,9 @@ describe("SyncClient (LFCP-039a) on a fake server", () => {
     const epochs = server.of("KEY_PACKAGE_GET")[0]?.body.epochs ?? [];
     expect(epochs).toHaveLength(256);
     expect([epochs[0], epochs.at(-1)]).toEqual([44n, 299n]);
-  });
+    // The polling loop alone may wait 4 s; signing and validating 300
+    // records under a loaded worker took 4.2–6.4 s against the 5 s default.
+  }, 20_000);
 
   it("blocks on a missing Key Package and continues when it arrives (KEY_BLOCKED)", async () => {
     const server = new FakeServer();
