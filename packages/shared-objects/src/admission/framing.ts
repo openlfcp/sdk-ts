@@ -75,7 +75,45 @@ export function checkChange(bytes: Uint8Array): CheckedChange {
   try {
     decoded = A.decodeChange(bytes);
   } catch (e) {
-    return reject(`invalid Automerge change bytes (§11): ${(e as Error).message}`);
+    // Canonical uint64 values are legal (SOP §11.3 rule 6), but the JS
+    // engine's JSON decoder refuses integers it cannot represent as number.
+    // The canonical parser has already checked and decoded them losslessly.
+    if (!parsed.ops.some((op) => typeof op.value === "bigint"))
+      return reject(`invalid Automerge change bytes (§11): ${(e as Error).message}`);
+    const hash = refusedChangeHash(bytes);
+    if (hash === undefined)
+      return reject("the Automerge change checksum does not match its hash (§11)");
+    const actions = ["makeMap", "set", "makeList", "del", "makeText", "inc", "makeTable", "mark"];
+    const types: Record<number, string> = {
+      3: "uint",
+      4: "int",
+      5: "float64",
+      8: "counter",
+      9: "timestamp",
+    };
+    decoded = {
+      actor: parsed.actor,
+      seq: parsed.seq,
+      startOp: parsed.startOp,
+      time: parsed.time,
+      message: parsed.message,
+      author: null,
+      hash,
+      deps: [...parsed.deps],
+      ops: parsed.ops.map((op) => ({
+        action: actions[op.action],
+        obj: op.obj,
+        pred: [...op.pred],
+        ...(op.key.kind === "prop"
+          ? { key: op.key.name }
+          : { elemId: op.key.kind === "head" ? "_head" : op.key.id }),
+        ...(op.insert ? { insert: true } : {}),
+        ...([1, 5, 7].includes(op.action) ? { value: op.value } : {}),
+        ...(types[op.valueType] === undefined ? {} : { datatype: types[op.valueType] }),
+        ...(op.name === null ? {} : { name: op.name }),
+        ...(op.expand ? { expand: true } : {}),
+      })),
+    } as A.DecodedChange;
   }
   if (toHex(bytes.subarray(4, 8)) !== decoded.hash.slice(0, 8))
     reject("the Automerge change checksum does not match its hash (§11)");

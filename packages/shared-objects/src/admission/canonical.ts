@@ -31,6 +31,10 @@ export interface ParsedOp {
   readonly pred: readonly string[];
   /** The value's type, the low 4 bits of its metadata (8: a counter). */
   readonly valueType: number;
+  /** Lossless scalar value (Automerge JS decodeChange cannot decode integers above 2^53). */
+  readonly value: unknown;
+  readonly expand: boolean;
+  readonly name: string | null;
 }
 
 /** A change read from its bytes (§11.3), without the engine. */
@@ -38,6 +42,8 @@ export interface ParsedChange {
   readonly actor: string;
   readonly seq: number;
   readonly startOp: number;
+  readonly time: number;
+  readonly message: string;
   /** Hex dependency hashes, ascending. */
   readonly deps: readonly string[];
   /** Hex other actors, ascending: actor index i is otherActors[i - 1]. */
@@ -363,24 +369,26 @@ function column(spec: number, data: Uint8Array): Row[] | boolean[] {
 const num = (v: Row): number | null => (v === null ? null : Number(v as bigint));
 
 /** Rule 6: a value's bytes for its metadata type. */
-function checkValue(type: number, bytes: Uint8Array): void {
+function checkValue(type: number, bytes: Uint8Array): unknown {
   if (type >= 10) refuse(`value type ${type} is reserved`);
   if (type <= 2) {
     if (bytes.length !== 0) refuse("a null or boolean value has bytes");
-    return;
+    return type === 0 ? null : type === 2;
   }
   if (type === 3 || type === 4 || type === 8 || type === 9) {
     const r = new Reader(bytes);
-    if (type === 3) r.ubig();
-    else r.sbig();
+    const value = type === 3 ? r.ubig() : r.sbig();
     if (!r.done || bytes.length === 0) refuse("a number value is not exactly one shortest LEB128");
-    return;
+    return value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)
+      ? Number(value)
+      : value;
   }
   if (type === 5) {
     if (bytes.length !== 8) refuse("a float value is not 8 bytes");
-    return;
+    return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getFloat64(0, true);
   }
-  if (type === 6) utf8(bytes, "a string value");
+  if (type === 6) return utf8(bytes, "a string value");
+  return bytes.slice();
 }
 
 /**
@@ -432,8 +440,10 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
   const seq = r.ubig();
   const startOp = r.ubig();
   if (seq < 1n || startOp < 1n) refuse("the sequence number or the start op is 0");
-  r.sbig(); // time
-  utf8(r.take(r.unum()), "the message");
+  const time = r.sbig();
+  if (seq >= 1n << 53n || time <= -(1n << 53n) || time >= 1n << 53n)
+    refuse("the sequence number or time is outside the exact JavaScript integer range");
+  const message = utf8(r.take(r.unum()), "the message");
   const otherCount = r.unum();
   const others: Uint8Array[] = [];
   for (let i = 0; i < otherCount; i++) others.push(r.take(r.unum()));
@@ -532,6 +542,7 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
   const raw = data.get(VAL_RAW) ?? new Uint8Array(0);
   let rawAt = 0;
   const valueTypes: number[] = [];
+  const values: unknown[] = [];
   for (let i = 0; i < N; i++) {
     const m = meta?.[i] ?? null;
     if (m === null) refuse("a value metadata row is null");
@@ -539,7 +550,7 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
     const type = Number(mv & 15n);
     const len = mv >> 4n;
     if (len > BigInt(raw.length - rawAt)) refuse("the value bytes are shorter than their metadata");
-    checkValue(type, raw.subarray(rawAt, rawAt + Number(len)));
+    values.push(checkValue(type, raw.subarray(rawAt, rawAt + Number(len))));
     rawAt += Number(len);
     valueTypes.push(type);
   }
@@ -631,6 +642,9 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
         action: act,
         pred: Object.freeze(pred),
         valueType: valueTypes[i] as number,
+        value: values[i],
+        expand: exp,
+        name: mark === null ? null : String(mark),
       }),
     );
   }
@@ -665,6 +679,8 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
     actor: hex(actor),
     seq: Number(seq),
     startOp: start,
+    time: Number(time),
+    message,
     deps: Object.freeze(deps.map(hex)),
     otherActors: Object.freeze(others.map(hex)),
     ops: Object.freeze(ops),

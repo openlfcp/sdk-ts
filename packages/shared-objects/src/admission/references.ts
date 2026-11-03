@@ -15,6 +15,7 @@
 
 import * as A from "@automerge/automerge";
 import { checkCanonicalChange, type ParsedChange, type ParsedOp } from "./canonical.js";
+import { refusedChangeHash } from "./framing.js";
 
 /** What a reference may land on: an operation of the history, by its ID. */
 interface Target {
@@ -210,7 +211,8 @@ export function referenceHistoryOf(doc: A.Doc<unknown>): ReferenceHistory {
   const parsed = new Map<string, ParsedChange>();
   for (const bytes of A.getAllChanges(doc)) {
     try {
-      parsed.set(A.decodeChange(bytes).hash, checkCanonicalChange(bytes));
+      const hash = refusedChangeHash(bytes);
+      if (hash !== undefined) parsed.set(hash, checkCanonicalChange(bytes));
     } catch {
       // not readable: left out
     }
