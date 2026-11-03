@@ -18,6 +18,7 @@ import {
   encodeDeviceCertificatePayload,
   parseDeviceCertificate,
   preflightIssuance,
+  principalDescriptor,
   principalDescriptorToCbor,
   signDeviceCertificate,
   verifyChain,
@@ -200,6 +201,43 @@ describe("Device Certificate codec (§7.3 rules 1–7)", () => {
     ];
     for (const bytes of cases)
       expect(wireOf(() => parseDeviceCertificate(bytes))).toBe("MALFORMED_MESSAGE");
+  });
+});
+
+describe("writer-side payload checks match the reader (§7.3, IDENTITY-PROFILE-01 §5.3)", () => {
+  it("refuses in check, digest and preflight what signing would refuse", () => {
+    const x = keys(2).descriptor.x25519PublicKey;
+    const smallOrder = principalDescriptor(new Uint8Array(32), x); // self-consistent ID
+    const cases: DeviceCertificatePayload[] = [
+      personal(2, [-1n]),
+      personal(2, [2n ** 64n]),
+      { ...personal(2, [13]), device: smallOrder },
+      { ...personal(2, [13]), device: { ...keys(2).descriptor, principalId: id(3) } },
+      { ...personal(2, [1]), serial: new Uint8Array(15) },
+      { ...personal(2, [1]), root: new Uint8Array(31) as never },
+    ];
+    for (const p of cases) {
+      expect(wireOf(() => checkDeviceCertificatePayload(p))).toBe("MALFORMED_MESSAGE");
+      expect(wireOf(() => deviceCertificatePayloadDigest(p))).toBe("MALFORMED_MESSAGE");
+      expect(ruleOf(preflightIssuance(p, [], ROOT.descriptor, RESOURCE))).toBe(
+        "MALFORMED_MESSAGE structure",
+      );
+      expect(wireOf(() => signDeviceCertificate(p, ROOT))).toBe("MALFORMED_MESSAGE");
+    }
+  });
+
+  it("signs, encodes and parses back whatever preflight accepts", () => {
+    for (const p of [
+      personal(5, [1, 2, 12]),
+      personal(5, [13, 2n ** 64n - 1n]),
+      payload(5, SERVICE, [1], [RESOURCE]),
+      payload(5, PAIRING, [1, 2], [RESOURCE]),
+    ]) {
+      expect(preflightIssuance(p, [], ROOT.descriptor, RESOURCE).valid).toBe(true);
+      const c = signDeviceCertificate(p, ROOT);
+      expect(parseDeviceCertificate(c.signed.bytes).payload).toEqual(c.payload);
+      expect(bytesEqual(c.payloadDigest, deviceCertificatePayloadDigest(p))).toBe(true);
+    }
   });
 });
 
