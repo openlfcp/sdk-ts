@@ -21,6 +21,7 @@ import {
   type DeviceKind,
 } from "./device.js";
 import { PersistentMap, put } from "./persistent-map.js";
+import type { PrincipalDescriptor } from "./principal.js";
 
 /**
  * Resource-local device state and its transitions (LFCP-WIRE-01 §7.3,
@@ -150,6 +151,22 @@ export function ownerAction(state: ControlState, p: PrincipalId): boolean {
   if (!isBound(state, p)) return isOwner(state, p);
   const d = activeDevice(state, p);
   return d !== undefined && isOwner(state, d.root) && hasCode(d.mask, DEVICE_ABILITY.OWNER_ACT);
+}
+
+/**
+ * The descriptor a transfer offer with `kid` is verified under (§62 class
+ * 4, §23.3): the kid's, when it is the owner or a device bound to the
+ * owner, active or not. Any other kid, known here or not, is neither a
+ * dependency nor signature-checked: the offer fails §23.3 item 1 in the
+ * authority class (ownerAction), AUTHORIZATION_FAILED.
+ */
+export function offerSigner(
+  state: ControlState,
+  kid: PrincipalId,
+): PrincipalDescriptor | undefined {
+  if (isOwner(state, kid)) return state.owner;
+  const d = state.devices.get(toHex(kid));
+  return d !== undefined && isOwner(state, d.root) ? state.principals.get(toHex(kid)) : undefined;
 }
 
 /** `sameRoot(a, b)` (§25.2): the same `actsFor`, and at least one of them an active device. */
