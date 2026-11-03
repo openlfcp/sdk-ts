@@ -475,7 +475,11 @@ export function validateControlChain(
       if (!v.valid)
         bad.push(
           problem(
-            v.reason === "ISSUER_NOT_OWNER" ? "GENESIS_SIGNER" : "SIGNATURE",
+            v.reason === "ISSUER_NOT_OWNER"
+              ? "GENESIS_SIGNER"
+              : v.reason === "DEVICE_CHAIN_UNAUTHORIZED"
+                ? "UNAUTHORIZED"
+                : "SIGNATURE",
             at(g),
             `Genesis is not signed by its owner (${v.reason}, §15)`,
           ),

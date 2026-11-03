@@ -12,12 +12,15 @@ import {
   DEVICE_KIND,
   decodeControlRecord,
   isMvpSupported,
+  parseDeviceCertificate,
   principalDescriptorToCbor,
   proposeControlTransition,
   signControlRecord,
   validateControlChain,
+  verifyGenesis,
 } from "../src/index.js";
 import {
+  brokenSignature,
   cert,
   chain,
   field,
@@ -246,6 +249,36 @@ describe("Genesis field 5 and transfer commit field 2 (§15, §23.3)", () => {
     expect(
       wireOf(() => controlBodyToCbor({ ...commit(), offer: signed(null, 1) } as ControlBody)),
     ).toBe("MALFORMED_MESSAGE");
+  });
+});
+
+describe("verifyGenesis with field 5 (§15)", () => {
+  const at0 = { seq: 0, prev: null };
+  const verdict = (body: ControlBody, signer: number) => {
+    const v = verifyGenesis(
+      decodeControlRecord(rawRecord(0, controlBodyToCbor(body), { ...at0, signer })),
+    );
+    return v.valid ? "valid" : v.reason;
+  };
+  it("requires the leaf as signer and verifies the chain up to the owner", () => {
+    expect(verdict(genesis(LEAF_CHAIN()), 2)).toBe("valid");
+    expect(verdict(genesis(LEAF_CHAIN()), 1)).toBe("ISSUER_NOT_OWNER"); // the owner is not the leaf
+    expect(verdict(genesis(LEAF_CHAIN()), 9)).toBe("ISSUER_NOT_OWNER");
+    expect(verdict(genesis(), 1)).toBe("valid");
+    const broken = chain([parseDeviceCertificate(brokenSignature(cert(personal(2, [13]), 1)))]);
+    expect(verdict(genesis(broken), 2)).toBe("BAD_SIGNATURE");
+    expect(verdict(genesis(chain([cert(personal(2, [13]), 3)])), 2)).toBe("KID_MISMATCH");
+  });
+  it("refuses a leaf that cannot act as owner, after the signatures", () => {
+    for (const leaf of [
+      personal(2, [1]),
+      payload(2, DEVICE_KIND.SERVICE, [1], [RESOURCE]),
+      payload(2, DEVICE_KIND.PAIRING, [1, 2], [RESOURCE]),
+    ])
+      expect(verdict(genesis(chain([cert(leaf, 1)])), 2)).toBe("DEVICE_CHAIN_UNAUTHORIZED");
+    // (c4) inside the chain is authority too.
+    const escalating = chain([cert(personal(3, [13, 2]), 2), cert(personal(2, [1, 2, 12]), 1)]);
+    expect(verdict(genesis(escalating), 3)).toBe("DEVICE_CHAIN_UNAUTHORIZED");
   });
 });
 

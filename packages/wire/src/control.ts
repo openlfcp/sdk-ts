@@ -25,7 +25,10 @@ import {
   type CertificateChain,
   certificateChainFromCbor,
   certificateChainToCbor,
+  checkChainAuthority,
+  DEVICE_ABILITY,
   DEVICE_KIND,
+  verifyChainSignatures,
 } from "./device.js";
 import {
   checkReceivedUrl,
@@ -447,15 +450,40 @@ export const controlRecordSigner = (record: Parsed<ControlRecordPayload>): Princ
  * Verifies a Genesis record against the owner in its own body (§15:
  * "MUST be signed by the owner Principal contained in the body"): the
  * issuer and the kid must be the owner and the signature must verify with
- * the owner's key. A failure surfaces as INVALID_SIGNATURE.
+ * the owner's key. With field 5 the chain's leaf device is the required
+ * signer instead, the owner included in "any other Principal"
+ * (ISSUER_NOT_OWNER), and every certificate must verify up to the owner
+ * (§7.3 (c2)); these are INVALID_SIGNATURE on the wire. Then, as
+ * authority (AUTHORIZATION_FAILED, DEVICE_CHAIN_UNAUTHORIZED): (c3), (c4),
+ * (c6) and a personal leaf with owner/act. S is empty at Genesis, so
+ * nothing about roles or revocations applies.
  */
-export function verifyGenesis(
-  record: ControlRecord,
-): VerifyResult | { readonly valid: false; readonly reason: "NOT_GENESIS" | "ISSUER_NOT_OWNER" } {
-  if (record.body.type !== "GENESIS") return { valid: false, reason: "NOT_GENESIS" };
-  if (!bytesEqual(record.payload.issuer, record.body.owner.principalId))
+export function verifyGenesis(record: ControlRecord):
+  | VerifyResult
+  | {
+      readonly valid: false;
+      readonly reason: "NOT_GENESIS" | "ISSUER_NOT_OWNER" | "DEVICE_CHAIN_UNAUTHORIZED";
+    } {
+  const body = record.body;
+  if (body.type !== "GENESIS") return { valid: false, reason: "NOT_GENESIS" };
+  const chain = body.deviceChain;
+  const signer = chain?.leaf.payload.device ?? body.owner;
+  if (!bytesEqual(record.payload.issuer, signer.principalId))
     return { valid: false, reason: "ISSUER_NOT_OWNER" };
-  return verifySignedObject(record.signed, record.body.owner);
+  const v = verifySignedObject(record.signed, signer);
+  if (!v.valid || chain === undefined) return v;
+  const c = verifyChainSignatures(chain, body.owner);
+  if (!c.valid)
+    return { valid: false, reason: c.rule === "c2-kid" ? "KID_MISMATCH" : "BAD_SIGNATURE" };
+  const authority = checkChainAuthority(chain, record.payload.resourceId);
+  const leaf = chain.leaf.payload;
+  if (
+    !authority.valid ||
+    leaf.kind !== DEVICE_KIND.PERSONAL ||
+    !leaf.mask.includes(DEVICE_ABILITY.OWNER_ACT)
+  )
+    return { valid: false, reason: "DEVICE_CHAIN_UNAUTHORIZED" };
+  return { valid: true };
 }
 
 // ---------------------------------------------------------------------------
