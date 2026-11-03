@@ -49,9 +49,11 @@ const uint = ([type, value]: Value) =>
     (typeof value === "bigint" && value >= 0n && value <= UINT64_MAX));
 
 const epochOrder = (a: IdentityEpoch, b: IdentityEpoch) => (a < b ? -1 : a > b ? 1 : 0);
+const textOrder = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 class Fields {
   readonly problems = new Map<string, IdentityProblem>();
+  readonly conflicts = new Set<string>();
   constructor(readonly reader: IdentityReader) {}
 
   fail(diagnostic: IdentityDiagnostic, pointer: string): void {
@@ -76,8 +78,17 @@ class Fields {
   field(obj: string, key: string, base: string, required: boolean, request: boolean): Value[] {
     const values = this.reader.all(obj, key);
     if (required && values.length === 0) this.fail("MISSING_REQUIRED_FIELD", at(base, key));
-    if (request && values.length > 1) this.fail("INVALID_FIELD_TYPE", at(base, key));
+    if (request && values.length > 1) this.conflicts.add(at(base, key));
     return values;
+  }
+
+  finishEntry(base: string): void {
+    const belongs = (p: string) => p === base || p.startsWith(`${base}/`);
+    // §4 rule 2: report invalid values first. A conflict is INVALID_FIELD_TYPE
+    // only when every concurrent value is valid on its own (including maps).
+    if ([...this.problems.keys()].some(belongs)) return;
+    for (const pointer of this.conflicts)
+      if (belongs(pointer)) this.fail("INVALID_FIELD_TYPE", pointer);
   }
 
   scalar(
@@ -110,7 +121,7 @@ class Fields {
       const result: unknown[] = [];
       for (const [i, entries] of this.reader.list(String(id)).entries()) {
         const pos = at(pointer, i);
-        if (request && entries.length > 1) this.fail("INVALID_FIELD_TYPE", pos);
+        if (request && entries.length > 1) this.conflicts.add(pos);
         for (const entry of entries) {
           if (entry[0] !== type || (type === "uint" && !uint(entry)))
             this.fail("INVALID_FIELD_TYPE", pos);
@@ -165,7 +176,7 @@ class Fields {
       output.endpoints = this.list(field("endpoints"), at(base, "endpoints"), "str", false);
     else {
       const kinds = field("kind");
-      if (kinds.length > 1) this.fail("INVALID_FIELD_TYPE", at(base, "kind"));
+      if (kinds.length > 1) this.conflicts.add(at(base, "kind"));
       output.kind = this.scalar(
         kinds,
         "uint",
@@ -217,7 +228,7 @@ class Fields {
         output.missing_keys = Object.freeze(
           Object.fromEntries(
             [...union]
-              .sort(([a], [b]) => a.localeCompare(b))
+              .sort(([a], [b]) => textOrder(a, b))
               .map(([k, v]) => [k, Object.freeze([...v].sort(epochOrder))]),
           ),
         );
@@ -225,7 +236,7 @@ class Fields {
     // Unknown request fields are preserved/ignored too, but any conflict invalidates a request.
     if (request)
       for (const name of this.reader.keys(obj))
-        if (this.reader.all(obj, name).length > 1) this.fail("INVALID_FIELD_TYPE", at(base, name));
+        if (this.reader.all(obj, name).length > 1) this.conflicts.add(at(base, name));
     for (const value of Object.values(output)) if (Array.isArray(value)) Object.freeze(value);
     return Object.freeze(output);
   }
@@ -259,7 +270,7 @@ export function validateIdentity(doc: A.Doc<unknown>, root: PrincipalId): Identi
       for (const key of r.keys(container)) {
         const base = at(`/${table}`, key);
         const values = r.all(container, key);
-        if (table === "requests" && values.length > 1) f.fail("INVALID_FIELD_TYPE", base);
+        if (table === "requests" && values.length > 1) f.conflicts.add(base);
         const projections: Record<string, unknown>[] = [];
         for (const [type, id] of values) {
           if (type !== "map") f.fail("INVALID_FIELD_TYPE", base);
@@ -267,7 +278,8 @@ export function validateIdentity(doc: A.Doc<unknown>, root: PrincipalId): Identi
         }
         // Concurrent device maps also cannot disagree about kind; hints union across maps.
         if (table === "devices" && new Set(projections.map((p) => p.kind)).size > 1)
-          f.fail("INVALID_FIELD_TYPE", at(base, "kind"));
+          f.conflicts.add(at(base, "kind"));
+        f.finishEntry(base);
         if (usable && ![...f.problems.keys()].some((p) => p === base || p.startsWith(`${base}/`))) {
           const first = projections[0];
           if (first !== undefined) {
@@ -285,7 +297,7 @@ export function validateIdentity(doc: A.Doc<unknown>, root: PrincipalId): Identi
                   missing_keys: Object.freeze(
                     Object.fromEntries(
                       [...union]
-                        .sort(([a], [b]) => a.localeCompare(b))
+                        .sort(([a], [b]) => textOrder(a, b))
                         .map(([k, v]) => [k, Object.freeze([...v].sort(epochOrder))]),
                     ),
                   ),
@@ -303,7 +315,7 @@ export function validateIdentity(doc: A.Doc<unknown>, root: PrincipalId): Identi
       [...f.problems.values()].sort(
         (a, b) =>
           IDENTITY_DIAGNOSTIC_ORDER.indexOf(a.diagnostic) -
-            IDENTITY_DIAGNOSTIC_ORDER.indexOf(b.diagnostic) || a.pointer.localeCompare(b.pointer),
+            IDENTITY_DIAGNOSTIC_ORDER.indexOf(b.diagnostic) || textOrder(a.pointer, b.pointer),
       ),
     ),
     roster: tables.roster as Record<string, RosterEntry>,
