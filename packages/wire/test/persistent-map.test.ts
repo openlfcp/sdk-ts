@@ -32,27 +32,30 @@ describe("PersistentMap", () => {
     expect(versions[100]?.size).toBeLessThanOrEqual(100);
   });
 
-  it("keeps keys of equal hashes apart", () => {
-    // Equal length, first and last eight units: the same hash.
+  it("orders keys and keeps keys of a shared prefix and suffix apart", () => {
     const a = `${"0".repeat(8)}a${"0".repeat(8)}`;
     const b = `${"0".repeat(8)}b${"0".repeat(8)}`;
-    const m = PersistentMap.empty<string>().set(a, "a").set(b, "b").set(a, "A");
+    const m = PersistentMap.empty<string>().set(b, "b").set(a, "a").set(a, "A");
     expect(m.size).toBe(2);
     expect(m.get(a)).toBe("A");
     expect(m.get(b)).toBe("b");
+    expect([...m.keys()]).toEqual([a, b]);
     expect(PersistentMap.from([[a, 1]]).get(b)).toBeUndefined();
   });
 
-  it("copies only the path to the key it sets", () => {
+  it("copies only the path to the key it sets, whatever the keys (review of #8, R8-1b)", () => {
+    // Keys differing only in their middle, as chosen hash collisions would.
+    const chosen = (j: number) => `${"0".repeat(8)}${j.toString(16).padStart(48, "0")}a5bd9e9d`;
     let m = PersistentMap.empty<number>();
-    for (let i = 0; i < 4096; i++) m = m.set(hex(i), i);
+    for (let i = 0; i < 4096; i++) m = m.set(chosen(i), i);
+    expect(m.height).toBeLessThanOrEqual(Math.ceil(1.45 * Math.log2(4097)));
     const freeze = vi.spyOn(Object, "freeze");
-    const next = m.set(hex(5000), 1);
-    // The leaf, its bucket, at most seven branches and the map itself.
-    expect(freeze.mock.calls.length).toBeLessThanOrEqual(10);
+    const next = m.set(chosen(5000), 1);
+    // The new node, the copied path (two more on a rotation) and the map itself.
+    expect(freeze.mock.calls.length).toBeLessThanOrEqual(m.height + 4);
     expect(next.size).toBe(4097);
     expect(m.size).toBe(4096);
-    expect(m.has(hex(5000))).toBe(false);
+    expect(m.has(chosen(5000))).toBe(false);
   });
 
   it("put converts any other map once and shares from then on", () => {
