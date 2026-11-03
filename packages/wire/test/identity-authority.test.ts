@@ -58,6 +58,7 @@ const APPROVAL = /no consumed pairing approval/;
 const ALREADY_REVOKED = /pair is already revoked/;
 const DELEGATION = /outside the issuing device's mask/;
 const GRANT_ISSUER = /may not bind or register/;
+const SELF_RECERTIFY = /never re-certifies itself/;
 
 function invalidGenesis(record: { bytes: Uint8Array }) {
   const r = validateControlChain([record.bytes]);
@@ -121,7 +122,7 @@ describe("bindings, roles and activity (§17.4, §17.5, §79)", () => {
   it("compares masks and scopes as sets and keeps them immutable (masks_scope_and_binding_equality_are_sets_and_immutable)", () => {
     const f = new Fixture();
     f.register(1, 2, [1, 2, 99]);
-    f.push(2, deviceGrant(chainOf([personalCert(1, 2, [99, 2, 1], 1, 4)])));
+    f.push(1, deviceGrant(chainOf([personalCert(1, 2, [99, 2, 1], 1, 4)])));
     f.denied(1, deviceGrant(chainOf([personalCert(1, 2, [1, 2, 3, 99], 1, 5)])), BINDING);
     f.denied(1, deviceGrant(chainOf([personalCert(1, 2, [1], 1, 5)])), BINDING);
     const other = resourceId(new Uint8Array(32).fill(78));
@@ -212,7 +213,9 @@ describe("bindings, roles and activity (§17.4, §17.5, §79)", () => {
     expect(hasAbility(before, id(3), 2n)).toBe(true);
     expect(hasAbility(f.state, id(3), 2n)).toBe(false);
     expect(same(rootOf(f.state, id(3)), id(1))).toBe(true);
-    f.push(3, deviceGrant(chainOf([personalCert(1, 3, [1, 2], 1, 9)])));
+    // §17.4 rule 6 (spec#2 7d75f7d): a device with a chain never re-certifies itself.
+    f.denied(3, deviceGrant(chainOf([personalCert(1, 3, [1, 2], 1, 9)])), SELF_RECERTIFY);
+    f.push(1, deviceGrant(chainOf([personalCert(1, 3, [1, 2], 1, 9)])));
     expect(activeDevice(f.state, id(3))).toBeDefined();
     expect(f.state.devices.get(toHex(id(3)))?.issuers).toEqual([]);
     f.push(1, revokeDevice(1, 3, 2));
@@ -421,7 +424,7 @@ describe("grants, keys and transfers with devices (§17.2, §17.3, §25.2, §23.
     f.push(10, capabilityGrant(10, [1]));
     f.push(1, transferBody(f.state, 1, 3, 1));
     const manager = personalCert(10, 2, FULL, 10, 2);
-    f.push(3, deviceGrant(chainOf([personalCert(10, 3, [13], 2, 9), manager])));
+    f.push(10, deviceGrant(chainOf([personalCert(10, 3, [13], 2, 9), manager])));
     f.push(1, revokeDevice(10, 2, 2));
     expect(activeDevice(f.state, id(3))).toBeUndefined();
     f.push(3, transferBody(f.state, 10, 1, 3, chainOf([personalCert(10, 3, [13], 10, 10)])));
@@ -606,6 +609,24 @@ describe("states kept for every head (review of #8, R8-1)", () => {
     });
     // A revocation copies only its path (persistent-map.test.ts).
     expect(states[0]?.revoked.size).toBe(1);
+    f.replay();
+  });
+});
+
+describe("a device submits only its first registration (§17.4 rule 6, spec#2 7d75f7d)", () => {
+  it("registers itself without a chain, never re-certifies itself after", () => {
+    const f = new Fixture();
+    // 2 is bound as an intermediate only: no chain yet, so its own first registration.
+    f.push(
+      1,
+      deviceGrant(chainOf([personalCert(1, 3, [1], 2, 3), personalCert(1, 2, FULL, 1, 2)])),
+    );
+    f.push(2, deviceGrant(chainOf([personalCert(1, 2, FULL, 1, 4)])));
+    expect(activeDevice(f.state, id(2))).toBeDefined();
+    // With a chain: neither a new certificate nor its older alternative, whatever its mask.
+    f.denied(2, deviceGrant(chainOf([personalCert(1, 2, FULL, 1, 5)])), SELF_RECERTIFY);
+    f.denied(2, deviceGrant(chainOf([personalCert(1, 2, FULL, 1, 2)])), SELF_RECERTIFY);
+    f.push(1, deviceGrant(chainOf([personalCert(1, 2, FULL, 1, 5)])));
     f.replay();
   });
 });
