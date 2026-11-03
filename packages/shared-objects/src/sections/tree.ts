@@ -1,4 +1,5 @@
 import * as A from "@automerge/automerge";
+import { checkChange, decodedOf } from "../admission/framing.js";
 import { distinctValues } from "../concurrent.js";
 import { type SectionValidation, validateSection } from "./schema.js";
 
@@ -320,7 +321,7 @@ interface ChangeSummary {
 }
 
 const summarise = (bytes: Uint8Array): ChangeSummary => {
-  const c = A.decodeChange(bytes);
+  const c = decodedOf(checkChange(bytes));
   return {
     hash: c.hash,
     deps: c.deps,

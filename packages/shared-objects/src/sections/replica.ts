@@ -437,7 +437,7 @@ const revisionOf = (doc: Doc) => [...A.getHeads(doc)].sort().join(",");
 
 /** `changes` without those of `batch` (by hash), in their order. */
 const withoutBatch = (changes: readonly Uint8Array[], batch: ReadonlySet<string>) =>
-  changes.filter((c) => !batch.has(A.decodeChange(c).hash as string));
+  changes.filter((c) => !batch.has(checkChange(c).hash));
 
 /** Rebuilds a section document from the changes it held before an aborted apply. */
 function restoreSection(changes: readonly Uint8Array[], actor: string, revision: string): Doc {
@@ -556,7 +556,7 @@ export class SectionReplica {
     readonly unapplied: readonly string[];
   } {
     const out = new Set(exclude);
-    const kept = A.getAllChanges(this.#doc).filter((c) => !out.has(A.decodeChange(c).hash));
+    const kept = A.getAllChanges(this.#doc).filter((c) => !out.has(checkChange(c).hash));
     return SectionReplica.fromChanges(kept, {
       resource: this.resource,
       principal: this.#principal,
@@ -763,8 +763,7 @@ export class SectionReplica {
   #sequences(): Map<string, number> {
     if (this.#seqs === undefined) {
       this.#seqs = new Map();
-      for (const bytes of A.getAllChanges(this.#doc)) {
-        const c = A.decodeChange(bytes);
+      for (const c of A.getChangesMetaSince(this.#doc, [])) {
         if (c.seq > (this.#seqs.get(c.actor) ?? 0)) this.#seqs.set(c.actor, c.seq);
       }
     }

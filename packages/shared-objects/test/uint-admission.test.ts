@@ -1,6 +1,6 @@
 import * as A from "@automerge/automerge";
 import { dataEpoch, UINT64_MAX } from "@openlfcp/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { checkCanonicalChange } from "../src/admission/canonical.js";
 import {
   checkChange,
@@ -11,7 +11,40 @@ import {
 } from "../src/admission/framing.js";
 import { referenceHistoryOf } from "../src/admission/references.js";
 
+const decoder = vi.hoisted(() => ({ error: undefined as Error | undefined }));
+vi.mock("@automerge/automerge", async () => {
+  const actual = await vi.importActual<typeof A>("@automerge/automerge");
+  return {
+    ...actual,
+    decodeChange: (bytes: Uint8Array) => {
+      if (decoder.error !== undefined) throw decoder.error;
+      return actual.decodeChange(bytes);
+    },
+  };
+});
+
 describe("lossless uint64 values in SOP admission", () => {
+  it.each([
+    new Error("unrelated decoder error"),
+    new RangeError("unrelated range error"),
+    new TypeError("Error: 18446744073709551615 can't be represented as a JavaScript number"),
+  ])("does not bypass an unrelated decoder failure when a bigint is present: %s (F5)", (error) => {
+    const doc = A.change(A.init<Record<string, unknown>>(), { time: 0 }, (d) => {
+      A.getBackend(d).put("_root", "epoch", dataEpoch(UINT64_MAX), "uint");
+    });
+    const bytes = A.getLastLocalChange(doc) as Uint8Array;
+    decoder.error = error;
+    try {
+      expect(() => checkChange(bytes)).toThrow(
+        expect.objectContaining({ code: "PROFILE_INVALID", diagnostic: "INVALID_AUTOMERGE_BYTES" }),
+      );
+    } finally {
+      decoder.error = undefined;
+      A.free(doc);
+    }
+    expect(decodedOf(checkChange(bytes)).ops[0]).toMatchObject({ value: UINT64_MAX });
+  });
+
   it("decodes full uint64 values without changing canonical bytes, with all references retained", () => {
     const d = A.change(A.init<Record<string, unknown>>({ actor: "aa" }), { time: 0 }, (d) => {
       d.label = new A.ImmutableString("large epoch");
