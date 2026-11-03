@@ -26,6 +26,7 @@ import {
   sameRoot,
 } from "./device-state.js";
 import type { Parsed } from "./objects.js";
+import { put } from "./persistent-map.js";
 import type { PrincipalDescriptor } from "./principal.js";
 
 /**
@@ -387,8 +388,8 @@ export function applyCapabilities(
   const id = controlRecordId(record.signed.id);
   switch (body.type) {
     case "CAPABILITY_GRANT": {
-      const next = new Map(grants);
-      next.set(
+      return put(
+        grants,
         key(id),
         Object.freeze({
           id,
@@ -404,14 +405,11 @@ export function applyCapabilities(
           revokedBy: null,
         }),
       );
-      return next;
     }
     case "CAPABILITY_REVOKE": {
       const target = grants.get(key(body.grantId));
       if (target === undefined) return grants;
-      const next = new Map(grants);
-      next.set(key(target.id), Object.freeze({ ...target, revokedBy: id }));
-      return next;
+      return put(grants, key(target.id), Object.freeze({ ...target, revokedBy: id }));
     }
     case "CAPABILITY_CLAIM": {
       // §18.1: "A successful claim creates a new capability grant to the
@@ -421,13 +419,16 @@ export function applyCapabilities(
       // claimed abilities; it has no parent grant and an empty delegable
       // list, so revoking the Invitation Grant later does not revoke it."
       const invitation = grants.get(key(body.invitationGrantId));
-      const next = new Map(grants);
-      if (invitation !== undefined)
-        next.set(
-          key(invitation.id),
-          Object.freeze({ ...invitation, claimsUsed: invitation.claimsUsed + 1n }),
-        );
-      next.set(
+      const used =
+        invitation === undefined
+          ? grants
+          : put(
+              grants,
+              key(invitation.id),
+              Object.freeze({ ...invitation, claimsUsed: invitation.claimsUsed + 1n }),
+            );
+      return put(
+        used,
         key(id),
         Object.freeze({
           id,
@@ -443,7 +444,6 @@ export function applyCapabilities(
           revokedBy: null,
         }),
       );
-      return next;
     }
     default:
       return grants;

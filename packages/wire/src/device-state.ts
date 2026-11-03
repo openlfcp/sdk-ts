@@ -20,7 +20,7 @@ import {
   type DeviceCertificatePayload,
   type DeviceKind,
 } from "./device.js";
-import type { PrincipalDescriptor } from "./principal.js";
+import { PersistentMap, put } from "./persistent-map.js";
 
 /**
  * Resource-local device state and its transitions (LFCP-WIRE-01 §7.3,
@@ -76,9 +76,9 @@ export interface DeviceState {
 }
 
 export const EMPTY_DEVICE_STATE: DeviceState = Object.freeze({
-  roles: new Map(),
-  devices: new Map(),
-  revoked: new Map(),
+  roles: PersistentMap.empty<DeviceRole>(),
+  devices: PersistentMap.empty<DeviceBinding>(),
+  revoked: PersistentMap.empty<DeviceRevocation>(),
 });
 
 /** The key of `revoked` for the pair (root, device). */
@@ -311,19 +311,18 @@ export function authorizeDeviceRevoke(
  * leaves a leaf registered with the same certificate ID unchanged.
  */
 export function bindChain(
-  state: DeviceState,
-  principals: Map<string, PrincipalDescriptor>,
+  state: DeviceState & Pick<ControlState, "principals">,
   chain: CertificateChain,
   inScope: boolean,
   keepSameLeaf: boolean,
-): Pick<DeviceState, "roles" | "devices"> {
-  const roles = new Map(state.roles);
-  const devices = new Map(state.devices);
+): Pick<ControlState, "roles" | "devices" | "principals"> {
+  let { roles, devices, principals } = state;
   for (const c of chain.certificates) {
     const p = c.payload;
     const id = toHex(p.device.principalId);
     if (!devices.has(id))
-      devices.set(
+      devices = put(
+        devices,
         id,
         Object.freeze({
           root: p.root,
@@ -336,8 +335,8 @@ export function bindChain(
           issuers: Object.freeze([]),
         }),
       );
-    roles.set(id, "device");
-    principals.set(id, p.device);
+    if (roles.get(id) !== "device") roles = put(roles, id, "device");
+    if (principals.get(id) !== p.device) principals = put(principals, id, p.device);
   }
   const leafKey = toHex(chain.leaf.payload.device.principalId);
   const leaf = devices.get(leafKey) as DeviceBinding;
@@ -349,7 +348,8 @@ export function bindChain(
       bytesEqual(leaf.leafId, chain.leaf.id)
     )
   )
-    devices.set(
+    devices = put(
+      devices,
       leafKey,
       Object.freeze({
         ...leaf,
@@ -359,7 +359,7 @@ export function bindChain(
         registered: leaf.registered || inScope,
       }),
     );
-  return { roles, devices };
+  return { roles, devices, principals };
 }
 
 /** The in-scope result of an accepted DEVICE_GRANT's chain at the state it was accepted on. */
@@ -374,8 +374,8 @@ export function recordRevocation(
   record: ControlRecord,
   body: DeviceRevokeBody,
 ): ReadonlyMap<string, DeviceRevocation> {
-  const revoked = new Map(state.revoked);
-  revoked.set(
+  return put(
+    state.revoked,
     revocationKey(body.root, body.device),
     Object.freeze({
       root: body.root,
@@ -385,12 +385,9 @@ export function recordRevocation(
       revokedBy: controlRecordId(record.signed.id),
     }),
   );
-  return revoked;
 }
 
 /** Assigns the `non-device` role (§79). */
 export function nonDevice(roles: ReadonlyMap<string, DeviceRole>, p: PrincipalId) {
-  const next = new Map(roles);
-  next.set(toHex(p), "non-device");
-  return next;
+  return put(roles, toHex(p), "non-device");
 }
