@@ -280,7 +280,7 @@ describe("validateControlChain", () => {
         [0, R],
         [1, 2],
         [2, C1.id],
-        [3, 9],
+        [3, 11],
         [4, BRUNO.descriptor.principalId],
         [5, cborMap([])],
       ],
@@ -302,7 +302,7 @@ describe("validateControlChain", () => {
         [2, null],
         [3, 0],
         [4, ALICE.descriptor.principalId],
-        [5, cborMap([])],
+        [5, decodeControlRecord(G.bytes).payload.body],
       ],
       ALICE,
     );
@@ -312,6 +312,22 @@ describe("validateControlChain", () => {
       "INVALID_CONTROL_CHAIN",
       "INVALID_CONTROL_CHAIN",
     ]);
+  });
+
+  it("checks a misplaced Genesis's body before its placement (§62: class 1 before class 2)", () => {
+    const late = raw(
+      [
+        [0, R],
+        [1, 1],
+        [2, null],
+        [3, 0],
+        [4, ALICE.descriptor.principalId],
+        [5, cborMap([])],
+      ],
+      ALICE,
+    );
+    const r = expectInvalid(validateControlChain(bytesOf([G]).concat(late.bytes)));
+    expect([r.problem, r.wireCode]).toEqual(["MALFORMED", "MALFORMED_MESSAGE"]);
   });
 
   it.each([

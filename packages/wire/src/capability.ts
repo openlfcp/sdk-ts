@@ -203,7 +203,8 @@ function covers(state: CapabilityState, target: Grant, revoker: PrincipalId): bo
  * Whether the issuer of `record` had the authority the record needs, at
  * the state before it (the chain's previous head). Genesis is authorized by
  * verifyGenesis. Coordinator Recovery and Resource Tombstone records never
- * get here: the chain refuses them first (DV1).
+ * get here: the chain refuses them first (DV1); nor do device records
+ * (admitControlRecord).
  */
 export function authorizeControlRecord(record: ControlRecord, state: ControlState): Authorization {
   const issuer = record.payload.issuer;
@@ -310,6 +311,10 @@ export function authorizeControlRecord(record: ControlRecord, state: ControlStat
     case "COORDINATOR_RECOVERY":
     case "RESOURCE_TOMBSTONE":
       return deny(`${body.type} is refused in MVP 0.1 (scope §4, DV1)`);
+    case "DEVICE_GRANT":
+    case "DEVICE_REVOKE":
+      // Defense for direct callers: the chain refuses these records first (admitControlRecord).
+      return deny(`${body.type} transitions are not implemented yet (§17.4, §17.5)`);
   }
 }
 

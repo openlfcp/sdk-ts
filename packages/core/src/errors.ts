@@ -55,7 +55,8 @@ export type LfcpErrorCode =
   | "INVALID_STRUCTURE"
   /**
    * A well-formed value that LFCP reserves but this version does not define:
-   * a core Control Record type 9–31. §14: "Unknown core Control Record types
+   * a core Control Record type 11–31, or a DEVICE_GRANT (9) or DEVICE_REVOKE
+   * (10) record while this version does not apply them. §14: "Unknown core Control Record types
    * MUST cause validation failure, with INVALID_CONTROL_CHAIN."
    */
   | "UNSUPPORTED_VALUE"

@@ -22,6 +22,12 @@ import {
   verifySignedObject,
 } from "./cose.js";
 import {
+  type CertificateChain,
+  certificateChainFromCbor,
+  certificateChainToCbor,
+  DEVICE_KIND,
+} from "./device.js";
+import {
   checkReceivedUrl,
   checkWriterUrl,
   type Endpoint,
@@ -33,9 +39,10 @@ import { type ActorHave, canonicalFrontierFromCbor, canonicalFrontierToCbor } fr
 import {
   CONTROL_TYPE,
   type ControlRecordPayload,
+  checkGenesisPlacement,
   controlRecordPayloadFromCbor,
   type Parsed,
-  parseControlRecord,
+  readControlRecordPayload,
 } from "./objects.js";
 import {
   type PrincipalDescriptor,
@@ -72,6 +79,8 @@ export type ControlBody =
       readonly dekCommitment: Hash32;
       readonly endpoints: readonly Endpoint[];
       readonly coordinatorUrl: string;
+      /** Field 5 (§15): present when a device of the owner signs the Genesis; the chain's root is the owner. */
+      readonly deviceChain?: CertificateChain;
     }
   | {
       readonly type: "CAPABILITY_GRANT";
@@ -107,6 +116,8 @@ export type ControlBody =
       /** Exact COSE bytes of the transfer offer and accept (§23.3); see parseOwnerTransferOffer/Accept. */
       readonly offer: Uint8Array;
       readonly accept: Uint8Array;
+      /** Field 2 (§23.3): present when a device of the new owner signs accept and commit; rooted at offer field 3. */
+      readonly deviceChain?: CertificateChain;
     }
   | {
       readonly type: "COORDINATOR_RECOVERY";
@@ -116,6 +127,25 @@ export type ControlBody =
       readonly reason: string;
     }
   | { readonly type: "RESOURCE_TOMBSTONE"; readonly reason: bigint; readonly note?: string }
+  /** §17.4: binds the chain's devices to `root`; registers or re-certifies the leaf. */
+  | {
+      readonly type: "DEVICE_GRANT";
+      readonly root: PrincipalId;
+      /** Rooted at `root`; the leaf is the device bound or registered. */
+      readonly chain: CertificateChain;
+      /** Field 2: the pairing device whose consumed approval names the leaf (§17.4 rule 7). */
+      readonly pairingDevice?: PrincipalId;
+    }
+  /** §17.5: revokes the pair (root, device) in this Resource. */
+  | {
+      readonly type: "DEVICE_REVOKE";
+      readonly root: PrincipalId;
+      readonly device: PrincipalId;
+      /** 0 retired, 1 lost, 2 compromised, 3 consumed; 4 and above kept as received. */
+      readonly reason: bigint;
+      /** Field 4, exactly when the reason is 3: the approved certificate's payload digest. */
+      readonly approval?: Hash32;
+    }
   /** A §14 extension type (32 and up): kept, never interpreted. */
   | { readonly type: "EXTENSION"; readonly code: bigint; readonly body: CborValue };
 
@@ -128,7 +158,9 @@ const CODE: Readonly<Record<Exclude<ControlBodyType, "EXTENSION">, bigint>> = CO
  * applied. OWNER_TRANSFER_COMMIT is verified and applied
  * (MVP-0.1-PROTOCOL-SCOPE §4: "ownership transfer verification is in MVP
  * 0.1"). A chain containing Coordinator Recovery or Resource Tombstone is
- * refused (DV1, chain.ts); extensions are kept unapplied.
+ * refused (DV1, chain.ts); extensions are kept unapplied. DEVICE_GRANT and
+ * DEVICE_REVOKE decode, but their transitions are not implemented yet: the
+ * Control Chain refuses them (admitControlRecord).
  */
 const MVP_SUPPORTED: ReadonlySet<ControlBodyType> = new Set([
   "GENESIS",
@@ -193,23 +225,45 @@ function abilityList(f: Fields, key: number, nonEmpty: boolean): readonly bigint
   return list;
 }
 
+/** An optional `certificate-chain` field rooted at `root` (§15 field 5, §23.3 field 2). */
+function optionalChain(f: Fields, key: number, root: PrincipalId) {
+  return f.has(key) ? { deviceChain: certificateChainFromCbor(f.any(key), root) } : {};
+}
+
 /**
- * Decodes the body of a Control Record of §14 type `type`. Core types 0-8
- * get their closed-map structure; 9-31 are UNSUPPORTED_VALUE (§14:
+ * The embedded offer and accept of a transfer commit are structure of the
+ * commit (§62 class 1, with or without field 2): each must be a canonical
+ * signed object with its typed payload. Returns the parsed offer.
+ */
+function transferObjects(f: Fields): Parsed<OwnerTransferOfferPayload> {
+  const offer = parseOwnerTransferOffer(f.bytes(0));
+  parseOwnerTransferAccept(f.bytes(1));
+  return offer;
+}
+
+/** `reason = 3` if and only if field 4 is present (§17.5 rule 1). */
+const CONSUMED = 3n;
+
+/**
+ * Decodes the body of a Control Record of §14 type `type`. Core types 0-10
+ * get their closed-map structure, embedded certificates and transfer
+ * objects included (§62 class 1); 11-31 are UNSUPPORTED_VALUE (§14:
  * INVALID_CONTROL_CHAIN on the wire); 32 and up are kept as opaque
  * EXTENSION bodies.
  */
 export function controlBodyFromCbor(type: bigint, value: CborValue): ControlBody {
   switch (type) {
     case CONTROL_TYPE.GENESIS: {
-      const f = new Fields(value, "genesis-body", [0, 1, 2, 3, 4]);
+      const f = new Fields(value, "genesis-body", [0, 1, 2, 3, 4], [5]);
+      const owner = principalDescriptorFromCbor(f.any(1));
       return Object.freeze({
         type: "GENESIS",
         dataProfile: f.text(0),
-        owner: principalDescriptorFromCbor(f.any(1)),
+        owner,
         dekCommitment: hash32(f.bytes(2, 32)),
         endpoints: endpoints(f, 3),
         coordinatorUrl: coordinatorUrl(f, 4),
+        ...optionalChain(f, 5, owner.principalId),
       });
     }
     case CONTROL_TYPE.CAPABILITY_GRANT: {
@@ -256,11 +310,13 @@ export function controlBodyFromCbor(type: bigint, value: CborValue): ControlBody
       });
     }
     case CONTROL_TYPE.OWNER_TRANSFER_COMMIT: {
-      const f = new Fields(value, "owner-transfer-commit-body", [0, 1]);
+      const f = new Fields(value, "owner-transfer-commit-body", [0, 1], [2]);
+      const offer = transferObjects(f);
       return Object.freeze({
         type: "OWNER_TRANSFER_COMMIT",
         offer: f.bytes(0),
         accept: f.bytes(1),
+        ...optionalChain(f, 2, offer.payload.proposedOwner.principalId),
       });
     }
     case CONTROL_TYPE.COORDINATOR_RECOVERY: {
@@ -281,6 +337,37 @@ export function controlBodyFromCbor(type: bigint, value: CborValue): ControlBody
         ...(f.has(1) ? { note: f.text(1) } : {}),
       });
     }
+    case CONTROL_TYPE.DEVICE_GRANT: {
+      const f = new Fields(value, "device-grant-body", [0, 1], [2]);
+      const root = principalId(f.bytes(0, 32));
+      const chain = certificateChainFromCbor(f.any(1), root);
+      // §17.4 rule 1: a record whose leaf is of kind 2 MUST NOT carry field 2.
+      if (f.has(2) && chain.leaf.payload.kind === DEVICE_KIND.PAIRING)
+        f.fail(2, "must be absent when the leaf is a pairing device (§17.4)");
+      return Object.freeze({
+        type: "DEVICE_GRANT",
+        root,
+        chain,
+        ...(f.has(2) ? { pairingDevice: principalId(f.bytes(2, 32)) } : {}),
+      });
+    }
+    case CONTROL_TYPE.DEVICE_REVOKE: {
+      // Field 3 is reserved (§108.1): not in the closed map, so MALFORMED_MESSAGE.
+      const f = new Fields(value, "device-revoke-body", [0, 1, 2], [4]);
+      const root = principalId(f.bytes(0, 32));
+      const device = principalId(f.bytes(1, 32));
+      if (bytesEqual(root, device)) f.fail(1, "must differ from the root (§17.5 rule 1)");
+      const reason = f.uint(2);
+      if (f.has(4) !== (reason === CONSUMED))
+        f.fail(4, "must be present exactly when the reason is 3 (§17.5 rule 1)");
+      return Object.freeze({
+        type: "DEVICE_REVOKE",
+        root,
+        device,
+        reason,
+        ...(f.has(4) ? { approval: hash32(f.bytes(4, 32)) } : {}),
+      });
+    }
     default:
       if (type >= 32n) return Object.freeze({ type: "EXTENSION", code: type, body: value });
       throw new LfcpError(
@@ -299,14 +386,51 @@ export interface ControlRecord extends Parsed<ControlRecordPayload> {
 
 /**
  * Parses a received Control Record: canonical COSE and the generic
- * envelope (parseControlRecord), then the typed body. The record ID is
+ * envelope (parseControlRecord), then the typed body, then the Genesis
+ * placement rule (§62: structure before placement). The record ID is
  * `signed.id`, SHA-256 of the exact received bytes. The signature is not
  * checked here; see controlRecordSigner and verifyGenesis.
  */
-export function decodeControlRecord(bytes: Uint8Array): ControlRecord {
-  const parsed = parseControlRecord(bytes);
-  const body = controlBodyFromCbor(parsed.payload.controlType, parsed.payload.body);
-  return Object.freeze({ ...parsed, body, mvpSupported: isMvpSupported(body.type) });
+export const decodeControlRecord = (bytes: Uint8Array): ControlRecord => decodeRecord(bytes, false);
+
+function decodeRecord(bytes: Uint8Array, admit: boolean): ControlRecord {
+  const signed = parseSignedObject(bytes);
+  const payload = readControlRecordPayload(decodeStrict(signed.payloadBytes));
+  // §62: the structure of the body and every embedded object (class 1)
+  // before the Genesis placement rule of §13.1 (class 2).
+  const body = controlBodyFromCbor(payload.controlType, payload.body);
+  if (admit) identityGate(body);
+  checkGenesisPlacement(payload);
+  return Object.freeze({ signed, payload, body, mvpSupported: isMvpSupported(body.type) });
+}
+/**
+ * Decodes a received record for Control Chain admission: decodeControlRecord,
+ * then one gate while this SDK does not apply identity transitions
+ * (§17.4, §17.5, §15 field 5, §23.3 field 2). The gate runs after full
+ * structural parsing (malformed embedded objects fail first) and before
+ * placement, issuer resolution, signatures and authority, so its result
+ * never depends on the signer or a policy:
+ * - DEVICE_GRANT and DEVICE_REVOKE: UNSUPPORTED_VALUE, INVALID_CONTROL_CHAIN
+ *   on the wire, as for a receiver that does not implement types 9 and 10
+ *   (§14, §62 class 2);
+ * - a Genesis with field 5 or a transfer commit with field 2:
+ *   INVALID_STRUCTURE, MALFORMED_MESSAGE on the wire, as an unknown field of
+ *   a closed map (§62 class 1), so also before a Genesis's placement.
+ * The same gate as sdk-rs (LFCP-04-402). It goes when the transitions land.
+ */
+export const admitControlRecord = (bytes: Uint8Array): ControlRecord => decodeRecord(bytes, true);
+
+function identityGate(body: ControlBody): void {
+  if (body.type === "DEVICE_GRANT" || body.type === "DEVICE_REVOKE")
+    throw new LfcpError(
+      "UNSUPPORTED_VALUE",
+      `a ${body.type} record: this version does not apply device records yet (§14, §100.1)`,
+    );
+  if ((body.type === "GENESIS" || body.type === "OWNER_TRANSFER_COMMIT") && body.deviceChain)
+    throw new LfcpError(
+      "INVALID_STRUCTURE",
+      `a ${body.type} record with a certificate chain: this version does not apply it yet (§62 class 1)`,
+    );
 }
 
 /**
@@ -365,6 +489,14 @@ function abilities(list: readonly bigint[], nonEmpty: boolean): bigint[] {
   return [...list];
 }
 
+/** An optional chain field; its root must be the Principal the body names (§7.3 (c1)). */
+function writerChain(key: number, chain: CertificateChain | undefined, root: PrincipalId) {
+  if (chain === undefined) return [];
+  if (!bytesEqual(chain.root, root))
+    refuse("the certificate chain is for another root (§7.3 (c1))");
+  return [[key, certificateChainToCbor(chain)] as const];
+}
+
 /** The CBOR of a typed body, applying the writer rules. */
 export function controlBodyToCbor(body: ControlBody): CborValue {
   switch (body.type) {
@@ -375,6 +507,7 @@ export function controlBodyToCbor(body: ControlBody): CborValue {
         [2, hash32(body.dekCommitment)],
         [3, writerEndpoints(body.endpoints)],
         [4, writerUrl(body.coordinatorUrl)],
+        ...writerChain(5, body.deviceChain, body.owner.principalId),
       ]);
     case "CAPABILITY_GRANT":
       return cborMap([
@@ -407,10 +540,42 @@ export function controlBodyToCbor(body: ControlBody): CborValue {
         [1, writerEndpoints(body.endpoints)],
         [2, writerUrl(body.coordinatorUrl)],
       ]);
-    case "OWNER_TRANSFER_COMMIT":
+    case "OWNER_TRANSFER_COMMIT": {
+      let offer: Parsed<OwnerTransferOfferPayload>;
+      try {
+        offer = parseOwnerTransferOffer(body.offer);
+        parseOwnerTransferAccept(body.accept);
+      } catch {
+        return refuse("the offer and accept must be canonical transfer objects (§23)");
+      }
       return cborMap([
         [0, Uint8Array.from(body.offer)],
         [1, Uint8Array.from(body.accept)],
+        ...writerChain(2, body.deviceChain, offer.payload.proposedOwner.principalId),
+      ]);
+    }
+    case "DEVICE_GRANT":
+      if (!bytesEqual(body.chain.root, body.root))
+        refuse("the chain is for another root (§7.3 (c1))");
+      if (body.pairingDevice !== undefined && body.chain.leaf.payload.kind === DEVICE_KIND.PAIRING)
+        refuse("a grant of a pairing leaf carries no pairing device (§17.4)");
+      return cborMap([
+        [0, principalId(body.root)],
+        [1, certificateChainToCbor(body.chain)],
+        ...(body.pairingDevice !== undefined
+          ? [[2, principalId(body.pairingDevice)] as const]
+          : []),
+      ]);
+    case "DEVICE_REVOKE":
+      if (bytesEqual(body.root, body.device))
+        refuse("the device must differ from the root (§17.5)");
+      if ((body.approval !== undefined) !== (body.reason === CONSUMED))
+        refuse("the approval is present exactly when the reason is 3 (§17.5)");
+      return cborMap([
+        [0, principalId(body.root)],
+        [1, principalId(body.device)],
+        [2, body.reason],
+        ...(body.approval !== undefined ? [[4, hash32(body.approval)] as const] : []),
       ]);
     case "COORDINATOR_RECOVERY":
       return cborMap([
@@ -454,8 +619,10 @@ export function encodeControlRecordPayload(
   if (genesis) {
     if (header.controlSeq !== 0n || header.prevControlId !== null)
       refuse("Genesis must have control_seq 0 and a null previous record (§13.1)");
-    if (!bytesEqual(issuer, body.owner.principalId))
-      refuse("Genesis must be issued by the owner in its body (§15)");
+    // §15: the owner signs, or with field 5 the chain's leaf device does.
+    const signer = body.deviceChain?.leaf.payload.device.principalId ?? body.owner.principalId;
+    if (!bytesEqual(issuer, signer))
+      refuse("Genesis must be issued by its owner, or by the leaf of field 5 (§15)");
   } else if (header.controlSeq < 1n || header.prevControlId === null) {
     refuse("a non-Genesis record needs control_seq >= 1 and the previous record ID (§13.1)");
   }
