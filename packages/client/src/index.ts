@@ -42,6 +42,7 @@ export {
   snapshotItem,
   unitItem,
 } from "./engine-guard.js";
+export * from "./identity/index.js";
 export {
   type AcceptedInvitation,
   type AcceptInvitationOptions,
