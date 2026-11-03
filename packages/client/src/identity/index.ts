@@ -68,3 +68,12 @@ export {
   type RegisterPhase,
   recordSeq,
 } from "./phases.js";
+export {
+  type CreatedIdentityResource,
+  type CreateIdentityResourceOptions,
+  createIdentityResource,
+  type IdentityDocumentFactory,
+  localIdentityResource,
+  resumeIdentityCreation,
+  setLocalIdentityResource,
+} from "./resource.js";
