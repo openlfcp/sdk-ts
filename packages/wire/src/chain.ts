@@ -361,8 +361,7 @@ function applyRecord(state: ControlState, record: ControlRecord): ControlState {
   // §79: roles on acceptance; device bindings and revocations (§17.4, §17.5).
   // Maps are persistent: a record copies only the entries it changes, so
   // the states kept for every head share the rest (review of #8, R8-1).
-  let devices: Pick<ControlState, "roles" | "devices" | "principals"> = state;
-  let revoked = state.revoked;
+  let devices: DeviceState & Pick<ControlState, "principals"> = state;
   const known = (d: PrincipalDescriptor, role: boolean) => {
     devices = {
       ...devices,
@@ -380,11 +379,12 @@ function applyRecord(state: ControlState, record: ControlRecord): ControlState {
   if (newOwner !== undefined) {
     known(newOwner, true);
     if (body.type === "OWNER_TRANSFER_COMMIT" && body.deviceChain !== undefined)
-      devices = bindChain({ ...state, ...devices }, body.deviceChain, true, true);
+      devices = bindChain(devices, body.deviceChain, true, true);
   }
   if (body.type === "DEVICE_GRANT")
-    devices = bindChain(state, body.chain, grantInScope(state, body), false);
-  if (body.type === "DEVICE_REVOKE") revoked = recordRevocation(state, record, body);
+    devices = bindChain(state, body.chain, grantInScope(state, body), false, true);
+  if (body.type === "DEVICE_REVOKE")
+    devices = { ...devices, ...recordRevocation(state, record, body) };
   const route =
     body.type === "ROUTE_UPDATE"
       ? {
@@ -401,7 +401,10 @@ function applyRecord(state: ControlState, record: ControlRecord): ControlState {
     principals: devices.principals,
     roles: devices.roles,
     devices: devices.devices,
-    revoked,
+    revoked: devices.revoked,
+    liveBound: devices.liveBound,
+    preemptive: devices.preemptive,
+    preemptiveRoots: devices.preemptiveRoots,
     grants: applyCapabilities(state, record),
   });
 }

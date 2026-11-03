@@ -630,3 +630,53 @@ describe("a device submits only its first registration (§17.4 rule 6, spec#2 7d
     f.replay();
   });
 });
+
+describe("per-root limits (§17.4 rule 8, §17.5 rule 5, spec#2 bc03b0f)", () => {
+  const LIVE = /live devices would be bound/;
+  const GRANTS = /8 Device Grants/;
+  const PREEMPTIVE = /revocations of unbound Principals/;
+
+  it("binds at most 32 live devices to a root; a revoked binding frees its place", () => {
+    const f = new Fixture();
+    for (let d = 100; d < 131; d++) f.register(1, d, [1]);
+    // 31 live: a chain that would bind two more is refused, one more is not.
+    f.denied(
+      1,
+      deviceGrant(
+        chainOf([personalCert(1, 140, [1], 141, 140), personalCert(1, 141, FULL, 1, 141)]),
+      ),
+      LIVE,
+    );
+    f.register(1, 131, [1]);
+    f.denied(1, deviceGrant(chainOf([personalCert(1, 132, [1], 1, 132)])), LIVE);
+    // Re-certifying a bound device binds nothing new.
+    f.push(1, deviceGrant(chainOf([personalCert(1, 131, [1], 1, 999)])));
+    f.push(1, revokeDevice(1, 100, 0));
+    f.register(1, 132, [1]);
+    f.denied(1, deviceGrant(chainOf([personalCert(1, 133, [1], 1, 133)])), LIVE);
+    f.replay();
+  }, 30_000);
+
+  it("accepts at most 8 Device Grants for one root and leaf", () => {
+    const f = new Fixture();
+    for (let serial = 1; serial <= 8; serial++)
+      f.push(1, deviceGrant(chainOf([personalCert(1, 2, [1], 1, serial)])));
+    expect(f.state.devices.get(toHex(id(2)))?.grantsAccepted).toBe(8);
+    f.denied(1, deviceGrant(chainOf([personalCert(1, 2, [1], 1, 9)])), GRANTS);
+    f.replay();
+  });
+
+  it("limits a root to 64 revocations of unbound Principals, never of a bound device", () => {
+    const f = new Fixture();
+    f.push(1, capabilityGrant(10, [1]));
+    f.register(1, 2, [1]);
+    for (let d = 150; d < 214; d++) f.push(1, revokeDevice(1, d, 0));
+    f.denied(1, revokeDevice(1, 214, 0), PREEMPTIVE);
+    f.push(1, revokeDevice(1, 2, 0)); // bound: never limited
+    // 150 bound under another root is no longer an unbound revocation of root 1.
+    f.register(10, 150, [1]);
+    f.push(1, revokeDevice(1, 214, 0));
+    f.denied(1, revokeDevice(1, 215, 0), PREEMPTIVE);
+    f.replay();
+  }, 30_000);
+});
