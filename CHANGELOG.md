@@ -43,13 +43,30 @@ stays `mvp-0.2-baseline.12` until `mvp-0.4-baseline.1` is published.
   Genesis with a malformed body is `MALFORMED_MESSAGE`, not
   `INVALID_CONTROL_CHAIN`. A writer refuses a commit whose offer or accept
   is not a transfer object.
-- A transfer offer is verified under its own signer's descriptor before
-  authority (§62): an offer by a known Principal that is not the owner is
-  `AUTHORIZATION_FAILED` (was `INVALID_SIGNATURE`), by an unknown one
-  `MISSING_DEPENDENCY`; a bad offer or accept signature stays
-  `INVALID_SIGNATURE`.
+- A transfer offer's signer is never a dependency (§23.3, §62 class 4,
+  spec PR 2 `e7fc88c`): the offer is verified under its kid only when that
+  kid is the owner or a device bound to the owner; any other offer, known
+  or not, valid or not, is `AUTHORIZATION_FAILED` (was `INVALID_SIGNATURE`
+  for a known outsider, `MISSING_DEPENDENCY` for an unknown one). A bad
+  owner, owner-device or accept signature stays `INVALID_SIGNATURE`.
 - `canDistributeKey` also accepts a sender of the recipient's root
   (`sameRoot`, §25.2).
+- Device records follow spec PR 2 `7d75f7d`/`bc03b0f`: a device submits
+  only its own first registration (§17.4 rule 6); a `DEVICE_GRANT` may not
+  bring a root above 32 live bound devices nor be the ninth for one root
+  and leaf (§17.4 rule 8); a root may revoke at most 64 unbound Principals
+  (§17.5 rule 5). `ControlState` carries the counters (`liveBound`,
+  `preemptive`, `preemptiveRoots`, `DeviceBinding.grantsAccepted`).
+- The issuer of a `DEVICE_GRANT` or `DEVICE_REVOKE` is never taken from
+  `resolvePrincipal`; a record's kid must be its issuer, and with commit
+  field 2 the issuer must be the leaf (`INVALID_SIGNATURE` under any
+  policy).
+- `ControlState` maps (`principals`, `roles`, `devices`, `revoked`,
+  `grants`) are persistent (`PersistentMap`): the states `stateAt` keeps
+  share their entries. They are `ReadonlyMap`s as before; their iteration
+  order follows a hash, not insertion.
+- The certificate scan also checks the COSE envelope, the descriptor's
+  fixed fields and a Genesis with a null prev before any decoding.
 
 ## 0.2.2 — unreleased
 
