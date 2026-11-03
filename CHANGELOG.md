@@ -4,6 +4,42 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## Unreleased (MVP 0.4, not part of 0.2.2)
+
+Multi-device identity, wire codecs (LFCP-04-405, against openlfcp/spec PR 2,
+LFCP-WIRE-01 §7.2, §7.3, §14, §15, §17.4, §17.5, §23.3, §62). The spec pin
+stays `mvp-0.2-baseline.12` until `mvp-0.4-baseline.1` is published.
+
+### Added
+
+- `@openlfcp/wire`: Device Certificates and certificate chains
+  (`parseDeviceCertificate`, `signDeviceCertificate`,
+  `certificateChainFromCbor`, `certificateChain`), the payload digest, the
+  kind, mask and scope rules, `verifyChain` in the class order of §62 with
+  read-only `ChainStateChecks`, and `preflightIssuance` for a leaf that is
+  not signed yet.
+- `@openlfcp/wire`: the `DEVICE_GRANT` (9) and `DEVICE_REVOKE` (10) bodies,
+  Genesis field 5 and transfer commit field 2. They decode and encode;
+  the Control Chain refuses them (`admitControlRecord`) until their
+  transitions are implemented: types 9 and 10 as `INVALID_CONTROL_CHAIN`,
+  the two chain fields as `MALFORMED_MESSAGE`, whatever the signer.
+- `@openlfcp/wire`: pairing links (`lfcp://pair/…`, `parsePairingUri`,
+  `assemblePairingUri`, `pairingDeviceSigner`) and `deviceFingerprint`
+  (IDENTITY-PROFILE-01 §5.2).
+
+### Changed
+
+- A record of type 9 is no longer an unknown core type: a type-9 record
+  whose body is not a `device-grant-body` is `MALFORMED_MESSAGE`, not
+  `INVALID_CONTROL_CHAIN` (baseline.12's `unknown_core_type_C1`; the
+  conformance runner records the superseding value).
+- Structure before placement (§62): a transfer commit's offer and accept
+  are parsed with the commit, so a malformed one is `MALFORMED_MESSAGE`
+  even when the commit is misplaced or its issuer unknown; a misplaced
+  Genesis with a malformed body is `MALFORMED_MESSAGE`, not
+  `INVALID_CONTROL_CHAIN`. A writer refuses a commit whose offer or accept
+  is not a transfer object.
+
 ## 0.2.2 — unreleased
 
 A patch of the 0.2 line, published under the npm dist-tag `latest`: it is 0.2.1
