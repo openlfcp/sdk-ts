@@ -366,6 +366,25 @@ function referenced(context: HandlerContext, ref: unknown): Uint8Array {
  * BOB at C0) reaches its authority rule instead of stopping at
  * MISSING_DEPENDENCY (§13.1).
  */
+/**
+ * Published outcomes that a newer normative baseline replaces, for the
+ * exact bytes of the pinned case. `mvp-0.4-baseline.1` (openlfcp/spec PR 2,
+ * migrations/mvp-0.4-baseline.1/value-changes.json) makes type 9
+ * DEVICE_GRANT (LFCP-WIRE-01 §14): the pinned case's capability-grant-body
+ * under type 9 is MALFORMED_MESSAGE (§62 class 1 before class 2), and the
+ * case moves to type 31 there. An entry applies only while the case still
+ * has its old type; once the pin moves it fails, to be removed.
+ */
+const SUPERSEDED: Readonly<
+  Record<string, { readonly controlType: bigint; readonly code: string; readonly by: string }>
+> = {
+  unknown_core_type_C1: {
+    controlType: 9n,
+    code: "MALFORMED_MESSAGE",
+    by: "mvp-0.4-baseline.1 (LFCP-WIRE-01 §14: type 9 is DEVICE_GRANT)",
+  },
+};
+
 const controlRecordNegative: Handler = (c, context) => {
   const cose = hexOf(c.inputs, "cose_sign1");
   const named = principals(context).get(String(c.inputs?.signer))?.descriptor;
@@ -407,6 +426,26 @@ const controlRecordNegative: Handler = (c, context) => {
       : result.kind === "invalid"
         ? result.wireCode
         : null;
+  const superseded = Object.hasOwn(SUPERSEDED, c.id) ? SUPERSEDED[c.id] : undefined;
+  if (superseded !== undefined) {
+    if (parseControlRecord(cose).payload.controlType !== superseded.controlType)
+      return {
+        checks: [
+          {
+            name: "outcome",
+            ok: false,
+            message: `the case no longer has type ${superseded.controlType}: remove its SUPERSEDED entry`,
+          },
+        ],
+      };
+    const outcome = outcomeCheck("outcome", superseded.code, actual);
+    return {
+      checks: [
+        ...checks,
+        outcome.ok ? outcome : { ...outcome, message: `${outcome.message} (${superseded.by})` },
+      ],
+    };
+  }
   const outcome = negative(c, actual);
   return { checks: [...checks, ...outcome.checks], pending: outcome.pending };
 };

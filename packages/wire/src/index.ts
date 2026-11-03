@@ -27,6 +27,7 @@ export {
   validateControlChain,
 } from "./chain.js";
 export {
+  admitControlRecord,
   type ControlBody,
   type ControlBodyType,
   type ControlRecord,

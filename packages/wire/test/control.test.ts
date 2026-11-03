@@ -65,6 +65,29 @@ const next = (seq: bigint, prev: ControlRecordId = GENESIS.recordId) => ({
   controlSeq: seq,
   prevControlId: prev,
 });
+// A structurally valid offer/accept pair: the commit body parses both (§62 class 1).
+const OFFER = signObject(
+  encode(
+    cborMap([
+      [0, R],
+      [1, GENESIS.recordId],
+      [2, 1n],
+      [3, decodeStrict(encodePrincipalDescriptor(BRUNO.descriptor))],
+      [4, seq32(7).subarray(0, 16)],
+    ]),
+  ),
+  ALICE,
+);
+const ACCEPT = signObject(
+  encode(
+    cborMap([
+      [0, R],
+      [1, OFFER.id],
+      [2, BRUNO.descriptor.principalId],
+    ]),
+  ),
+  BRUNO,
+);
 
 describe("Genesis (§13.1, §15)", () => {
   const record = decodeControlRecord(GENESIS.bytes);
@@ -242,7 +265,7 @@ describe("typed bodies", () => {
     ],
     [
       "OWNER_TRANSFER_COMMIT",
-      { type: "OWNER_TRANSFER_COMMIT", offer: seq32(1), accept: seq32(2) },
+      { type: "OWNER_TRANSFER_COMMIT", offer: OFFER.bytes, accept: ACCEPT.bytes },
       true,
     ],
     [
@@ -286,8 +309,8 @@ describe("typed bodies", () => {
     }
   });
 
-  it("rejects reserved core types 9-31 with UNSUPPORTED_VALUE (§14: INVALID_CONTROL_CHAIN on the wire)", () => {
-    expect(codeOf(() => controlBodyFromCbor(9n, cborMap([])))).toBe("UNSUPPORTED_VALUE");
+  it("rejects reserved core types 11-31 with UNSUPPORTED_VALUE (§14: INVALID_CONTROL_CHAIN on the wire)", () => {
+    expect(codeOf(() => controlBodyFromCbor(11n, cborMap([])))).toBe("UNSUPPORTED_VALUE");
     expect(codeOf(() => controlBodyFromCbor(31n, cborMap([])))).toBe("UNSUPPORTED_VALUE");
   });
 

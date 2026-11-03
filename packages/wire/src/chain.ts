@@ -18,9 +18,9 @@ import {
   transferIssuerDescriptor,
 } from "./capability.js";
 import {
+  admitControlRecord,
   type ControlRecord,
   controlRecordSigner,
-  decodeControlRecord,
   verifyGenesis,
 } from "./control.js";
 import { objectId, verifySignedObject } from "./cose.js";
@@ -397,7 +397,7 @@ export function validateControlChain(
   inputs.forEach((input, index) => {
     const bytes = input instanceof Uint8Array ? input : input.signed.bytes;
     try {
-      const record = decodeControlRecord(bytes);
+      const record = admitControlRecord(bytes);
       entries.push({ index, record, key: toHex(record.signed.id) });
     } catch (e) {
       const error = e instanceof LfcpError ? e : new LfcpError("INVALID_STRUCTURE", String(e));

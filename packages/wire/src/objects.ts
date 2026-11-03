@@ -39,7 +39,7 @@ import { type ActorHave, canonicalFrontierFromCbor } from "./have.js";
  *
  * Errors and their wire mapping (ADR 0001):
  * - COSE_MALFORMED, CBOR_* and INVALID_STRUCTURE → MALFORMED_MESSAGE;
- * - UNSUPPORTED_VALUE (reserved core Control Record type) →
+ * - UNSUPPORTED_VALUE (reserved core Control Record type 11–31) →
  *   INVALID_CONTROL_CHAIN (§14);
  * - INVALID_CONTROL_CHAIN (a Genesis not at control_seq 0 with a null
  *   link, §13.1) → INVALID_CONTROL_CHAIN;
@@ -52,7 +52,7 @@ export interface Parsed<P> {
   readonly payload: P;
 }
 
-/** §14 Control Record types defined by LFCP-WIRE-01. 9–31 are reserved; 32 and up are extensions. */
+/** §14 Control Record types defined by LFCP-WIRE-01. 11–31 are reserved; 32 and up are extensions. */
 export const CONTROL_TYPE = Object.freeze({
   GENESIS: 0n,
   CAPABILITY_GRANT: 1n,
@@ -63,8 +63,10 @@ export const CONTROL_TYPE = Object.freeze({
   OWNER_TRANSFER_COMMIT: 6n,
   COORDINATOR_RECOVERY: 7n,
   RESOURCE_TOMBSTONE: 8n,
+  DEVICE_GRANT: 9n,
+  DEVICE_REVOKE: 10n,
 });
-const FIRST_RESERVED_CONTROL_TYPE = 9n;
+const FIRST_RESERVED_CONTROL_TYPE = 11n;
 const FIRST_EXTENSION_CONTROL_TYPE = 32n;
 
 /**
@@ -134,6 +136,15 @@ const ALL_FIELDS = [0, 1, 2, 3, 4, 5, 6];
  * (LFCP-020).
  */
 export function controlRecordPayloadFromCbor(value: CborValue): ControlRecordPayload {
+  return checkGenesisPlacement(readControlRecordPayload(value));
+}
+
+/**
+ * controlRecordPayloadFromCbor without the Genesis placement rule (§13.1,
+ * class 2 of §62), for a decoder that checks the typed body (class 1)
+ * first. Package-internal.
+ */
+export function readControlRecordPayload(value: CborValue): ControlRecordPayload {
   const f = new Fields(value, "control-record-payload", ALL_FIELDS.slice(0, 6));
   const rid = resourceId(f.bytes(0, 32));
   const controlSeq = f.uint(1);
@@ -146,11 +157,6 @@ export function controlRecordPayloadFromCbor(value: CborValue): ControlRecordPay
       `Control Record type ${controlType} is reserved for LFCP core (§14)`,
     );
   }
-  if (controlType === CONTROL_TYPE.GENESIS && (controlSeq !== 0n || prev !== null))
-    throw new LfcpError(
-      "INVALID_CONTROL_CHAIN",
-      "a Genesis record must have control_seq 0 and a null prev_control_id (§13.1)",
-    );
   return Object.freeze({
     kind: "control-record",
     resourceId: rid,
@@ -161,6 +167,16 @@ export function controlRecordPayloadFromCbor(value: CborValue): ControlRecordPay
     issuer,
     body: f.any(5),
   });
+}
+
+/** §13.1: a Genesis is at control_seq 0 with a null link (INVALID_CONTROL_CHAIN). Package-internal. */
+export function checkGenesisPlacement(p: ControlRecordPayload): ControlRecordPayload {
+  if (p.controlType === CONTROL_TYPE.GENESIS && (p.controlSeq !== 0n || p.prevControlId !== null))
+    throw new LfcpError(
+      "INVALID_CONTROL_CHAIN",
+      "a Genesis record must have control_seq 0 and a null prev_control_id (§13.1)",
+    );
+  return p;
 }
 
 /**
