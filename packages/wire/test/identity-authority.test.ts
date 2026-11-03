@@ -472,6 +472,19 @@ describe("invite/claim is never held by a device (§80.1, spec#2 1cfe51b)", () =
     expect(a.allowed).toBe(false);
     expect(canDistributeKey(g.state, id(1), id(10), dataEpoch(0n)).allowed).toBe(true);
   });
+
+  it("is false for an owner-acting device and unchanged for the unbound owner (spec#2 7d75f7d)", () => {
+    const f = new Fixture();
+    f.register(1, 2, [13]);
+    f.register(1, 3, [11, 13]);
+    f.push(1, capabilityGrant(1, [11], [], undefined, 1)); // an invitation grant to the root
+    for (const device of [2, 3]) {
+      expect(ownerAction(f.state, id(device))).toBe(true);
+      expect(hasAbility(f.state, id(device), ABILITY.INVITE_CLAIM)).toBe(false);
+    }
+    // §80.1: direct(owner, 11) is true as for every code; it creates no invitation grant.
+    expect(hasAbility(f.state, id(1), ABILITY.INVITE_CLAIM)).toBe(true);
+  });
 });
 
 describe("ordering of the classes for device records (§62)", () => {
