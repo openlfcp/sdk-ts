@@ -10,7 +10,7 @@ import {
 import { type Authorization, authorizeControlRecord } from "./capability.js";
 import { type CborValue, decodeStrict } from "./cbor/index.js";
 import { type ChainProblem, type ControlState, validateControlChain } from "./chain.js";
-import { admitControlRecord, type ControlRecord } from "./control.js";
+import { type ControlRecord, decodeControlRecord } from "./control.js";
 import { Fields } from "./fields.js";
 
 /**
@@ -93,7 +93,7 @@ export function proposeControlTransition(
   }
   let record: ControlRecord;
   try {
-    record = admitControlRecord(candidate);
+    record = decodeControlRecord(candidate);
   } catch (e) {
     const error = e instanceof LfcpError ? e : new LfcpError("INVALID_STRUCTURE", String(e));
     return Object.freeze({
