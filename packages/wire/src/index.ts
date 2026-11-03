@@ -27,7 +27,6 @@ export {
   validateControlChain,
 } from "./chain.js";
 export {
-  admitControlRecord,
   type ControlBody,
   type ControlBodyType,
   type ControlRecord,
@@ -125,6 +124,21 @@ export {
   verifyChain,
   verifyChainSignatures,
 } from "./device.js";
+export {
+  activeDevice,
+  actsFor,
+  type DeviceBinding,
+  type DeviceRevocation,
+  type DeviceRole,
+  type DeviceState,
+  deviceChainChecks,
+  isBound,
+  ownerAction,
+  revocationOf,
+  rootOf,
+  rootStanding,
+  sameRoot,
+} from "./device-state.js";
 export {
   checkReceivedUrl,
   checkWriterUrl,

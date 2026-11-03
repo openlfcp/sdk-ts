@@ -167,14 +167,9 @@ describe("ownership transfer (§23.3)", () => {
 
   it.each([
     [
-      "an offer signed by a non-owner",
-      { offerBy: BRUNO },
-      /not signed by the current owner .*rule 1/,
-    ],
-    [
       "an accept signed by someone else",
       { acceptBy: CARLA },
-      /accept is not signed by the new owner .*rule 4/,
+      /accept is not signed by the new owner .*§23.3/,
     ],
   ] as [string, TransferOptions, RegExp][])(
     "refuses %s (INVALID_SIGNATURE, §23.3)",
@@ -187,6 +182,14 @@ describe("ownership transfer (§23.3)", () => {
 
   it.each([
     ["a stale offer head", { head: seq32(3) }, /current Control Head .*rule 2/],
+    // §62 (IDENTITY-01): the offer verifies under its kid's descriptor
+    // (class 4); that the kid is not ownerAction is authority (class 5), as
+    // in sdk-rs. PENDING spec#2 clarification of §23.3's sentence.
+    [
+      "an offer signed by a non-owner",
+      { offerBy: BRUNO },
+      /not signed by the current owner .*rule 1/,
+    ],
     [
       "an accept naming someone else",
       { acceptNames: CARLA },

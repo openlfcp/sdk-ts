@@ -16,14 +16,26 @@ import {
   authorizeControlRecord,
   type Grant,
   transferIssuerDescriptor,
+  transferNewOwner,
 } from "./capability.js";
 import {
-  admitControlRecord,
   type ControlRecord,
   controlRecordSigner,
+  decodeControlRecord,
+  parseOwnerTransferAccept,
+  parseOwnerTransferOffer,
   verifyGenesis,
 } from "./control.js";
 import { objectId, verifySignedObject } from "./cose.js";
+import { verifyChainSignatures } from "./device.js";
+import {
+  bindChain,
+  type DeviceState,
+  EMPTY_DEVICE_STATE,
+  grantInScope,
+  nonDevice,
+  recordRevocation,
+} from "./device-state.js";
 import type { Endpoint } from "./endpoint.js";
 import type { ActorHave } from "./have.js";
 import type { PrincipalDescriptor } from "./principal.js";
@@ -82,7 +94,7 @@ export interface EpochHistory extends ControlEpoch {
  * LFCP-021 adds the grants and applies route updates; LFCP-023 applies
  * Key Epoch rotation (`epoch`, `epochs`).
  */
-export interface ControlState {
+export interface ControlState extends DeviceState {
   readonly resourceId: ResourceId;
   readonly genesisId: ControlRecordId;
   /** The current Control Head: the record ID of the last validated record. */
@@ -102,7 +114,8 @@ export interface ControlState {
   readonly grants: ReadonlyMap<string, Grant>;
   /**
    * Principal Descriptors carried by applied records (Genesis owner, grant
-   * subjects, claimants), by Principal ID hex. Descriptors are
+   * subjects, claimants, new owners, every device of an accepted
+   * certificate chain), by Principal ID hex. Descriptors are
    * self-certifying (§7), so knowing one grants nothing; it only lets later
    * records by that Principal be verified.
    */
@@ -311,8 +324,26 @@ function genesisState(record: ControlRecord): ControlState {
       ],
     ]),
     grants: new Map(),
-    principals: new Map([[toHex(body.owner.principalId), body.owner]]),
+    ...genesisDevices(body),
   });
+}
+
+/** §15: the owner is `non-device`; with field 5 every chain device is bound and the leaf registered. */
+function genesisDevices(
+  body: Extract<ControlRecord["body"], { type: "GENESIS" }>,
+): DeviceState & Pick<ControlState, "principals"> {
+  const principals = new Map([[toHex(body.owner.principalId), body.owner]]);
+  const roles = nonDevice(EMPTY_DEVICE_STATE.roles, body.owner.principalId);
+  if (body.deviceChain === undefined)
+    return { roles, devices: new Map(), revoked: new Map(), principals };
+  const bound = bindChain(
+    { ...EMPTY_DEVICE_STATE, roles },
+    principals,
+    body.deviceChain,
+    true,
+    false,
+  );
+  return { ...bound, revoked: new Map(), principals };
 }
 
 /**
@@ -326,14 +357,31 @@ function applyRecord(state: ControlState, record: ControlRecord): ControlState {
   if (!record.mvpSupported) return Object.freeze({ ...state, ...next });
   const principals = new Map(state.principals);
   const body = record.body;
-  if (body.type === "CAPABILITY_GRANT")
+  // §79: roles on acceptance; device bindings and revocations (§17.4, §17.5).
+  let devices: Pick<DeviceState, "roles" | "devices"> = state;
+  let revoked = state.revoked;
+  if (body.type === "CAPABILITY_GRANT") {
     principals.set(toHex(body.subject.principalId), body.subject);
-  if (body.type === "CAPABILITY_CLAIM")
+    devices = { ...devices, roles: nonDevice(devices.roles, body.subject.principalId) };
+  }
+  if (body.type === "CAPABILITY_CLAIM") {
     principals.set(toHex(body.claimant.principalId), body.claimant);
+    devices = { ...devices, roles: nonDevice(devices.roles, body.claimant.principalId) };
+  }
   // §23.3 "After commit, the accepting Principal becomes the Resource owner"
-  // (verified by authorizeControlRecord before this record was accepted).
-  const newOwner = transferIssuerDescriptor(record);
-  if (newOwner !== undefined) principals.set(toHex(newOwner.principalId), newOwner);
+  // (verified by authorizeControlRecord before this record was accepted);
+  // with field 2 its chain is bound and the leaf registered, a leaf already
+  // registered with the same certificate left unchanged.
+  const newOwner = transferNewOwner(record);
+  if (newOwner !== undefined) {
+    principals.set(toHex(newOwner.principalId), newOwner);
+    devices = { ...devices, roles: nonDevice(devices.roles, newOwner.principalId) };
+    if (body.type === "OWNER_TRANSFER_COMMIT" && body.deviceChain !== undefined)
+      devices = bindChain({ ...state, ...devices }, principals, body.deviceChain, true, true);
+  }
+  if (body.type === "DEVICE_GRANT")
+    devices = bindChain(state, principals, body.chain, grantInScope(state, body), false);
+  if (body.type === "DEVICE_REVOKE") revoked = recordRevocation(state, record, body);
   const route =
     body.type === "ROUTE_UPDATE"
       ? {
@@ -348,7 +396,10 @@ function applyRecord(state: ControlState, record: ControlRecord): ControlState {
     ...(body.type === "KEY_EPOCH" ? rotate(state, record, body) : {}),
     ...(newOwner !== undefined ? { owner: newOwner } : {}),
     principals,
-    grants: applyCapabilities(state.grants, record),
+    roles: devices.roles,
+    devices: devices.devices,
+    revoked,
+    grants: applyCapabilities(state, record),
   });
 }
 
@@ -384,6 +435,85 @@ function rotate(
 }
 
 /**
+ * §62 classes 3 and 4 for a non-Genesis record at `state`: every
+ * dependency first (a Device Grant's root known to the Resource's state,
+ * the issuer's descriptor, a transfer offer's signer), then every
+ * signature (the record under its issuer, the certificates of an embedded
+ * chain leaf first, the offer under its kid and the accept under the new
+ * owner or, with commit field 2, under the leaf). §13: kid MUST equal the
+ * issuer (controlRecordSigner); with commit field 2 the issuer MUST be the
+ * leaf. Undefined when all hold.
+ */
+function dependenciesAndSignatures(
+  record: ControlRecord,
+  state: ControlState,
+  options: ChainOptions,
+): { readonly problem: ChainProblem; readonly reason: string } | undefined {
+  const body = record.body;
+  const issuer = controlRecordSigner(record);
+  const known = (id: PrincipalId) => state.principals.get(toHex(id));
+  const missing = (reason: string) => ({ problem: "UNRESOLVED_ISSUER" as const, reason });
+  const bad = (reason: string) => ({ problem: "SIGNATURE" as const, reason });
+  // Class 3.
+  let root: PrincipalDescriptor | undefined;
+  if (body.type === "DEVICE_GRANT") {
+    // §17.4 rule 2: the root's descriptor is known to the previous state.
+    root = known(body.root);
+    if (root === undefined) return missing("the Device Grant's root is not known (§17.4 rule 2)");
+  }
+  const offer = body.type === "OWNER_TRANSFER_COMMIT" ? parseOwnerTransferOffer(body.offer) : null;
+  const accept =
+    body.type === "OWNER_TRANSFER_COMMIT" ? parseOwnerTransferAccept(body.accept) : null;
+  if (offer !== null) root = offer.payload.proposedOwner;
+  const chain =
+    body.type === "DEVICE_GRANT"
+      ? body.chain
+      : body.type === "OWNER_TRANSFER_COMMIT"
+        ? body.deviceChain
+        : undefined;
+  const leaf = chain?.leaf.payload.device;
+  const required = body.type === "OWNER_TRANSFER_COMMIT" ? leaf : undefined;
+  const descriptor =
+    required ??
+    known(issuer) ??
+    (body.type === "DEVICE_GRANT"
+      ? body.chain.certificates.find((c) => toHex(c.payload.device.principalId) === toHex(issuer))
+          ?.payload.device
+      : undefined) ??
+    transferIssuerDescriptor(record) ??
+    options.resolvePrincipal?.(issuer);
+  if (descriptor === undefined) return missing("no descriptor is known for the issuer");
+  let offerSigner: PrincipalDescriptor | undefined;
+  if (offer !== null) {
+    offerSigner = known(offer.signed.kid) ?? options.resolvePrincipal?.(offer.signed.kid);
+    if (offerSigner === undefined) return missing("no descriptor is known for the offer's signer");
+  }
+  // Class 4.
+  const v = verifySignedObject(record.signed, descriptor);
+  if (!v.valid)
+    return bad(
+      required !== undefined
+        ? `the commit is not signed by the leaf device of field 2 (${v.reason}, §23.3)`
+        : `the record is not signed by its issuer (${v.reason})`,
+    );
+  if (chain !== undefined && root !== undefined) {
+    const c = verifyChainSignatures(chain, root);
+    if (!c.valid) return bad(`${c.reason} (§7.3)`);
+  }
+  if (offer !== null && accept !== null && offerSigner !== undefined && root !== undefined) {
+    const o = verifySignedObject(offer.signed, offerSigner);
+    if (!o.valid) return bad(`the offer's signature does not verify (${o.reason}, §23.3)`);
+    // PENDING spec clarification: §62 checks the accept under its required
+    // signer before authority, so a wrong accept kid is INVALID_SIGNATURE
+    // (as sdk-rs), with or without field 2.
+    const a = verifySignedObject(accept.signed, leaf ?? root);
+    if (!a.valid)
+      return bad(`the accept is not signed by the new owner or its leaf (${a.reason}, §23.3)`);
+  }
+  return undefined;
+}
+
+/**
  * Validates a set of exact signed Control Records of one Resource, from
  * Genesis or after `options.start`. Input objects that are already decoded
  * are re-decoded from their exact bytes, never trusted as decoded.
@@ -397,7 +527,7 @@ export function validateControlChain(
   inputs.forEach((input, index) => {
     const bytes = input instanceof Uint8Array ? input : input.signed.bytes;
     try {
-      const record = admitControlRecord(bytes);
+      const record = decodeControlRecord(bytes);
       entries.push({ index, record, key: toHex(record.signed.id) });
     } catch (e) {
       const error = e instanceof LfcpError ? e : new LfcpError("INVALID_STRUCTURE", String(e));
@@ -481,7 +611,9 @@ export function validateControlChain(
                 ? "UNAUTHORIZED"
                 : "SIGNATURE",
             at(g),
-            `Genesis is not signed by its owner (${v.reason}, §15)`,
+            v.reason === "DEVICE_CHAIN_UNAUTHORIZED"
+              ? "the Genesis chain fails (c3), (c4) or (c6), or its leaf is not a personal device with owner/act (§15)"
+              : `Genesis is not signed by its owner (${v.reason}, §15)`,
           ),
         );
     }
@@ -540,21 +672,9 @@ export function validateControlChain(
         );
         continue;
       }
-      // §13: the issuer signs, and kid MUST equal it (see controlRecordSigner).
-      const issuer = controlRecordSigner(k.record);
-      const descriptor =
-        state.principals.get(toHex(issuer)) ??
-        transferIssuerDescriptor(k.record) ??
-        options.resolvePrincipal?.(issuer);
-      if (descriptor === undefined) {
-        problems.push(problem("UNRESOLVED_ISSUER", at(k), "no descriptor is known for the issuer"));
-        continue;
-      }
-      const v = verifySignedObject(k.record.signed, descriptor);
-      if (!v.valid) {
-        problems.push(
-          problem("SIGNATURE", at(k), `the record is not signed by its issuer (${v.reason})`),
-        );
+      const verified = dependenciesAndSignatures(k.record, state, options);
+      if (verified !== undefined) {
+        problems.push(problem(verified.problem, at(k), verified.reason));
         continue;
       }
       // §19: "The new epoch number MUST be exactly the previous Data Epoch plus one."

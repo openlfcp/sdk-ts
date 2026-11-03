@@ -163,8 +163,7 @@ const CODE: Readonly<Record<Exclude<ControlBodyType, "EXTENSION">, bigint>> = CO
  * (MVP-0.1-PROTOCOL-SCOPE §4: "ownership transfer verification is in MVP
  * 0.1"). A chain containing Coordinator Recovery or Resource Tombstone is
  * refused (DV1, chain.ts); extensions are kept unapplied. DEVICE_GRANT and
- * DEVICE_REVOKE decode, but their transitions are not implemented yet: the
- * Control Chain refuses them (admitControlRecord).
+ * DEVICE_REVOKE (IDENTITY-01, §17.4, §17.5) are verified and applied.
  */
 const MVP_SUPPORTED: ReadonlySet<ControlBodyType> = new Set([
   "GENESIS",
@@ -174,6 +173,8 @@ const MVP_SUPPORTED: ReadonlySet<ControlBodyType> = new Set([
   "KEY_EPOCH",
   "ROUTE_UPDATE",
   "OWNER_TRANSFER_COMMIT",
+  "DEVICE_GRANT",
+  "DEVICE_REVOKE",
 ]);
 
 /** Whether MVP 0.1 implements a body type (false for deferred core types and extensions). */
@@ -395,9 +396,7 @@ export interface ControlRecord extends Parsed<ControlRecordPayload> {
  * `signed.id`, SHA-256 of the exact received bytes. The signature is not
  * checked here; see controlRecordSigner and verifyGenesis.
  */
-export const decodeControlRecord = (bytes: Uint8Array): ControlRecord => decodeRecord(bytes, false);
-
-function decodeRecord(bytes: Uint8Array, admit: boolean): ControlRecord {
+export function decodeControlRecord(bytes: Uint8Array): ControlRecord {
   // A certificate chain's bounds, on the raw bytes, before anything is decoded.
   scanControlRecord(bytes);
   const signed = parseSignedObject(bytes);
@@ -405,38 +404,8 @@ function decodeRecord(bytes: Uint8Array, admit: boolean): ControlRecord {
   // §62: the structure of the body and every embedded object (class 1)
   // before the Genesis placement rule of §13.1 (class 2).
   const body = controlBodyFromCbor(payload.controlType, payload.body);
-  if (admit) identityGate(body);
   checkGenesisPlacement(payload);
   return Object.freeze({ signed, payload, body, mvpSupported: isMvpSupported(body.type) });
-}
-/**
- * Decodes a received record for Control Chain admission: decodeControlRecord,
- * then one gate while this SDK does not apply identity transitions
- * (§17.4, §17.5, §15 field 5, §23.3 field 2). The gate runs after full
- * structural parsing (malformed embedded objects fail first) and before
- * placement, issuer resolution, signatures and authority, so its result
- * never depends on the signer or a policy:
- * - DEVICE_GRANT and DEVICE_REVOKE: UNSUPPORTED_VALUE, INVALID_CONTROL_CHAIN
- *   on the wire, as for a receiver that does not implement types 9 and 10
- *   (§14, §62 class 2);
- * - a Genesis with field 5 or a transfer commit with field 2:
- *   INVALID_STRUCTURE, MALFORMED_MESSAGE on the wire, as an unknown field of
- *   a closed map (§62 class 1), so also before a Genesis's placement.
- * The same gate as sdk-rs (LFCP-04-402). It goes when the transitions land.
- */
-export const admitControlRecord = (bytes: Uint8Array): ControlRecord => decodeRecord(bytes, true);
-
-function identityGate(body: ControlBody): void {
-  if (body.type === "DEVICE_GRANT" || body.type === "DEVICE_REVOKE")
-    throw new LfcpError(
-      "UNSUPPORTED_VALUE",
-      `a ${body.type} record: this version does not apply device records yet (§14, §100.1)`,
-    );
-  if ((body.type === "GENESIS" || body.type === "OWNER_TRANSFER_COMMIT") && body.deviceChain)
-    throw new LfcpError(
-      "INVALID_STRUCTURE",
-      `a ${body.type} record with a certificate chain: this version does not apply it yet (§62 class 1)`,
-    );
 }
 
 /**

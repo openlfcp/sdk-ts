@@ -15,6 +15,16 @@ import {
   parseOwnerTransferOffer,
 } from "./control.js";
 import { objectId, verifySignedObject } from "./cose.js";
+import {
+  activeDevice,
+  actsFor,
+  authorizeDeviceGrant,
+  authorizeDeviceRevoke,
+  authorizeOwnerChain,
+  isBound,
+  ownerAction,
+  sameRoot,
+} from "./device-state.js";
 import type { Parsed } from "./objects.js";
 import type { PrincipalDescriptor } from "./principal.js";
 
@@ -31,6 +41,11 @@ import type { PrincipalDescriptor } from "./principal.js";
  * H). Evaluating at an older H means using the state at that H (see
  * `stateAt` on a linear chain result), so a later revocation never
  * changes an earlier answer.
+ *
+ * With devices (§80.1): `hasAbility` is `holds`, owner-only rules use
+ * `ownerAction`, issuer comparisons use `actsFor` at the previous head, and
+ * a bound Principal is never a grant subject, claimant or new owner. A
+ * chain without device records gives the answers of §80 alone.
  */
 
 /** §17.1 standard ability codes. */
@@ -84,6 +99,8 @@ export interface Grant {
   readonly id: ControlRecordId;
   readonly source: "grant" | "claim";
   readonly issuer: PrincipalId;
+  /** §79 `issuer_root`: `actsFor(issuer)` at the head the grant was committed on. */
+  readonly issuerRoot: PrincipalId;
   readonly subject: PrincipalId;
   readonly abilities: readonly bigint[];
   readonly delegable: readonly bigint[];
@@ -140,18 +157,36 @@ function grantConfers(state: CapabilityState, g: Grant, ability: bigint): boolea
   return ability !== ABILITY.INVITE_CLAIM || !claimsExhausted(g);
 }
 
-/**
- * Whether `principal` holds `ability` at the head of `state`: the owner
- * holds every standard ability implicitly (§17.1, no self-grant); anyone
- * else holds it through an active grant that confers it. Unknown codes and
- * the reserved ability 9 are held by no one (§17.1, §23.1).
- */
-export function hasAbility(state: ControlState, principal: PrincipalId, ability: bigint): boolean {
-  if (!confers(ability)) return false;
+/** `direct(P, A)` (§80.1): §80 steps 2–7 for P itself; the owner holds every standard ability. */
+function direct(state: ControlState, principal: PrincipalId, ability: bigint): boolean {
   if (isOwner(state, principal)) return true;
   for (const g of state.grants.values())
     if (bytesEqual(g.subject, principal) && grantConfers(state, g, ability)) return true;
   return false;
+}
+
+/**
+ * `holds(P, A)` (§80.1): whether `principal` holds `ability` at the head of
+ * `state`. A Principal that no device record names holds it directly: the
+ * owner implicitly (§17.1), anyone else through an active grant that
+ * confers it. A bound Principal holds nothing of its own (N4): only an
+ * active device holds, everything when it is an owner-acting device of
+ * the owner, else what its mask lists and its root holds. Unknown codes,
+ * the reserved 9, and 12 and 13 (mask-only codes) are held by no one.
+ *
+ * Mask code 11 confers nothing to an ordinary device (§7.3 rule 4), as in
+ * sdk-rs; §80.1's pseudocode could be read as allowing it when the root
+ * holds `invite/claim`. PENDING spec clarification (spec#2 review).
+ */
+export function hasAbility(state: ControlState, principal: PrincipalId, ability: bigint): boolean {
+  if (!confers(ability)) return false;
+  if (!isBound(state, principal)) return direct(state, principal, ability);
+  const d = activeDevice(state, principal);
+  if (d === undefined) return false;
+  if (ownerAction(state, principal)) return true;
+  return (
+    ability !== ABILITY.INVITE_CLAIM && d.mask.includes(ability) && direct(state, d.root, ability)
+  );
 }
 
 /** Every standard ability `principal` holds at the head of `state`, ascending. */
@@ -192,7 +227,7 @@ function covers(state: CapabilityState, target: Grant, revoker: PrincipalId): bo
   const seen = new Set<string>();
   let grant: Grant | undefined = target;
   while (grant !== undefined && !seen.has(key(grant.id))) {
-    if (bytesEqual(grant.issuer, revoker)) return true;
+    if (bytesEqual(grant.issuerRoot, revoker)) return true;
     seen.add(key(grant.id));
     grant = grant.parentGrantId === null ? undefined : state.grants.get(key(grant.parentGrantId));
   }
@@ -203,8 +238,7 @@ function covers(state: CapabilityState, target: Grant, revoker: PrincipalId): bo
  * Whether the issuer of `record` had the authority the record needs, at
  * the state before it (the chain's previous head). Genesis is authorized by
  * verifyGenesis. Coordinator Recovery and Resource Tombstone records never
- * get here: the chain refuses them first (DV1); nor do device records
- * (admitControlRecord).
+ * get here: the chain refuses them first (DV1).
  */
 export function authorizeControlRecord(record: ControlRecord, state: ControlState): Authorization {
   const issuer = record.payload.issuer;
@@ -213,6 +247,10 @@ export function authorizeControlRecord(record: ControlRecord, state: ControlStat
     case "GENESIS":
       return ALLOW;
     case "CAPABILITY_GRANT": {
+      // §80.1 role exclusivity: a bound subject would get direct authority.
+      if (isBound(state, body.subject.principalId))
+        return deny("the subject is bound as a device in this Resource (§17.2, §80.1)");
+      const owner = ownerAction(state, issuer);
       // §17.2: "The owner MAY grant any abilities without a parent grant. A
       // non-owner issuer MUST hold capability/grant and MUST reference a
       // parent grant." "If parent grant id is present: the parent grant
@@ -224,17 +262,28 @@ export function authorizeControlRecord(record: ControlRecord, state: ControlStat
         const parent = state.grants.get(key(body.parentGrantId));
         if (parent === undefined) return deny("the parent grant does not exist (§17.2)");
         if (!isGrantActive(state, parent.id)) return deny("the parent grant is not active (§17.2)");
-        if (!bytesEqual(parent.subject, issuer))
+        // §17.2 with devices: actsFor(kid) at the previous head is the parent's subject.
+        if (!bytesEqual(parent.subject, actsFor(state, issuer)))
           return deny("the issuer is not the subject of the parent grant (§17.2)");
         if (!subset(body.abilities, parent.delegable))
           return deny("a granted ability is not delegable under the parent grant (§17.2)");
         if (!subset(body.delegable, parent.delegable))
           return deny("a delegable ability is not delegable under the parent grant (§17.2)");
-      } else if (!isOwner(state, issuer)) {
+      } else if (!owner) {
         return deny("a non-owner grant must prove its authority through a parent grant (§17.2)");
       }
-      if (!isOwner(state, issuer) && !hasAbility(state, issuer, ABILITY.CAPABILITY_GRANT))
+      if (!owner && !hasAbility(state, issuer, ABILITY.CAPABILITY_GRANT))
         return deny("the issuer does not hold capability/grant (§17.2)");
+      // §17.2 delegation bound: a device that is not owner-acting lists no
+      // code 1-10 outside its mask; 11, 12, 13 and unknown codes pass.
+      const device = owner ? undefined : state.devices.get(key(issuer));
+      if (
+        device !== undefined &&
+        [...body.abilities, ...body.delegable].some(
+          (a) => a >= 1n && a <= 10n && !device.mask.includes(a),
+        )
+      )
+        return deny("the grant lists an ability outside the issuing device's mask (§17.2)");
       return ALLOW;
     }
     case "CAPABILITY_REVOKE": {
@@ -244,10 +293,11 @@ export function authorizeControlRecord(record: ControlRecord, state: ControlStat
       if (target === undefined) return deny("the revoked grant does not exist (§17.3)");
       // "The owner may revoke any grant." Otherwise the issuer MUST "possess
       // capability/revoke authority that covers the target grant".
-      if (!isOwner(state, issuer)) {
+      if (!ownerAction(state, issuer)) {
         if (!hasAbility(state, issuer, ABILITY.CAPABILITY_REVOKE))
           return deny("the issuer does not hold capability/revoke (§17.3)");
-        if (!covers(state, target, issuer))
+        // §17.3 with devices: coverage compares actsFor(kid) with issuer_root.
+        if (!covers(state, target, actsFor(state, issuer)))
           return deny("the issuer's capability/revoke authority does not cover the grant (§17.3)");
       }
       if (target.revokedBy !== null) return deny("the grant is already revoked (§17.3)");
@@ -281,6 +331,9 @@ export function authorizeControlRecord(record: ControlRecord, state: ControlStat
       );
       if (!subset(body.abilities.filter(isStandardAbility), transferable))
         return deny("the claim requests abilities beyond the invitation grant (§18.1 rule 4)");
+      // §80.1: the claimant is a root, never a bound device.
+      if (isBound(state, body.claimant.principalId))
+        return deny("the claimant is bound as a device in this Resource (§18.1, §80.1)");
       return ALLOW;
     }
     case "KEY_EPOCH":
@@ -288,8 +341,13 @@ export function authorizeControlRecord(record: ControlRecord, state: ControlStat
       return hasAbility(state, issuer, ABILITY.KEY_ROTATE)
         ? ALLOW
         : deny("the issuer does not hold key/rotate (§19)");
-    case "OWNER_TRANSFER_COMMIT":
+    case "OWNER_TRANSFER_COMMIT": {
+      if (body.deviceChain !== undefined) {
+        const chain = authorizeOwnerChain(state, body.deviceChain);
+        if (!chain.allowed) return chain;
+      }
       return verifyOwnerTransfer(record, state).authorization;
+    }
     case "ROUTE_UPDATE":
       // §20: "The issuer MUST possess route/update"; "Each Route Update MUST
       // carry a route version strictly greater than the current one: 0 after
@@ -305,24 +363,27 @@ export function authorizeControlRecord(record: ControlRecord, state: ControlStat
       // owner authority: its issuer MUST be the Resource owner at the
       // record's position in the chain, whether or not the receiver supports
       // the extension." §14 names no code: AUTHORIZATION_FAILED here.
-      return isOwner(state, issuer)
+      return ownerAction(state, issuer)
         ? ALLOW
         : deny("an extension record must be issued by the owner (§14)");
     case "COORDINATOR_RECOVERY":
     case "RESOURCE_TOMBSTONE":
       return deny(`${body.type} is refused in MVP 0.1 (scope §4, DV1)`);
     case "DEVICE_GRANT":
+      return authorizeDeviceGrant(state, issuer, body);
     case "DEVICE_REVOKE":
-      // Defense for direct callers: the chain refuses these records first (admitControlRecord).
-      return deny(`${body.type} transitions are not implemented yet (§17.4, §17.5)`);
+      return authorizeDeviceRevoke(state, issuer, body);
   }
 }
 
 /** The capability transitions of an applied record (called by applyRecord). */
 export function applyCapabilities(
-  grants: ReadonlyMap<string, Grant>,
+  state: ControlState,
   record: ControlRecord,
 ): ReadonlyMap<string, Grant> {
+  const grants = state.grants;
+  // §79: issuer_root is actsFor(issuer) at the head the grant is committed on.
+  const issuerRoot = actsFor(state, record.payload.issuer);
   const body = record.body;
   const id = controlRecordId(record.signed.id);
   switch (body.type) {
@@ -334,6 +395,7 @@ export function applyCapabilities(
           id,
           source: "grant",
           issuer: record.payload.issuer,
+          issuerRoot,
           subject: body.subject.principalId,
           abilities: body.abilities,
           delegable: body.delegable,
@@ -372,6 +434,7 @@ export function applyCapabilities(
           id,
           source: "claim",
           issuer: record.payload.issuer,
+          issuerRoot,
           subject: body.claimant.principalId,
           abilities: body.abilities,
           delegable: [],
@@ -390,7 +453,8 @@ export function applyCapabilities(
 
 /**
  * §25.2 Key Package authority at the package's referenced Control Head:
- * the sender must hold key/distribute, and the recipient must hold
+ * the sender must hold key/distribute or be of the recipient's root
+ * (`sameRoot`, §80.1), and the recipient must hold
  * data/read, "except for an Invitation Principal explicitly authorized by
  * an active invite grant: a recipient that is the subject of an active
  * grant that includes and still confers invite/claim". `epoch` is the
@@ -403,8 +467,10 @@ export function canDistributeKey(
   recipient: PrincipalId,
   _epoch: DataEpoch,
 ): Authorization {
-  if (!hasAbility(state, sender, ABILITY.KEY_DISTRIBUTE))
-    return deny("the sender does not hold key/distribute (§25.2)");
+  // §25.2: key/distribute, or the same-root rule (a device delivering to
+  // its root or an active sibling, or the root to its active device).
+  if (!sameRoot(state, sender, recipient) && !hasAbility(state, sender, ABILITY.KEY_DISTRIBUTE))
+    return deny("the sender holds no key/distribute and is not of the recipient's root (§25.2)");
   if (hasAbility(state, recipient, ABILITY.DATA_READ)) return ALLOW;
   if (hasAbility(state, recipient, ABILITY.INVITE_CLAIM)) return ALLOW;
   return deny("the recipient holds neither data/read nor an active invite grant (§25.2)");
@@ -454,15 +520,37 @@ export function verifyOwnerTransfer(
   }
   const o = offer.payload;
   const a = accept.payload;
-  if (!bytesEqual(o.resourceId, state.resourceId) || !bytesEqual(a.resourceId, state.resourceId))
-    return { authorization: deny("the offer or accept is for another Resource (§23.1, §23.2)") };
-  const offerSigned = verifySignedObject(offer.signed, state.owner);
+  // §62 class 4, before any authority: the offer verifies under its kid,
+  // the accept under the new owner or, with field 2, the leaf device.
+  // validateControlChain has checked both already (with the dependency
+  // class first); these repeat them for a direct caller.
+  const leaf = body.deviceChain?.leaf.payload.device;
+  const acceptor = leaf ?? o.proposedOwner;
+  const offerSigner = state.principals.get(key(offer.signed.kid));
+  if (offerSigner === undefined)
+    return { authorization: deny("the offer's signer is not known (§23.3 rule 1)") };
+  const offerSigned = verifySignedObject(offer.signed, offerSigner);
   if (!offerSigned.valid)
     return {
       authorization: badSignature(
-        `the offer is not signed by the current owner (${offerSigned.reason}, §23.3 rule 1)`,
+        `the offer's signature does not verify (${offerSigned.reason}, §23.3 rule 1)`,
       ),
     };
+  const acceptSigned = verifySignedObject(accept.signed, acceptor);
+  if (!acceptSigned.valid)
+    return {
+      authorization: badSignature(
+        `the accept is not signed by the new owner or its leaf device (${acceptSigned.reason}, §23.3 rule 4)`,
+      ),
+    };
+  // §80.1: the new owner is a root, never a bound device.
+  if (isBound(state, o.proposedOwner.principalId))
+    return { authorization: deny("the new owner is bound as a device here (§23.3, §80.1)") };
+  if (!bytesEqual(o.resourceId, state.resourceId) || !bytesEqual(a.resourceId, state.resourceId))
+    return { authorization: deny("the offer or accept is for another Resource (§23.1, §23.2)") };
+  // Rule 1 with devices: ownerAction(offer.kid) at the offer's head.
+  if (!ownerAction(state, offer.signed.kid))
+    return { authorization: deny("the offer is not signed by the current owner (§23.3 rule 1)") };
   if (!bytesEqual(o.controlHead, state.head))
     return {
       authorization: deny("the offer does not reference the current Control Head (§23.3 rule 2)"),
@@ -473,15 +561,10 @@ export function verifyOwnerTransfer(
     };
   if (!bytesEqual(a.offerId, objectId(offer.signed.bytes)))
     return { authorization: deny("the accept does not name this offer (§23.2)") };
-  const acceptSigned = verifySignedObject(accept.signed, o.proposedOwner);
-  if (!acceptSigned.valid)
+  if (!bytesEqual(record.payload.issuer, (leaf ?? o.proposedOwner).principalId))
     return {
-      authorization: badSignature(
-        `the accept is not signed by the new owner (${acceptSigned.reason}, §23.3 rule 4)`,
-      ),
+      authorization: deny("the commit is not issued by the new owner or its leaf (§23.3 rule 5)"),
     };
-  if (!bytesEqual(record.payload.issuer, o.proposedOwner.principalId))
-    return { authorization: deny("the commit is not issued by the new owner (§23.3 rule 5)") };
   if (o.expectedControlSeq !== record.payload.controlSeq)
     return {
       authorization: deny(
@@ -497,10 +580,17 @@ export function verifyOwnerTransfer(
  * before can still be verified. Undefined for other records.
  */
 export function transferIssuerDescriptor(record: ControlRecord): PrincipalDescriptor | undefined {
+  const proposed = transferNewOwner(record);
+  return proposed !== undefined && bytesEqual(proposed.principalId, record.payload.issuer)
+    ? proposed
+    : undefined;
+}
+
+/** The new owner a transfer commit names (offer field 3), whoever signed the commit. */
+export function transferNewOwner(record: ControlRecord): PrincipalDescriptor | undefined {
   if (record.body.type !== "OWNER_TRANSFER_COMMIT") return undefined;
   try {
-    const proposed = parseOwnerTransferOffer(record.body.offer).payload.proposedOwner;
-    return bytesEqual(proposed.principalId, record.payload.issuer) ? proposed : undefined;
+    return parseOwnerTransferOffer(record.body.offer).payload.proposedOwner;
   } catch {
     return undefined;
   }
