@@ -469,6 +469,94 @@ describe("identity state / ID-05 (§4)", () => {
     expect(["left", "right"]).toContain(v.devices[device.key]?.label);
   });
 
+  for (const [table, field, valid, invalid, diagnostic] of [
+    ["requests", "requested_at", S("2026-11-04T00:00:00Z"), S("bad"), "INVALID_TIMESTAMP"],
+    ["requests", "descriptor", S(device.text), S("bad"), "INVALID_DESCRIPTOR"],
+    [
+      "requests",
+      "pairing",
+      S(principalRef(pairingWriter.signer)),
+      S("p:short"),
+      "INVALID_PRINCIPAL_REF",
+    ],
+    ["devices", "kind", U(1), U(2), "INVALID_ENUM_VALUE"],
+  ] as const)
+    it(`conflicted ${table}.${field} reports ${diagnostic} (§4 rule 2, F3)`, () => {
+      const start = base();
+      const change = (value: unknown) => (d: Doc) => {
+        // Force a causal write even when the valid value equals the old one.
+        delete d[table][device.key][field];
+        d[table][device.key][field] = value;
+      };
+      const a = raw(start, change(valid), personalWriter);
+      const b = raw(start, change(invalid), otherWriter);
+      for (const [left, right] of [
+        [a, b],
+        [b, a],
+      ] as const) {
+        const merged = A.merge(A.clone(left), right);
+        const restored = A.load(A.save(merged));
+        for (const doc of [merged, restored]) {
+          const result = validateIdentity(doc, root);
+          expect(result[table]).toEqual({});
+          expect(result.problems).toMatchObject([
+            { diagnostic, pointer: `/${table}/${device.key}/${field}` },
+          ]);
+        }
+        A.free(merged);
+        A.free(restored);
+      }
+    });
+
+  it("conflicted maps and lists retain nested value diagnostics before conflict fallback", () => {
+    const start = base();
+    const a = raw(start, (d) => {
+      d.requests[device.key] = request();
+      d.requests[device.key].kind = U(0);
+    });
+    const b = raw(
+      start,
+      (d) => {
+        d.requests[device.key] = request();
+        d.requests[device.key].kind = U(0);
+        d.requests[device.key].requested_at = S("bad");
+      },
+      otherWriter,
+    );
+    const maps = validateIdentity(A.merge(a, b), root);
+    expect(maps.problems.map((p) => p.diagnostic)).toEqual(["INVALID_TIMESTAMP"]);
+    expect(maps.requests).toEqual({});
+
+    const service = raw(start, (d) => {
+      d.requests[device.key].kind = U(1);
+      d.requests[device.key].scope = [S(resourceRef)];
+    });
+    const left = raw(service, (d) => {
+      d.requests[device.key].scope = [S(resourceRef)];
+    });
+    const right = raw(
+      service,
+      (d) => {
+        d.requests[device.key].scope = [S("bad")];
+      },
+      otherWriter,
+    );
+    const lists = validateIdentity(A.merge(left, right), root);
+    expect(lists.problems.map((p) => p.diagnostic)).toEqual(["INVALID_RESOURCE_REF"]);
+    expect(lists.requests).toEqual({});
+  });
+
+  it("orders diagnostics and missing_keys by binary strings, independent of ICU (P3)", () => {
+    const refs = ["a", "Z", "_", "A"].map((c) => `${c}${"A".repeat(42)}`);
+    const v = check((d) => {
+      d.devices[device.key].missing_keys = Object.fromEntries(refs.map((ref) => [ref, []]));
+      for (const ref of refs) d.roster[ref] = { profile: S("org.example") };
+    });
+    expect(Object.keys(v.devices[device.key]?.missing_keys ?? {})).toEqual([...refs].sort());
+    expect(v.problems.map((p) => p.pointer)).toEqual(v.problems.map((p) => p.pointer).sort());
+    expect(v.problems.every((p) => p.diagnostic === "MISSING_REQUIRED_FIELD")).toBe(true);
+  });
+
   it("identical concurrent request scalar values are not conflicts (SOP §45)", () => {
     const start = base();
     const fn = (d: Doc) => {
