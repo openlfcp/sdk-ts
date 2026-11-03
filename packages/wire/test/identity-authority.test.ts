@@ -5,12 +5,15 @@ import {
   ABILITY,
   activeDevice,
   actsFor,
+  type ControlBody,
+  type ControlState,
   canDistributeKey,
   DEVICE_KIND,
   decodeControlRecord,
   deviceCertificatePayloadDigest,
   hasAbility,
   isBound,
+  objectId,
   ownerAction,
   revocationOf,
   rootOf,
@@ -494,6 +497,30 @@ describe("ordering of the classes for device records (§62)", () => {
       }
   });
 
+  it("never takes a transfer offer's signer as a dependency (§23.3, §62 class 4, spec#2 e7fc88c)", () => {
+    const f = new Fixture();
+    f.register(1, 2, [13]);
+    f.push(1, capabilityGrant(5, [1]));
+    const verdict = (body: ControlBody, options = {}) => {
+      const r = validateControlChain([...f.records, recordAt(f.state, 10, body).bytes], options);
+      return r.kind === "invalid" ? r.wireCode : r.kind;
+    };
+    const resolvePrincipal = (p: Uint8Array) => (same(p, id(9)) ? keys(9).descriptor : undefined);
+    // Unknown (9) or known but neither the owner nor its device (5): authority, valid or not.
+    for (const signer of [9, 5]) {
+      const body = transferBody(f.state, 10, signer, 10);
+      expect(verdict(body)).toBe("AUTHORIZATION_FAILED");
+      expect(verdict(body, { resolvePrincipal })).toBe("AUTHORIZATION_FAILED");
+      expect(verdict(withBrokenOffer(f.state, body, 10, 10))).toBe("AUTHORIZATION_FAILED");
+    }
+    // The owner and its device: the signature class.
+    for (const signer of [1, 2])
+      expect(verdict(withBrokenOffer(f.state, transferBody(f.state, 10, signer, 10), 10, 10))).toBe(
+        "INVALID_SIGNATURE",
+      );
+    f.push(10, transferBody(f.state, 10, 2, 10));
+  });
+
   it("requires the leaf to sign accept and commit with field 2 (accept_and_commit_must_use_leaf_and_all_signatures_only_policies_enforce_it)", () => {
     const f = new Fixture();
     const c = chainOf([personalCert(10, 3, [13], 10, 3)]);
@@ -526,6 +553,29 @@ describe("ordering of the classes for device records (§62)", () => {
     f.push(3, transferBody(f.state, 10, 1, 3, c));
   });
 });
+
+/** `body` with its offer's signature broken, accepted again by `acceptSigner` for `newOwner`. */
+function withBrokenOffer(
+  state: ControlState,
+  body: ControlBody,
+  newOwner: number,
+  acceptSigner: number,
+): ControlBody {
+  if (body.type !== "OWNER_TRANSFER_COMMIT") throw new Error("not a transfer commit");
+  const offer = body.offer.slice();
+  offer[offer.length - 1] = (offer[offer.length - 1] as number) ^ 1;
+  const accept = signObject(
+    encode(
+      cborMap([
+        [0, state.resourceId],
+        [1, objectId(offer)],
+        [2, id(newOwner)],
+      ]),
+    ),
+    keys(acceptSigner),
+  );
+  return { ...body, offer, accept: accept.bytes };
+}
 
 /** A Genesis with field 5 re-signed by `signer` as its issuer, bypassing the writer rule (§15). */
 function genesisRaw(owner: number, signer: number, chain: ReturnType<typeof chainOf>) {

@@ -35,6 +35,7 @@ import {
   EMPTY_DEVICE_STATE,
   grantInScope,
   nonDevice,
+  offerSigner,
   recordRevocation,
 } from "./device-state.js";
 import type { Endpoint } from "./endpoint.js";
@@ -190,7 +191,9 @@ export interface ChainOptions {
    * Authorization, called for every non-Genesis record with the state
    * before it (the previous head). Defaults to authorizeControlRecord, the
    * LFCP-021 capability engine; a caller may substitute a policy (tests).
-   * A refusal makes the chain invalid (UNAUTHORIZED).
+   * A refusal makes the chain invalid (UNAUTHORIZED). A substitute applies
+   * §23.3 item 1 itself: a transfer offer whose kid is neither the owner
+   * nor a device bound to it reaches it with its signature unchecked.
    */
   readonly authorize?: (record: ControlRecord, state: ControlState) => boolean | Authorization;
 }
@@ -437,10 +440,10 @@ function rotate(
 /**
  * §62 classes 3 and 4 for a non-Genesis record at `state`: every
  * dependency first (a Device Grant's root known to the Resource's state,
- * the issuer's descriptor, a transfer offer's signer), then every
- * signature (the record under its issuer, the certificates of an embedded
- * chain leaf first, the offer under its kid and the accept under the new
- * owner or, with commit field 2, under the leaf). §13: kid MUST equal the
+ * the issuer's descriptor), then every signature (the record under its
+ * issuer, the certificates of an embedded chain leaf first, the offer
+ * under its kid when that is the owner or a device bound to it, and the
+ * accept under the new owner or, with commit field 2, under the leaf). §13: kid MUST equal the
  * issuer (controlRecordSigner); with commit field 2 the issuer MUST be the
  * leaf. Undefined when all hold.
  */
@@ -489,11 +492,6 @@ function dependenciesAndSignatures(
       ? undefined
       : options.resolvePrincipal?.(issuer));
   if (descriptor === undefined) return missing("no descriptor is known for the issuer");
-  let offerSigner: PrincipalDescriptor | undefined;
-  if (offer !== null) {
-    offerSigner = known(offer.signed.kid) ?? options.resolvePrincipal?.(offer.signed.kid);
-    if (offerSigner === undefined) return missing("no descriptor is known for the offer's signer");
-  }
   // Class 4. §13: the kid is the payload issuer; with commit field 2 that
   // issuer is the leaf, whose descriptor the commit is verified under
   // (review of #8, R8-2: a policy substituted for authority never sees a
@@ -513,9 +511,13 @@ function dependenciesAndSignatures(
     const c = verifyChainSignatures(chain, root);
     if (!c.valid) return bad(`${c.reason} (§7.3)`);
   }
-  if (offer !== null && accept !== null && offerSigner !== undefined && root !== undefined) {
-    const o = verifySignedObject(offer.signed, offerSigner);
-    if (!o.valid) return bad(`the offer's signature does not verify (${o.reason}, §23.3)`);
+  if (offer !== null && accept !== null && root !== undefined) {
+    // §23.3, §62 class 4: the offer's signer is never a dependency; its
+    // signature is checked only under the owner or a device bound to it.
+    const signer = offerSigner(state, offer.signed.kid);
+    const o = signer === undefined ? undefined : verifySignedObject(offer.signed, signer);
+    if (o !== undefined && !o.valid)
+      return bad(`the offer's signature does not verify (${o.reason}, §23.3)`);
     // PENDING spec clarification: §62 checks the accept under its required
     // signer before authority, so a wrong accept kid is INVALID_SIGNATURE
     // (as sdk-rs), with or without field 2.

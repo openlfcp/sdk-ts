@@ -22,6 +22,7 @@ import {
   authorizeDeviceRevoke,
   authorizeOwnerChain,
   isBound,
+  offerSigner,
   ownerAction,
   sameRoot,
 } from "./device-state.js";
@@ -519,17 +520,16 @@ export function verifyOwnerTransfer(
   }
   const o = offer.payload;
   const a = accept.payload;
-  // §62 class 4, before any authority: the offer verifies under its kid,
-  // the accept under the new owner or, with field 2, the leaf device.
-  // validateControlChain has checked both already (with the dependency
-  // class first); these repeat them for a direct caller.
+  // §62 class 4, before any authority: the offer verifies under its kid
+  // when that kid is the owner or a device bound to it (any other offer
+  // fails rule 1 below), the accept under the new owner or, with field 2,
+  // the leaf device. validateControlChain has checked both already (with
+  // the dependency class first); these repeat them for a direct caller.
   const leaf = body.deviceChain?.leaf.payload.device;
   const acceptor = leaf ?? o.proposedOwner;
-  const offerSigner = state.principals.get(key(offer.signed.kid));
-  if (offerSigner === undefined)
-    return { authorization: deny("the offer's signer is not known (§23.3 rule 1)") };
-  const offerSigned = verifySignedObject(offer.signed, offerSigner);
-  if (!offerSigned.valid)
+  const signer = offerSigner(state, offer.signed.kid);
+  const offerSigned = signer === undefined ? undefined : verifySignedObject(offer.signed, signer);
+  if (offerSigned !== undefined && !offerSigned.valid)
     return {
       authorization: badSignature(
         `the offer's signature does not verify (${offerSigned.reason}, §23.3 rule 1)`,
