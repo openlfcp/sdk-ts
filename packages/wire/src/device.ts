@@ -10,7 +10,7 @@ import {
   secureRandom,
   toHex,
 } from "@openlfcp/core";
-import { sha256 } from "@openlfcp/crypto";
+import { isValidEd25519PublicKey, sha256 } from "@openlfcp/crypto";
 import { type CborValue, decodeStrict, encode } from "./cbor/index.js";
 import {
   parseSignedObject,
@@ -21,6 +21,7 @@ import {
 } from "./cose.js";
 import { invalid } from "./fields.js";
 import {
+  derivePrincipalId,
   type PrincipalDescriptor,
   principalDescriptorFromCbor,
   principalDescriptorToCbor,
@@ -108,6 +109,8 @@ export interface CertificateChain {
 
 const fail = (why: string): never => invalid("device-certificate-payload", why);
 
+const UINT64_MAX = 2n ** 64n - 1n;
+
 const hasCode = (mask: readonly bigint[], code: bigint): boolean => mask.includes(code);
 
 /** Distinct members, compared by value (Resource IDs as bytes). */
@@ -116,24 +119,44 @@ function repeats<T>(list: readonly T[], key: (item: T) => string | bigint): bool
 }
 
 /**
- * §7.3 rules 2–5 on a payload: the device is not the root; a mask of 1–32
- * distinct codes, with `1` and `2` whenever it lists `12`; at most 64
+ * §7.3 rules 2–5 on a payload: a 32-byte root, a valid device descriptor
+ * (§7) that is not the root; a mask of 1–32
+ * distinct unsigned 64-bit codes, with `1` and `2` whenever it lists `12`; at most 64
  * distinct scope entries; and the kind rules for scope and mask. Throws
  * INVALID_STRUCTURE. Writers and readers apply the same rules.
  */
 export function checkDeviceCertificatePayload(p: DeviceCertificatePayload): void {
+  if (!(p.root instanceof Uint8Array) || p.root.length !== 32)
+    fail("the root must be a 32-byte Principal ID");
+  // Rule 2: the descriptor as §7 requires (recomputed ID, canonical
+  // Ed25519 point of large order), so that what passes here can be signed.
+  const d = p.device;
+  try {
+    if (!bytesEqual(derivePrincipalId(d.ed25519PublicKey, d.x25519PublicKey), d.principalId))
+      fail("the device descriptor's ID is not the §7 hash of its keys (§7.3 rule 2)");
+  } catch (e) {
+    if (e instanceof LfcpError && e.code === "INVALID_STRUCTURE") throw e;
+    fail("the device descriptor's keys are not 32-byte keys (§7.3 rule 2)");
+  }
+  if (!isValidEd25519PublicKey(d.ed25519PublicKey))
+    fail("the device's Ed25519 key is not a canonical point of large order (§7.3 rule 2)");
   if (bytesEqual(p.root, p.device.principalId)) fail("the device is the root (§7.3 rule 2)");
   if (p.kind !== 0 && p.kind !== 1 && p.kind !== 2) fail("kind must be 0, 1 or 2 (§7.3 rule 3)");
   if (p.mask.length < 1 || p.mask.length > MAX_MASK_ENTRIES)
     fail(`the mask must hold 1 to ${MAX_MASK_ENTRIES} codes (§7.3 rule 4)`);
+  if (!p.mask.every((c) => typeof c === "bigint" && c >= 0n && c <= UINT64_MAX))
+    fail("every mask code must be an unsigned 64-bit integer (§7.3)");
   if (repeats(p.mask, (c) => c)) fail("the mask repeats a code (§7.3 rule 4)");
   const manage = hasCode(p.mask, DEVICE_ABILITY.DEVICE_MANAGE);
   if (manage && !(hasCode(p.mask, 1n) && hasCode(p.mask, 2n)))
     fail("a mask that lists 12 must list 1 and 2 (§7.3 rule 4)");
   if (p.scope.length > MAX_SCOPE_ENTRIES)
     fail(`the scope holds more than ${MAX_SCOPE_ENTRIES} Resources (§7.3)`);
+  if (!p.scope.every((r) => r instanceof Uint8Array && r.length === 32))
+    fail("every scope entry must be a 32-byte Resource ID (§7.3)");
   if (repeats(p.scope, toHex)) fail("the scope repeats a Resource (§7.3 rule 5)");
-  if (p.serial.length !== SERIAL_LENGTH) fail(`the serial must be ${SERIAL_LENGTH} bytes (§7.3)`);
+  if (!(p.serial instanceof Uint8Array) || p.serial.length !== SERIAL_LENGTH)
+    fail(`the serial must be ${SERIAL_LENGTH} bytes (§7.3)`);
   switch (p.kind) {
     case DEVICE_KIND.PERSONAL:
       if (p.scope.length !== 0) fail("a personal device has an empty scope (§7.3 rule 5)");
