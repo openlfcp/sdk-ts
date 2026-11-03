@@ -434,13 +434,17 @@ export const EMPTY_CHAIN_STATE: ChainStateChecks = Object.freeze({
   isRevoked: () => false,
 });
 
-function requireDescriptorOf(root: PrincipalId, descriptor: PrincipalDescriptor): void {
-  // A descriptor for another Principal is the caller's mistake, not the input's.
-  if (!bytesEqual(descriptor.principalId, root))
-    throw new LfcpError(
-      "PRINCIPAL_ID_MISMATCH",
-      "the root descriptor given to verify a certificate chain is not the chain's root",
-    );
+/**
+ * (c2): the last certificate's kid must be the root, so a root descriptor
+ * for another Principal cannot verify it: INVALID_SIGNATURE, as in sdk-rs.
+ */
+function rootDescriptorMismatch(
+  root: PrincipalId,
+  descriptor: PrincipalDescriptor,
+): ChainRefusal | undefined {
+  return bytesEqual(descriptor.principalId, root)
+    ? undefined
+    : refuse("c2-kid", "the root descriptor is not the chain's root (c2)");
 }
 
 function verifySignatures(
@@ -488,8 +492,10 @@ export function verifyChainSignatures(
   chain: CertificateChain,
   rootDescriptor: PrincipalDescriptor,
 ): ChainRefusal | { readonly valid: true } {
-  requireDescriptorOf(chain.root, rootDescriptor);
-  return verifySignatures(chain.certificates, rootDescriptor) ?? { valid: true };
+  return (
+    rootDescriptorMismatch(chain.root, rootDescriptor) ??
+    verifySignatures(chain.certificates, rootDescriptor) ?? { valid: true }
+  );
 }
 
 /** §7.3 step 4.1 (class 5): (c3), (c4), (c6). `inScope` as in VerifiedChain. */
@@ -585,8 +591,8 @@ export function preflightIssuance(
   }
   if (rootDescriptor === undefined)
     return refuse("root-descriptor", "the root's descriptor is not known (step 2)");
-  requireDescriptorOf(leaf.root, rootDescriptor);
-  const signatures = verifySignatures(issuers, rootDescriptor);
+  const signatures =
+    rootDescriptorMismatch(leaf.root, rootDescriptor) ?? verifySignatures(issuers, rootDescriptor);
   if (signatures !== undefined) return signatures;
   const authority = checkAuthority(payloads, resource);
   return typeof authority === "boolean" ? { valid: true, inScope: authority } : authority;

@@ -244,8 +244,16 @@ describe("verifyChain (§7.3, §62 class order)", () => {
     expect(ruleOf(verifyChain(valid, id(1), undefined, RESOURCE, EMPTY_CHAIN_STATE))).toBe(
       "MISSING_DEPENDENCY root-descriptor",
     );
-    // A descriptor for another Principal is a caller error, not an input verdict.
-    expect(() => verifyChainSignatures(valid, keys(9).descriptor)).toThrow(LfcpError);
+    // A root descriptor for another Principal fails (c2) at the signature class, as in sdk-rs.
+    expect(ruleOf(verifyChainSignatures(valid, keys(9).descriptor))).toBe(
+      "INVALID_SIGNATURE c2-kid",
+    );
+    expect(ruleOf(verifyChain(valid, id(1), keys(9).descriptor, RESOURCE, EMPTY_CHAIN_STATE))).toBe(
+      "INVALID_SIGNATURE c2-kid",
+    );
+    expect(ruleOf(preflightIssuance(personal(5, [1]), [], keys(9).descriptor, RESOURCE))).toBe(
+      "INVALID_SIGNATURE c2-kid",
+    );
     for (const index of valid.certificates.keys()) {
       const certs = [...valid.certificates];
       certs[index] = parseDeviceCertificate(brokenSignature(certs[index] as never));
