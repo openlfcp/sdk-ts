@@ -302,64 +302,53 @@ export class IdentityReplica {
     return this.validate().requests;
   }
 
-  /** One transaction per intent; scalar strings/uints, unknown fields preserved on updates. */
-  write(writer: IdentityWriter, intent: IdentityIntent): CheckedChange {
+  /**
+   * One transaction (one change) for the intent, or for several intents in
+   * order, e.g. the fill change of IDENTITY-PROFILE-01 §5.1 or the devices
+   * entry and the request deletion of §5.3 step 6; scalar strings/uints,
+   * unknown fields preserved on updates.
+   */
+  write(writer: IdentityWriter, intent: IdentityIntent | readonly IdentityIntent[]): CheckedChange {
+    const intents: readonly IdentityIntent[] = Array.isArray(intent)
+      ? intent
+      : [intent as IdentityIntent];
+    if (intents.length === 0) throw new LfcpError("PROFILE_INVALID", "no intent to write");
     // §2.1 is a writer obligation; AI0–AI4 do not turn it into a new receive rule.
-    if (
-      intent.intent === "device.put" &&
-      intent.entry.missing_keys !== undefined &&
-      intent.key !== principalRef(writer.signer)
-    )
-      refuseIdentity(
-        "UNAUTHORIZED_WRITER",
-        "a device writes only its own missing_keys hints (§2.1)",
-      );
+    for (const i of intents)
+      if (
+        i.intent === "device.put" &&
+        i.entry.missing_keys !== undefined &&
+        i.key !== principalRef(writer.signer)
+      )
+        refuseIdentity(
+          "UNAUTHORIZED_WRITER",
+          "a device writes only its own missing_keys hints (§2.1)",
+        );
     const actor = toHex(deriveIdentityActorId(this.#options.resource, writer.signer));
     const fork = A.clone(this.#doc, { actor });
     let bytes: Uint8Array;
     try {
       const doc = A.change(fork, { time: 0 }, (d) => {
-        if (intent.intent === "identity.initialize") {
-          if (Object.keys(d).length !== 0)
-            refuseIdentity("INVALID_ROOT", "identity is already initialized");
-          d.profile = new A.ImmutableString(IDENTITY_PROFILE_ID);
-          d.identity = { root: new A.ImmutableString(principalRef(this.#options.root)) };
-          for (const key of ["roster", "devices", "requests", "extensions"]) d[key] = {};
-          return;
-        }
-        const table = intent.intent.startsWith("roster.")
-          ? "roster"
-          : intent.intent.startsWith("device.")
-            ? "devices"
-            : "requests";
-        const map = d[table] as Record<string, unknown> | undefined;
-        if (map === undefined) refuseIdentity("INVALID_ROOT", "initialize the identity first");
-        if (!("entry" in intent)) {
-          delete map[intent.key];
-          return;
-        }
-        if (!Object.hasOwn(map, intent.key)) map[intent.key] = {};
-        const entry = map[intent.key] as Record<string, unknown>;
-        for (const [key, value] of Object.entries(intent.entry))
-          if (value !== undefined) putValue(entry, key, value, A.getBackend(d));
+        for (const i of intents) applyIntent(d, i, this.#options.root, A.getBackend(d));
       });
       const last = A.getLastLocalChange(doc);
       if (last === null || last === undefined)
         throw new LfcpError("PROFILE_INVALID", "the intent did not create a change");
       bytes = last;
       const validation = validateIdentity(doc, this.#options.root);
-      const base =
-        "key" in intent
-          ? `/${intent.intent.startsWith("roster.") ? "roster" : intent.intent.startsWith("device.") ? "devices" : "requests"}/${intent.key}`
-          : "";
-      const problem = validation.problems.find(
-        (p) =>
-          p.diagnostic === "INVALID_ROOT" || p.pointer === base || p.pointer.startsWith(`${base}/`),
-      );
-      if (problem !== undefined)
-        throw Object.assign(new LfcpError("PROFILE_INVALID", problem.message), {
-          diagnostic: problem.diagnostic,
-        });
+      for (const i of intents) {
+        const base = "key" in i ? `/${tableOf(i)}/${i.key}` : "";
+        const problem = validation.problems.find(
+          (p) =>
+            p.diagnostic === "INVALID_ROOT" ||
+            p.pointer === base ||
+            p.pointer.startsWith(`${base}/`),
+        );
+        if (problem !== undefined)
+          throw Object.assign(new LfcpError("PROFILE_INVALID", problem.message), {
+            diagnostic: problem.diagnostic,
+          });
+      }
     } finally {
       A.free(fork);
     }
@@ -384,6 +373,39 @@ export class IdentityReplica {
     // Keep the byte log private even if callers mutate the returned buffer.
     return checkChange(bytes);
   }
+}
+
+const tableOf = (intent: IdentityIntent): "roster" | "devices" | "requests" =>
+  intent.intent.startsWith("roster.")
+    ? "roster"
+    : intent.intent.startsWith("device.")
+      ? "devices"
+      : "requests";
+
+function applyIntent(
+  d: Record<string, unknown>,
+  intent: IdentityIntent,
+  root: PrincipalId,
+  backend: ReturnType<typeof A.getBackend>,
+): void {
+  if (intent.intent === "identity.initialize") {
+    if (Object.keys(d).length !== 0)
+      refuseIdentity("INVALID_ROOT", "identity is already initialized");
+    d.profile = new A.ImmutableString(IDENTITY_PROFILE_ID);
+    d.identity = { root: new A.ImmutableString(principalRef(root)) };
+    for (const key of ["roster", "devices", "requests", "extensions"]) d[key] = {};
+    return;
+  }
+  const map = d[tableOf(intent)] as Record<string, unknown> | undefined;
+  if (map === undefined) refuseIdentity("INVALID_ROOT", "initialize the identity first");
+  if (!("entry" in intent)) {
+    delete map[intent.key];
+    return;
+  }
+  if (!Object.hasOwn(map, intent.key)) map[intent.key] = {};
+  const entry = map[intent.key] as Record<string, unknown>;
+  for (const [key, value] of Object.entries(intent.entry))
+    if (value !== undefined) putValue(entry, key, value, backend);
 }
 
 function putValue(
