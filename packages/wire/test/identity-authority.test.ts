@@ -482,6 +482,18 @@ describe("ordering of the classes for device records (§62)", () => {
     expect(t.kind === "invalid" && t.wireCode).toBe("INVALID_SIGNATURE");
   });
 
+  it("never resolves a device record's issuer from outside the chain (review of #8, R8-3)", () => {
+    const f = new Fixture();
+    const revoke = recordAt(f.state, 7, revokeDevice(1, 8, 0));
+    const grant = recordAt(f.state, 7, deviceGrant(chainOf([personalCert(1, 8, [1], 1, 8)])));
+    const resolvePrincipal = (p: Uint8Array) => (same(p, id(7)) ? keys(7).descriptor : undefined);
+    for (const record of [revoke, grant])
+      for (const options of [{}, { resolvePrincipal }]) {
+        const r = validateControlChain([...f.records, record.bytes], options);
+        expect(r.kind === "invalid" && r.wireCode).toBe("MISSING_DEPENDENCY");
+      }
+  });
+
   it("requires the leaf to sign accept and commit with field 2 (accept_and_commit_must_use_leaf_and_all_signatures_only_policies_enforce_it)", () => {
     const f = new Fixture();
     const c = chainOf([personalCert(10, 3, [13], 10, 3)]);

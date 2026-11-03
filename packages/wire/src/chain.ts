@@ -181,7 +181,9 @@ export interface ChainOptions {
   readonly start?: ControlState;
   /**
    * Resolves an issuer that no earlier record in the chain describes.
-   * The returned descriptor is checked against the ID like any other.
+   * The returned descriptor is checked against the ID like any other. Not
+   * consulted for DEVICE_GRANT and DEVICE_REVOKE, whose issuer must be
+   * known to the chain (§17.4 rule 2, §17.5 rule 2).
    */
   readonly resolvePrincipal?: (id: PrincipalId) => PrincipalDescriptor | undefined;
   /**
@@ -479,7 +481,13 @@ function dependenciesAndSignatures(
           ?.payload.device
       : undefined) ??
     transferIssuerDescriptor(record) ??
-    options.resolvePrincipal?.(issuer);
+    // §17.4 rule 2, §17.5 rule 2: a device record's issuer is known to the
+    // Resource's state (or carried by the grant's chain), never resolved
+    // from outside, so its verdict is a function of the chain alone
+    // (review of #8, R8-3).
+    (body.type === "DEVICE_GRANT" || body.type === "DEVICE_REVOKE"
+      ? undefined
+      : options.resolvePrincipal?.(issuer));
   if (descriptor === undefined) return missing("no descriptor is known for the issuer");
   let offerSigner: PrincipalDescriptor | undefined;
   if (offer !== null) {
