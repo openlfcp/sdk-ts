@@ -19,6 +19,7 @@ import {
   signObject,
   verifySignedObject,
 } from "./cose.js";
+import { scanDeviceCertificate } from "./device-scan.js";
 import { invalid } from "./fields.js";
 import {
   derivePrincipalId,
@@ -271,6 +272,8 @@ export const newDeviceCertificateSerial = (): Uint8Array => secureRandom(SERIAL_
  * not verified here; its signer is decided by chain position (§7.3 (c2)).
  */
 export function parseDeviceCertificate(bytes: Uint8Array): DeviceCertificate {
+  // Bounds first, on the raw bytes: nothing is decoded or copied before them.
+  scanDeviceCertificate(bytes);
   const signed = parseSignedObject(bytes);
   const payload = deviceCertificatePayloadFromCbor(decodeStrict(signed.payloadBytes));
   return Object.freeze({
