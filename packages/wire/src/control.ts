@@ -30,6 +30,7 @@ import {
   DEVICE_KIND,
   verifyChainSignatures,
 } from "./device.js";
+import { scanControlRecord } from "./device-scan.js";
 import {
   checkReceivedUrl,
   checkWriterUrl,
@@ -397,6 +398,8 @@ export interface ControlRecord extends Parsed<ControlRecordPayload> {
 export const decodeControlRecord = (bytes: Uint8Array): ControlRecord => decodeRecord(bytes, false);
 
 function decodeRecord(bytes: Uint8Array, admit: boolean): ControlRecord {
+  // A certificate chain's bounds, on the raw bytes, before anything is decoded.
+  scanControlRecord(bytes);
   const signed = parseSignedObject(bytes);
   const payload = readControlRecordPayload(decodeStrict(signed.payloadBytes));
   // §62: the structure of the body and every embedded object (class 1)
