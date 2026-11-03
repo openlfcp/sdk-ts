@@ -38,6 +38,7 @@ import {
 } from "./device-state.js";
 import type { Endpoint } from "./endpoint.js";
 import type { ActorHave } from "./have.js";
+import { PersistentMap, put } from "./persistent-map.js";
 import type { PrincipalDescriptor } from "./principal.js";
 
 /**
@@ -323,7 +324,7 @@ function genesisState(record: ControlRecord): ControlState {
         }),
       ],
     ]),
-    grants: new Map(),
+    grants: PersistentMap.empty<Grant>(),
     ...genesisDevices(body),
   });
 }
@@ -332,18 +333,13 @@ function genesisState(record: ControlRecord): ControlState {
 function genesisDevices(
   body: Extract<ControlRecord["body"], { type: "GENESIS" }>,
 ): DeviceState & Pick<ControlState, "principals"> {
-  const principals = new Map([[toHex(body.owner.principalId), body.owner]]);
-  const roles = nonDevice(EMPTY_DEVICE_STATE.roles, body.owner.principalId);
-  if (body.deviceChain === undefined)
-    return { roles, devices: new Map(), revoked: new Map(), principals };
-  const bound = bindChain(
-    { ...EMPTY_DEVICE_STATE, roles },
-    principals,
-    body.deviceChain,
-    true,
-    false,
-  );
-  return { ...bound, revoked: new Map(), principals };
+  const owner = {
+    ...EMPTY_DEVICE_STATE,
+    roles: nonDevice(EMPTY_DEVICE_STATE.roles, body.owner.principalId),
+    principals: PersistentMap.from([[toHex(body.owner.principalId), body.owner]]),
+  };
+  if (body.deviceChain === undefined) return owner;
+  return { ...owner, ...bindChain(owner, body.deviceChain, true, false) };
 }
 
 /**
@@ -355,32 +351,33 @@ function genesisDevices(
 function applyRecord(state: ControlState, record: ControlRecord): ControlState {
   const next = { head: controlRecordId(record.signed.id), seq: record.payload.controlSeq };
   if (!record.mvpSupported) return Object.freeze({ ...state, ...next });
-  const principals = new Map(state.principals);
   const body = record.body;
   // §79: roles on acceptance; device bindings and revocations (§17.4, §17.5).
-  let devices: Pick<DeviceState, "roles" | "devices"> = state;
+  // Maps are persistent: a record copies only the entries it changes, so
+  // the states kept for every head share the rest (review of #8, R8-1).
+  let devices: Pick<ControlState, "roles" | "devices" | "principals"> = state;
   let revoked = state.revoked;
-  if (body.type === "CAPABILITY_GRANT") {
-    principals.set(toHex(body.subject.principalId), body.subject);
-    devices = { ...devices, roles: nonDevice(devices.roles, body.subject.principalId) };
-  }
-  if (body.type === "CAPABILITY_CLAIM") {
-    principals.set(toHex(body.claimant.principalId), body.claimant);
-    devices = { ...devices, roles: nonDevice(devices.roles, body.claimant.principalId) };
-  }
+  const known = (d: PrincipalDescriptor, role: boolean) => {
+    devices = {
+      ...devices,
+      principals: put(devices.principals, toHex(d.principalId), d),
+      ...(role ? { roles: nonDevice(devices.roles, d.principalId) } : {}),
+    };
+  };
+  if (body.type === "CAPABILITY_GRANT") known(body.subject, true);
+  if (body.type === "CAPABILITY_CLAIM") known(body.claimant, true);
   // §23.3 "After commit, the accepting Principal becomes the Resource owner"
   // (verified by authorizeControlRecord before this record was accepted);
   // with field 2 its chain is bound and the leaf registered, a leaf already
   // registered with the same certificate left unchanged.
   const newOwner = transferNewOwner(record);
   if (newOwner !== undefined) {
-    principals.set(toHex(newOwner.principalId), newOwner);
-    devices = { ...devices, roles: nonDevice(devices.roles, newOwner.principalId) };
+    known(newOwner, true);
     if (body.type === "OWNER_TRANSFER_COMMIT" && body.deviceChain !== undefined)
-      devices = bindChain({ ...state, ...devices }, principals, body.deviceChain, true, true);
+      devices = bindChain({ ...state, ...devices }, body.deviceChain, true, true);
   }
   if (body.type === "DEVICE_GRANT")
-    devices = bindChain(state, principals, body.chain, grantInScope(state, body), false);
+    devices = bindChain(state, body.chain, grantInScope(state, body), false);
   if (body.type === "DEVICE_REVOKE") revoked = recordRevocation(state, record, body);
   const route =
     body.type === "ROUTE_UPDATE"
@@ -395,7 +392,7 @@ function applyRecord(state: ControlState, record: ControlRecord): ControlState {
     ...route,
     ...(body.type === "KEY_EPOCH" ? rotate(state, record, body) : {}),
     ...(newOwner !== undefined ? { owner: newOwner } : {}),
-    principals,
+    principals: devices.principals,
     roles: devices.roles,
     devices: devices.devices,
     revoked,

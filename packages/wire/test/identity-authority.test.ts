@@ -19,6 +19,7 @@ import {
   signObject,
   validateControlChain,
 } from "../src/index.js";
+import { PersistentMap } from "../src/persistent-map.js";
 import { id, keys, RESOURCE } from "./identity.js";
 import {
   capabilityGrant,
@@ -509,3 +510,22 @@ function genesisRaw(owner: number, signer: number, chain: ReturnType<typeof chai
   const entries = payload.entries.map(([k, v]) => [k, k === 4 ? id(signer) : v] as const);
   return signObject(encode(cborMap(entries)), keys(signer));
 }
+
+describe("states kept for every head (review of #8, R8-1)", () => {
+  it("share their maps: a reader's revocations copy no earlier entry", () => {
+    const f = new Fixture();
+    f.push(1, capabilityGrant(5, [1]));
+    for (let i = 0; i < 24; i++) f.push(5, revokeDevice(5, 100 + i, 0));
+    const states = f.states.slice(2);
+    states.forEach((s, i) => {
+      expect(s.revoked).toBeInstanceOf(PersistentMap);
+      expect(s.revoked.size).toBe(i + 1);
+      // Every later state only adds to the maps of an earlier one.
+      expect(s.principals).toBe(f.states[1]?.principals);
+      expect(s.devices).toBe(f.states[1]?.devices);
+    });
+    // A revocation copies only its path (persistent-map.test.ts).
+    expect(states[0]?.revoked.size).toBe(1);
+    f.replay();
+  });
+});
