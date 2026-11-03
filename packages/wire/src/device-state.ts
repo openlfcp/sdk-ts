@@ -261,12 +261,18 @@ export function authorizeDeviceGrant(
     bytesEqual(existing.leafId, leaf.id)
   )
     return deny("the leaf certificate is already the device's current one (§17.4 rule 5)");
-  // Rule 6.
+  // Rule 6. A personal device submits only its first registration: once
+  // it has a chain it never re-certifies itself, not even with device/manage
+  // or owner/act, so a device suspended by the cascade waits for the root
+  // or another managing device (spec#2 7d75f7d).
   const personal = leaf.payload.kind === DEVICE_KIND.PERSONAL;
+  const self = personal && bytesEqual(issuer, leafId);
+  if (self && existing !== undefined && existing.chain !== null)
+    return deny("a registered device never re-certifies itself (§17.4 rule 6)");
   const allowed =
     bytesEqual(issuer, root) ||
-    (personal &&
-      (bytesEqual(issuer, leafId) || body.chain.issuers.some((e) => bytesEqual(e, issuer)))) ||
+    self ||
+    (personal && body.chain.issuers.some((e) => bytesEqual(e, issuer))) ||
     manages(state, issuer, root) ||
     (isOwner(state, root) && ownerAction(state, issuer));
   if (!allowed) return deny("the issuer may not bind or register this device (§17.4 rule 6)");
