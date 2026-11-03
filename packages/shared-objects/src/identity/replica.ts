@@ -13,6 +13,7 @@ import {
   checkSaveHeader,
   frameChange,
   frameSnapshot,
+  parsedOf,
   refusedChangeHash,
   unframeChange,
   unframeSnapshot,
@@ -22,8 +23,8 @@ import {
   SNAPSHOT_LIMITS_FLOOR,
   type SnapshotLimits,
 } from "../admission/limits.js";
-import { referenceHistoryOf } from "../admission/references.js";
-import { admitBatch } from "../admission/sequence.js";
+import { ReferenceHistory } from "../admission/references.js";
+import { admitBatch, admitChange, type DocumentSequences } from "../admission/sequence.js";
 import { isWasmTrap } from "../replica.js";
 import { principalRef } from "../values.js";
 import { checkIdentityUnit, IdentityAdmission, refuseIdentity } from "./admission.js";
@@ -46,6 +47,11 @@ export interface IdentityOptions {
 /** Wire authorization/decryption and class derivation at control_ref happen before this boundary. */
 export interface IdentityUnit extends IdentityWriter {
   readonly bytes: Uint8Array;
+}
+
+interface CheckedUnit {
+  readonly unit: IdentityUnit;
+  readonly change: CheckedChange;
 }
 
 export interface IdentityRefusal {
@@ -85,10 +91,16 @@ const refusal = (hash: string | undefined, error: unknown, held = false): Identi
 
 /** Small identity documents: deterministic replay, causal admission, per-entry readers (§§2–4). */
 export class IdentityReplica {
-  #doc: A.Doc<Record<string, unknown>> = A.init();
+  readonly #admission: IdentityAdmission;
   readonly #options: IdentityOptions;
   readonly #accepted = new Map<string, IdentityUnit>();
-  readonly #waiting = new Map<string, IdentityUnit>();
+  readonly #waiting = new Map<string, CheckedUnit>();
+  readonly #sequences = new Map<string, number>();
+  readonly #references = new ReferenceHistory();
+
+  get #doc(): A.Doc<Record<string, unknown>> {
+    return this.#admission.document as A.Doc<Record<string, unknown>>;
+  }
 
   private constructor(options: IdentityOptions) {
     this.#options = {
@@ -96,6 +108,22 @@ export class IdentityReplica {
       root: options.root.slice() as PrincipalId,
     };
     deriveIdentityActorId(options.resource, options.root); // Validate raw ID lengths.
+    const initial = A.init();
+    this.#admission = new IdentityAdmission(initial, this.#options.root);
+    A.free(initial);
+  }
+
+  #history(): DocumentSequences {
+    return {
+      hasChange: (hash) => this.#accepted.has(hash),
+      latestSeq: (actor) => this.#sequences.get(actor) ?? 0,
+      references: this.#references,
+    };
+  }
+
+  #record(change: CheckedChange, unit: IdentityUnit): void {
+    this.#accepted.set(change.hash, unit);
+    this.#sequences.set(change.actor, change.seq);
   }
 
   static empty(options: IdentityOptions): IdentityReplica {
@@ -191,9 +219,7 @@ export class IdentityReplica {
 
   receiveChanges(units: readonly IdentityUnit[]): IdentityReceiveResult {
     const refused: IdentityRefusal[] = [];
-    const pending = new Map(
-      [...this.#waiting].map(([hash, unit]) => [hash, { unit, change: checkChange(unit.bytes) }]),
-    );
+    const pending = new Map(this.#waiting);
     for (const unit of units) {
       let change: CheckedChange | undefined;
       try {
@@ -209,37 +235,18 @@ export class IdentityReplica {
         refused.push(refusal(change?.hash ?? refusedChangeHash(unit.bytes), e));
       }
     }
-    const sequences = new Map<string, number>();
-    for (const unit of this.#accepted.values()) {
-      const c = checkChange(unit.bytes);
-      sequences.set(c.actor, Math.max(sequences.get(c.actor) ?? 0, c.seq));
-    }
-    const admission = new IdentityAdmission(this.#doc, this.#options.root);
     const result = admitBatch(
       [...pending.values()].map((p) => p.change),
-      {
-        hasChange: (hash) => this.#accepted.has(hash),
-        latestSeq: (actor) => sequences.get(actor) ?? 0,
-        references: referenceHistoryOf(this.#doc),
-      },
-      (c) => admission.accept(c, (pending.get(c.hash) as { unit: IdentityUnit }).unit),
+      this.#history(),
+      (c) => this.#admission.accept(c, (pending.get(c.hash) as CheckedUnit).unit),
     );
-    const next = admission.document as A.Doc<Record<string, unknown>>;
     for (const refused of result.refused) if (isWasmTrap(refused.error)) throw refused.error;
-    if (next !== this.#doc) A.free(this.#doc);
-    this.#doc = next;
     this.#waiting.clear();
-    for (const c of result.admitted)
-      this.#accepted.set(c.hash, (pending.get(c.hash) as { unit: IdentityUnit }).unit);
-    for (const c of result.waiting)
-      this.#waiting.set(c.hash, (pending.get(c.hash) as { unit: IdentityUnit }).unit);
+    for (const c of result.admitted) this.#record(c, (pending.get(c.hash) as CheckedUnit).unit);
+    for (const c of result.waiting) this.#waiting.set(c.hash, pending.get(c.hash) as CheckedUnit);
     for (const r of result.refused) {
       refused.push(refusal(r.change.hash, r.error, r.held));
-      if (r.held)
-        this.#waiting.set(
-          r.change.hash,
-          (pending.get(r.change.hash) as { unit: IdentityUnit }).unit,
-        );
+      if (r.held) this.#waiting.set(r.change.hash, pending.get(r.change.hash) as CheckedUnit);
     }
     const hashes = (changes: readonly CheckedChange[]) => Object.freeze(changes.map((c) => c.hash));
     return Object.freeze({
@@ -257,7 +264,10 @@ export class IdentityReplica {
   } {
     const removed = new Set(exclude);
     return IdentityReplica.fromChanges(
-      [...this.#accepted, ...this.#waiting]
+      [
+        ...this.#accepted,
+        ...[...this.#waiting].map(([hash, pending]) => [hash, pending.unit] as const),
+      ]
         .filter(([hash]) => !removed.has(hash))
         .map(([, unit]) => unit),
       this.#options,
@@ -354,21 +364,25 @@ export class IdentityReplica {
       A.free(fork);
     }
     const change = checkChange(bytes);
-    // Validate in a temporary receiver first: local failed writes leave no pending units behind.
-    const preview = IdentityReplica.fromChanges(
-      [...this.#accepted.values(), { ...writer, bytes }],
-      this.#options,
-    );
-    const error = preview.result.refused.find((r) => r.hash === change.hash);
-    const accepted = preview.replica.hasChange(change.hash);
-    A.free(preview.replica.#doc);
-    if (error !== undefined)
-      throw Object.assign(new LfcpError("PROFILE_INVALID", error.message), {
-        diagnostic: error.diagnostic,
+    // Check only this candidate against the current indexes. Failed local
+    // writes never enter the waiting queue or consume an actor sequence.
+    checkIdentityUnit(change, writer, this.#options.resource, this.#options.root);
+    const decision = admitChange(change, this.#history());
+    if (decision.kind === "invalid" || decision.kind === "held") throw decision.error;
+    if (decision.kind === "missing")
+      throw new LfcpError("MISSING_DEPENDENCY", "local change is not admissible");
+    if (decision.kind === "next") {
+      this.#admission.accept(change, writer);
+      this.#references.add(change.hash, parsedOf(change));
+      this.#record(change, {
+        ...writer,
+        signer: writer.signer.slice() as PrincipalId,
+        bytes: change.bytes,
       });
-    if (!accepted) throw new LfcpError("MISSING_DEPENDENCY", "local change is not admissible");
-    this.receiveChanges([{ ...writer, bytes }]);
-    return change;
+      if (this.#waiting.size > 0) this.receiveChanges([]);
+    }
+    // Keep the byte log private even if callers mutate the returned buffer.
+    return checkChange(bytes);
   }
 }
 

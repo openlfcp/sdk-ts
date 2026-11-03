@@ -40,7 +40,7 @@ without notice until the profile is in a baseline.
 ## Identity profile (MVP 0.4 Working Draft)
 
 `@openlfcp/shared-objects/identity` implements IDENTITY-PROFILE-01 §§2–4
-(`org.openlfcp.identity.v1`, spec revision `d9f2873`, LFCP-04-409).
+(`org.openlfcp.identity.v1`, spec revision `d9f2873` with spec#3 §4 clarifications, LFCP-04-409).
 `IdentityReplica` admits changes with AI0–AI4, validates every concurrent
 field value and exposes `roster()`, `devices()` and `requests()`. Invalid
 entries are omitted; an invalid root makes all three readers empty.
@@ -85,9 +85,14 @@ fetch/decrypt units and retry, including when an earlier epoch is KEY_BLOCKED.
 `identityCodec` and `identitySnapshotCodec` provide the shared SOP framing.
 
 Diagnostics are `PROFILE_INVALID` with a profile diagnostic and JSON Pointer
-for state errors. Conflicted requests/kind use `INVALID_FIELD_TYPE` because
-§4 provides no conflict-specific code. Tests use §12 ID-05 names and synthetic
-canonical changes; the LFCP-04-403 corpus is not available at this revision.
+for state errors. Conflicted requests/kind report the first invalid value's
+diagnostic in table order; `INVALID_FIELD_TYPE` is the fallback when every
+concurrent value is valid on its own (§4 rule 2). Unknown request fields also
+invalidate the entry when conflicted. Tests use §12 ID-05 names and synthetic
+canonical changes, including the diagnostic cases beyond the spec#3 corpus.
+Admission retains causal, object and sequence indexes across calls. It applies
+new changes without cloning history and replays the trusted byte log only to
+recover from an engine error; local writes validate one candidate on a fork.
 Client DataProfileHandler wiring, durable journals, and pairing flows belong
 to LFCP-04-410.
 

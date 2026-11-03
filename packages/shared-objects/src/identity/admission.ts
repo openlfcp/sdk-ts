@@ -112,14 +112,17 @@ const FIELDS: Record<string, ReadonlySet<string>> = {
 /** Operations are inspected before applying them. Object provenance includes overwritten maps. */
 export class IdentityAdmission {
   #doc: A.Doc<unknown>;
-  #ownsDocument = false;
+  readonly #changes: Uint8Array[];
+  #requests: string | undefined;
   readonly #objects = new Map<string, ObjectInfo>([["_root", { path: [], type: "map" }]]);
   constructor(
     doc: A.Doc<unknown>,
     readonly root: PrincipalId,
   ) {
-    this.#doc = doc;
-    for (const bytes of A.getAllChanges(doc)) this.#index(decodedOf(checkChange(bytes)));
+    // One independent working document, reused for every accepted change.
+    this.#doc = A.clone(doc);
+    this.#changes = A.getAllChanges(doc);
+    for (const bytes of this.#changes) this.#index(decodedOf(checkChange(bytes)));
   }
 
   get document(): A.Doc<unknown> {
@@ -133,6 +136,7 @@ export class IdentityAdmission {
       if (type === undefined || parent === undefined) continue;
       const id = `${change.startOp + i}@${change.actor}`;
       const path = [...parent.path, op.key ?? -1];
+      if (path.length === 1 && path[0] === "requests") this.#requests = id;
       const requestMap = path[0] === "requests" && path.length === 2 ? id : parent.requestMap;
       this.#objects.set(id, { path, type, ...(requestMap === undefined ? {} : { requestMap }) });
     }
@@ -245,12 +249,7 @@ export class IdentityAdmission {
       touched.add(entryKey);
       const requestMap =
         path.length === 1 ? (op.action === "makeMap" ? id : undefined) : parent.requestMap;
-      const requests =
-        path.length === 1
-          ? op.obj
-          : [...this.#objects].find(
-              ([, obj]) => obj.path.length === 1 && obj.path[0] === "requests",
-            )?.[0];
+      const requests = path.length === 1 ? op.obj : this.#requests;
       const history = requests === undefined ? [] : all(requests, entryKey);
       if (path.length === 1) {
         if (op.action !== "makeMap" || history.length !== 0 || createdRequests.has(entryKey))
@@ -294,18 +293,19 @@ export class IdentityAdmission {
     const diagnostic = IDENTITY_ADMISSION_ORDER.find((d) => found.has(d));
     if (diagnostic !== undefined)
       refuseIdentity(diagnostic, `IDENTITY-PROFILE-01 §3: ${diagnostic}`);
-    // Isolate any engine failure from the admitted document. Changes are small (§4).
-    const fork = A.clone(this.#doc);
+    // Do not copy the accumulated history on every accepted change. The byte
+    // log and object index are committed only after apply succeeds; if the
+    // engine aborts, replay that trusted log into a fresh working document.
+    const actor = A.getActorId(this.#doc);
     try {
-      const [next] = A.applyChanges(fork, [change.bytes]);
-      if (this.#ownsDocument) A.free(this.#doc);
-      this.#doc = next;
-      this.#ownsDocument = true;
+      [this.#doc] = A.applyChanges(this.#doc, [change.bytes]);
     } catch (e) {
       if (isWasmTrap(e)) throw e;
-      A.free(fork);
+      A.free(this.#doc);
+      [this.#doc] = A.applyChanges(A.init({ actor }), this.#changes);
       refuseIdentity("INVALID_AUTOMERGE_BYTES", `the engine refused the change: ${String(e)}`);
     }
+    this.#changes.push(change.bytes);
     this.#index(decoded);
   }
 }
