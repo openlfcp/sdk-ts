@@ -500,14 +500,32 @@ describe("ordering of the classes for device records (§62)", () => {
     const g = validateControlChain([raw.bytes], { authorize: () => true });
     expect(g.kind === "invalid" && g.wireCode).toBe("INVALID_SIGNATURE");
   });
+
+  it("refuses a field-2 commit whose issuer is not the leaf that signed it, under any policy (review of #8, R8-2)", () => {
+    const f = new Fixture();
+    const c = chainOf([personalCert(10, 3, [13], 10, 3)]);
+    // Signed by the leaf 3 with kid 3, but field 4 names the owner 1.
+    const raw = reissued(recordAt(f.state, 3, transferBody(f.state, 10, 1, 3, c)).bytes, 1, 3);
+    for (const options of [{}, { authorize: () => true }]) {
+      const r = validateControlChain([...f.records, raw.bytes], options);
+      expect(r.kind === "invalid" && r.wireCode).toBe("INVALID_SIGNATURE");
+    }
+    // The same commit issued by its leaf is accepted.
+    f.push(3, transferBody(f.state, 10, 1, 3, c));
+  });
 });
 
 /** A Genesis with field 5 re-signed by `signer` as its issuer, bypassing the writer rule (§15). */
 function genesisRaw(owner: number, signer: number, chain: ReturnType<typeof chainOf>) {
-  const record = decodeControlRecord(genesis(owner, 2, chain).bytes);
+  return reissued(genesis(owner, 2, chain).bytes, signer, signer);
+}
+
+/** `bytes` with payload field 4 set to `issuer`, signed (and kid) by `signer`; the writer refuses this. */
+function reissued(bytes: Uint8Array, issuer: number, signer: number) {
+  const record = decodeControlRecord(bytes);
   const payload = decodeStrict(record.signed.payloadBytes);
   if (!isCborMap(payload)) throw new Error("not a map");
-  const entries = payload.entries.map(([k, v]) => [k, k === 4 ? id(signer) : v] as const);
+  const entries = payload.entries.map(([k, v]) => [k, k === 4 ? id(issuer) : v] as const);
   return signObject(encode(cborMap(entries)), keys(signer));
 }
 

@@ -1,4 +1,5 @@
 import {
+  bytesEqual,
   type ControlRecordId,
   controlRecordId,
   type DataEpoch,
@@ -485,7 +486,14 @@ function dependenciesAndSignatures(
     offerSigner = known(offer.signed.kid) ?? options.resolvePrincipal?.(offer.signed.kid);
     if (offerSigner === undefined) return missing("no descriptor is known for the offer's signer");
   }
-  // Class 4.
+  // Class 4. §13: the kid is the payload issuer; with commit field 2 that
+  // issuer is the leaf, whose descriptor the commit is verified under
+  // (review of #8, R8-2: a policy substituted for authority never sees a
+  // commit whose field 4 names another Principal).
+  if (!bytesEqual(record.signed.kid, issuer))
+    return bad("the record's kid is not its issuer (§13)");
+  if (required !== undefined && !bytesEqual(issuer, required.principalId))
+    return bad("the commit's issuer is not the leaf device of field 2 (§13, §23.3)");
   const v = verifySignedObject(record.signed, descriptor);
   if (!v.valid)
     return bad(
