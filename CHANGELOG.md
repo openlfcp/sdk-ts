@@ -18,11 +18,15 @@ stays `mvp-0.2-baseline.12` until `mvp-0.4-baseline.1` is published.
   kind, mask and scope rules, `verifyChain` in the class order of §62 with
   read-only `ChainStateChecks`, and `preflightIssuance` for a leaf that is
   not signed yet.
-- `@openlfcp/wire`: the `DEVICE_GRANT` (9) and `DEVICE_REVOKE` (10) bodies,
-  Genesis field 5 and transfer commit field 2. They decode and encode;
-  the Control Chain refuses them (`admitControlRecord`) until their
-  transitions are implemented: types 9 and 10 as `INVALID_CONTROL_CHAIN`,
-  the two chain fields as `MALFORMED_MESSAGE`, whatever the signer.
+- `@openlfcp/wire`: the `DEVICE_GRANT` (9) and `DEVICE_REVOKE` (10) records,
+  Genesis field 5 and transfer commit field 2 are verified and applied
+  (LFCP-WIRE-01 §17.4, §17.5, §15, §23.3): `ControlState` carries `roles`,
+  `devices` and `revoked` (§79) and grants carry `issuerRoot`. Device
+  activity with the revocation cascade and root standing, `actsFor`,
+  `rootOf`, `ownerAction`, `sameRoot`, two-phase pairing approval and role
+  exclusivity follow §80.1. `hasAbility` is `holds` (§80.1), so Data Units,
+  Snapshots and Key Packages are judged with devices too; a chain without
+  device records gives the same answers as before.
 - `@openlfcp/wire`: pairing links (`lfcp://pair/…`, `parsePairingUri`,
   `assemblePairingUri`, `pairingDeviceSigner`) and `deviceFingerprint`
   (IDENTITY-PROFILE-01 §5.2).
@@ -39,6 +43,13 @@ stays `mvp-0.2-baseline.12` until `mvp-0.4-baseline.1` is published.
   Genesis with a malformed body is `MALFORMED_MESSAGE`, not
   `INVALID_CONTROL_CHAIN`. A writer refuses a commit whose offer or accept
   is not a transfer object.
+- A transfer offer is verified under its own signer's descriptor before
+  authority (§62): an offer by a known Principal that is not the owner is
+  `AUTHORIZATION_FAILED` (was `INVALID_SIGNATURE`), by an unknown one
+  `MISSING_DEPENDENCY`; a bad offer or accept signature stays
+  `INVALID_SIGNATURE`.
+- `canDistributeKey` also accepts a sender of the recipient's root
+  (`sameRoot`, §25.2).
 
 ## 0.2.2 — unreleased
 
