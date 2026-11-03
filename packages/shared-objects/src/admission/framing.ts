@@ -78,7 +78,11 @@ export function checkChange(bytes: Uint8Array): CheckedChange {
     // Canonical uint64 values are legal (SOP §11.3 rule 6), but the JS
     // engine's JSON decoder refuses integers it cannot represent as number.
     // The canonical parser has already checked and decoded them losslessly.
-    if (!parsed.ops.some((op) => typeof op.value === "bigint"))
+    if (
+      !(e instanceof RangeError) ||
+      !/^Error: -?\d+ can't be represented as a JavaScript number$/.test(e.message) ||
+      !parsed.ops.some((op) => typeof op.value === "bigint")
+    )
       return reject(`invalid Automerge change bytes (§11): ${(e as Error).message}`);
     const hash = refusedChangeHash(bytes);
     if (hash === undefined)
@@ -186,7 +190,13 @@ const DECODED = new WeakMap<CheckedChange, A.DecodedChange>();
 
 /** The decoded change, reusing the decode of checkChange when there was one. */
 export function decodedOf(change: CheckedChange): A.DecodedChange {
-  return DECODED.get(change) ?? A.decodeChange(change.bytes);
+  const decoded = DECODED.get(change);
+  if (decoded !== undefined) return decoded;
+  // CheckedChange is structural: callers can pass a copy without the cached decode.
+  const checked = checkChange(change.bytes);
+  const result = DECODED.get(checked) as A.DecodedChange;
+  DECODED.set(change, result);
+  return result;
 }
 
 /**

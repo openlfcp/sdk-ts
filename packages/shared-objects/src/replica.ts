@@ -11,7 +11,9 @@ import {
   type CheckedChange,
   checkChange,
   checkSaveHeader,
+  decodedOf,
   parsedOf,
+  refusedChangeHash,
   unframeChange,
   unframeSnapshot,
 } from "./admission/framing.js";
@@ -761,7 +763,7 @@ export class SharedObjectsReplica {
   }
 
   #createdDepths(change: CheckedChange, prior: ReadonlyMap<string, number>): Map<string, number> {
-    const decoded = A.decodeChange(change.bytes);
+    const decoded = decodedOf(change);
     const created = new Map<string, number>();
     decoded.ops.forEach((op, i) => {
       if (!MAKE_ACTIONS.has(op.action)) return;
@@ -803,7 +805,7 @@ export class SharedObjectsReplica {
       return path.length;
     }
     for (const bytes of A.getAllChanges(this.#doc)) {
-      const c = A.decodeChange(bytes);
+      const c = decodedOf(checkChange(bytes));
       c.ops.forEach((op, i) => {
         if (!MAKE_ACTIONS.has(op.action)) return;
         const parent = op.obj === "_root" ? 0 : this.#depths.get(op.obj);
@@ -887,7 +889,7 @@ export class SharedObjectsReplica {
    */
   rebuildWithout(exclude: Iterable<string>): BuiltReplica {
     const out = new Set(exclude);
-    const kept = A.getAllChanges(this.#doc).filter((c) => !out.has(A.decodeChange(c).hash));
+    const kept = A.getAllChanges(this.#doc).filter((c) => !out.has(checkChange(c).hash));
     return SharedObjectsReplica.fromChanges(kept, {
       resource: this.resource,
       principal: this.#principal,
@@ -1097,10 +1099,10 @@ export class SharedObjectsReplica {
     } catch (e) {
       // §11.1: a writer never emits a change over the limits. The handle
       // this replica held is outdated by A.change: rebuild it without the change.
-      const hash = A.decodeChange(bytes).hash;
+      const hash = refusedChangeHash(bytes);
       this.#doc = A.applyChanges(
         A.init({ actor: this.#actor }),
-        A.getAllChanges(next).filter((c) => A.decodeChange(c).hash !== hash),
+        A.getAllChanges(next).filter((c) => refusedChangeHash(c) !== hash),
       )[0];
       this.#refs = null;
       throw new LfcpError(
