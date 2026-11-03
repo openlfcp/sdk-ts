@@ -63,8 +63,9 @@ stays `mvp-0.2-baseline.12` until `mvp-0.4-baseline.1` is published.
   policy).
 - `ControlState` maps (`principals`, `roles`, `devices`, `revoked`,
   `grants`) are persistent (`PersistentMap`): the states `stateAt` keeps
-  share their entries. They are `ReadonlyMap`s as before; their iteration
-  order follows a hash, not insertion.
+  share their entries: a persistent AVL tree over the full key, so no
+  choice of keys makes an update copy more than one path. They are
+  `ReadonlyMap`s as before; they iterate in key order, not insertion.
 - The certificate scan also checks the COSE envelope, the descriptor's
   fixed fields and a Genesis with a null prev before any decoding.
 

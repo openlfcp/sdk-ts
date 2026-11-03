@@ -1,153 +1,115 @@
 /**
- * An immutable map from strings with structural sharing: `set` copies
- * only the path to the changed key (a hash array mapped trie, 32-way, at
- * most seven levels over a 32-bit hash), so the states a chain keeps for
- * every head share all untouched entries. Retaining N states that each
- * add one entry costs O(N log N) nodes instead of the N(N+1)/2 entries of
- * a full copy per state (review of #8, R8-1).
+ * An immutable map from strings with structural sharing: a persistent AVL
+ * tree ordered by the full key. `set` copies only the nodes on the path
+ * to its key (at most about 1.44 log2 n of them) and rebalances there, so
+ * the states a chain keeps for every head share all untouched entries
+ * (review of #8, R8-1).
  *
- * Keys of Control State are hex IDs of SHA-256 outputs, so the hash is
- * spread; equal 32-bit hashes share a bucket compared by key. Iteration
- * order follows the hash, not insertion: no Control State rule depends on
- * the order of its maps.
+ * Keys are compared whole: no hash, no bucket, so no choice of keys (an
+ * arbitrary device ID in a pre-emptive revocation, for example) can make
+ * an update copy more than one path (review of #8, R8-1b). Iteration is
+ * in ascending key order (UTF-16 code units).
  */
 
-interface Leaf<V> {
-  readonly hash: number;
+interface Node<V> {
   readonly key: string;
   readonly value: V;
+  readonly left: Node<V> | undefined;
+  readonly right: Node<V> | undefined;
+  readonly height: number;
 }
 
-/** Leaves of one full 32-bit hash, in insertion order. */
-interface Bucket<V> {
-  readonly branch: false;
-  readonly hash: number;
-  readonly leaves: readonly Leaf<V>[];
+const heightOf = <V>(n: Node<V> | undefined): number => (n === undefined ? 0 : n.height);
+
+function node<V>(
+  key: string,
+  value: V,
+  left: Node<V> | undefined,
+  right: Node<V> | undefined,
+): Node<V> {
+  const height = 1 + Math.max(heightOf(left), heightOf(right));
+  return Object.freeze({ key, value, left, right, height });
 }
 
-interface Branch<V> {
-  readonly branch: true;
-  readonly bitmap: number;
-  readonly children: readonly Node<V>[];
-}
-
-type Node<V> = Branch<V> | Bucket<V>;
-
-const BITS = 5;
-const WIDTH_MASK = 31;
-/** Below this shift a node branches on the hash; at it, equal hashes share a bucket. */
-const MAX_SHIFT = 30;
-
-/**
- * FNV-1a over the length and at most the first and the last eight UTF-16
- * code units, then the murmur3 finalizer. The keys here are hex IDs, or
- * two of them joined, so both ends are spread; equal hashes still compare
- * by key.
- */
-function hashOf(key: string): number {
-  const n = key.length;
-  let h = Math.imul(0x811c9dc5 ^ n, 0x01000193);
-  const head = n < 16 ? n : 8;
-  for (let i = 0; i < head; i++) {
-    h ^= key.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
+/** A node for (key, value) over `left` and `right`, whose heights differ by at most two. */
+function balanced<V>(
+  key: string,
+  value: V,
+  left: Node<V> | undefined,
+  right: Node<V> | undefined,
+): Node<V> {
+  const hl = heightOf(left);
+  const hr = heightOf(right);
+  if (hl > hr + 1) {
+    const l = left as Node<V>;
+    if (heightOf(l.left) >= heightOf(l.right))
+      return node(l.key, l.value, l.left, node(key, value, l.right, right));
+    const lr = l.right as Node<V>;
+    return node(
+      lr.key,
+      lr.value,
+      node(l.key, l.value, l.left, lr.left),
+      node(key, value, lr.right, right),
+    );
   }
-  for (let i = n < 16 ? n : n - 8; i < n; i++) {
-    h ^= key.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
+  if (hr > hl + 1) {
+    const r = right as Node<V>;
+    if (heightOf(r.right) >= heightOf(r.left))
+      return node(r.key, r.value, node(key, value, left, r.left), r.right);
+    const rl = r.left as Node<V>;
+    return node(
+      rl.key,
+      rl.value,
+      node(key, value, left, rl.left),
+      node(r.key, r.value, rl.right, r.right),
+    );
   }
-  h ^= h >>> 16;
-  h = Math.imul(h, 0x85ebca6b);
-  h ^= h >>> 13;
-  h = Math.imul(h, 0xc2b2ae35);
-  h ^= h >>> 16;
-  return h >>> 0;
+  return node(key, value, left, right);
 }
 
-function popcount(x: number): number {
-  let v = x - ((x >>> 1) & 0x55555555);
-  v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
-  v = (v + (v >>> 4)) & 0x0f0f0f0f;
-  return Math.imul(v, 0x01010101) >>> 24;
+/** `n` with `key` set; the second element is whether the key is new. */
+function insert<V>(n: Node<V> | undefined, key: string, value: V): readonly [Node<V>, boolean] {
+  if (n === undefined) return [node(key, value, undefined, undefined), true];
+  if (key < n.key) {
+    const [left, added] = insert(n.left, key, value);
+    return [balanced(n.key, n.value, left, n.right), added];
+  }
+  if (key > n.key) {
+    const [right, added] = insert(n.right, key, value);
+    return [balanced(n.key, n.value, n.left, right), added];
+  }
+  return [node(key, value, n.left, n.right), false];
 }
 
-function bucket<V>(hash: number, leaves: readonly Leaf<V>[]): Bucket<V> {
-  return Object.freeze({ branch: false, hash, leaves: Object.freeze(leaves) });
-}
-
-function branch<V>(bitmap: number, children: readonly Node<V>[]): Branch<V> {
-  return Object.freeze({ branch: true, bitmap, children: Object.freeze(children) });
-}
-
-/** A node holding the buckets `a` and `b` of different hashes, from `shift` on. */
-function split<V>(a: Bucket<V>, b: Bucket<V>, shift: number): Node<V> {
-  const ia = (a.hash >>> shift) & WIDTH_MASK;
-  const ib = (b.hash >>> shift) & WIDTH_MASK;
-  if (ia === ib) return branch(1 << ia, [split(a, b, shift + BITS)]);
-  return branch((1 << ia) | (1 << ib), ia < ib ? [a, b] : [b, a]);
-}
-
-function lookup<V>(node: Node<V> | undefined, hash: number, key: string): Leaf<V> | undefined {
-  let n = node;
-  let shift = 0;
+function lookup<V>(root: Node<V> | undefined, key: string): Node<V> | undefined {
+  let n = root;
   while (n !== undefined) {
-    if (!n.branch) {
-      if (n.hash !== hash) return undefined;
-      for (const l of n.leaves) if (l.key === key) return l;
-      return undefined;
-    }
-    const bit = 1 << ((hash >>> shift) & WIDTH_MASK);
-    if ((n.bitmap & bit) === 0) return undefined;
-    n = n.children[popcount(n.bitmap & (bit - 1))];
-    shift += BITS;
+    if (key < n.key) n = n.left;
+    else if (key > n.key) n = n.right;
+    else return n;
   }
   return undefined;
 }
 
-/** `node` with `leaf` set; the second element is whether the key is new. */
-function insert<V>(
-  node: Node<V> | undefined,
-  leaf: Leaf<V>,
-  shift: number,
-): readonly [Node<V>, boolean] {
-  if (node === undefined) return [bucket(leaf.hash, [leaf]), true];
-  if (!node.branch) {
-    if (node.hash === leaf.hash) {
-      const at = node.leaves.findIndex((l) => l.key === leaf.key);
-      if (at < 0) return [bucket(leaf.hash, [...node.leaves, leaf]), true];
-      const leaves = node.leaves.slice();
-      leaves[at] = leaf;
-      return [bucket(leaf.hash, leaves), false];
+/** `pick` of every node under `n`, in key order, appended to `out`. */
+function collect<V, T>(n: Node<V> | undefined, pick: (n: Node<V>) => T, out: T[]): T[] {
+  const stack: Node<V>[] = [];
+  let at = n;
+  while (at !== undefined || stack.length > 0) {
+    while (at !== undefined) {
+      stack.push(at);
+      at = at.left;
     }
-    return [split(node, bucket(leaf.hash, [leaf]), shift), true];
+    const top = stack.pop() as Node<V>;
+    out.push(pick(top));
+    at = top.right;
   }
-  if (shift > MAX_SHIFT) throw new Error("persistent map: branch below the last hash bit");
-  const bit = 1 << ((leaf.hash >>> shift) & WIDTH_MASK);
-  const at = popcount(node.bitmap & (bit - 1));
-  const children = node.children.slice();
-  if ((node.bitmap & bit) === 0) {
-    children.splice(at, 0, bucket(leaf.hash, [leaf]));
-    return [branch(node.bitmap | bit, children), true];
-  }
-  const [child, added] = insert(node.children[at], leaf, shift + BITS);
-  children[at] = child;
-  return [branch(node.bitmap, children), added];
-}
-
-/** `pick` of every leaf under `node`, appended to `out`. */
-function collect<V, T>(node: Node<V> | undefined, pick: (l: Leaf<V>) => T, out: T[]): T[] {
-  if (node === undefined) return out;
-  if (!node.branch) {
-    for (const l of node.leaves) out.push(pick(l));
-    return out;
-  }
-  for (const child of node.children) collect(child, pick, out);
   return out;
 }
 
-const pickEntry = <V>(l: Leaf<V>): [string, V] => [l.key, l.value];
-const pickKey = <V>(l: Leaf<V>): string => l.key;
-const pickValue = <V>(l: Leaf<V>): V => l.value;
+const pickEntry = <V>(n: Node<V>): [string, V] => [n.key, n.value];
+const pickKey = <V>(n: Node<V>): string => n.key;
+const pickValue = <V>(n: Node<V>): V => n.value;
 
 export class PersistentMap<V> implements ReadonlyMap<string, V> {
   static readonly #EMPTY = new PersistentMap<never>(undefined, 0);
@@ -172,17 +134,30 @@ export class PersistentMap<V> implements ReadonlyMap<string, V> {
   }
 
   get(key: string): V | undefined {
-    return lookup(this.#root, hashOf(key), key)?.value;
+    return lookup(this.#root, key)?.value;
   }
 
   has(key: string): boolean {
-    return lookup(this.#root, hashOf(key), key) !== undefined;
+    return lookup(this.#root, key) !== undefined;
   }
 
   /** A map with `key` set to `value`; this one is unchanged. */
   set(key: string, value: V): PersistentMap<V> {
-    const [root, added] = insert(this.#root, Object.freeze({ hash: hashOf(key), key, value }), 0);
+    const [root, added] = insert(this.#root, key, value);
     return new PersistentMap(root, added ? this.size + 1 : this.size);
+  }
+
+  /** The tree's height (tests: it stays logarithmic whatever the keys). */
+  get height(): number {
+    return heightOf(this.#root);
+  }
+
+  /**
+   * Adds every tree node of this map to `seen` (tests: the structure the
+   * retained states hold together, shared nodes counted once).
+   */
+  collectNodes(seen: Set<object>): void {
+    collect(this.#root, (n) => seen.add(n).size, []);
   }
 
   entries(): ArrayIterator<[string, V]> {

@@ -1,4 +1,4 @@
-import { dataEpoch, hash32, resourceId, toHex } from "@openlfcp/core";
+import { dataEpoch, fromHex, hash32, principalId, resourceId, toHex } from "@openlfcp/core";
 import { describe, expect, it } from "vitest";
 import { cborMap, decodeStrict, encode, isCborMap } from "../src/cbor/index.js";
 import {
@@ -624,6 +624,47 @@ describe("states kept for every head (review of #8, R8-1)", () => {
     expect(states[0]?.revoked.size).toBe(1);
     f.replay();
   });
+
+  it("grow linearly with chosen keys: readers' pre-emptive revocations (review of #8, R8-1b)", () => {
+    // The review's flood: reader roots 20..27 each revoke 64 unbound IDs
+    // that differ only in their middle (they collided in the old hash
+    // trie, whose bucket every later state copied: N(N+1)/2 references).
+    const SUFFIX: Record<number, string> = {
+      20: "a5bd9e9d",
+      21: "10d4d2e7",
+      22: "50beb469",
+      23: "dd483457",
+      24: "1d0b8a1d",
+      25: "7483a275",
+      26: "1af49367",
+      27: "b3a4867b",
+    };
+    const retained = (roots: number) => {
+      const f = new Fixture();
+      for (let r = 20; r < 20 + roots; r++) f.push(1, capabilityGrant(r, [1]));
+      for (let r = 20; r < 20 + roots; r++)
+        for (let j = 0; j < 64; j++)
+          f.push(r, {
+            type: "DEVICE_REVOKE",
+            root: id(r),
+            device: principalId(
+              fromHex(`00000000${j.toString(16).padStart(48, "0")}${SUFFIX[r] as string}`),
+            ),
+            reason: 0n,
+          });
+      expect(f.state.revoked.size).toBe(roots * 64);
+      const nodes = new Set<object>();
+      for (const s of f.states) (s.revoked as PersistentMap<unknown>).collectNodes(nodes);
+      return nodes.size;
+    };
+    const half = retained(4);
+    const full = retained(8);
+    // Doubling the history about doubles what every state together holds
+    // (2080 -> 4752 nodes: a log factor of the path; sdk-rs asserts below
+    // 2.6x). The old bucket gave 4x (32 896 -> 131 328 references).
+    expect(full / half).toBeLessThan(2.4);
+    expect(full).toBeLessThan(512 * 16);
+  }, 60_000);
 });
 
 describe("a device submits only its first registration (§17.4 rule 6, spec#2 7d75f7d)", () => {
