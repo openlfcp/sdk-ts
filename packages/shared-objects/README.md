@@ -37,6 +37,60 @@ edits, the effective tree and the section admission rules are not there
 yet. It may change
 without notice until the profile is in a baseline.
 
+## Identity profile (MVP 0.4 Working Draft)
+
+`@openlfcp/shared-objects/identity` implements IDENTITY-PROFILE-01 §§2–4
+(`org.openlfcp.identity.v1`, spec revision `d9f2873`, LFCP-04-409).
+`IdentityReplica` admits changes with AI0–AI4, validates every concurrent
+field value and exposes `roster()`, `devices()` and `requests()`. Invalid
+entries are omitted; an invalid root makes all three readers empty.
+Concurrent request maps remain invalid: readers never select a winning
+request. Device records here are display metadata and key hints, not authority.
+
+```ts
+import { IdentityReplica } from "@openlfcp/shared-objects/identity";
+
+const identity = IdentityReplica.empty({ resource, root });
+const initial = identity.write(
+  { signer: root, actorSeq: 1n, writerClass: "root" },
+  { intent: "identity.initialize" },
+);
+```
+
+Persist and send `initial.bytes` in the root's Data Unit at actor sequence 1;
+retry those exact bytes. Initialization creates only the six root keys,
+with empty roster/devices/requests/extensions. Write entries in later changes
+with `roster.put`, `device.put`, or `request.put`; matching `.delete` intents
+remove entries. Updates preserve unknown fields; omitted optional fields
+remain unchanged. Writers produce scalar strings and uints, including
+lossless bigint epochs in `missing_keys` (safe epochs read back as numbers).
+The writer permits `missing_keys` only on the signer's own device entry (§2.1);
+receivers implement the admission table AI0–AI4 without adding a new rule.
+Reserved `recovery`/`succession` keys have no writer intent; readers preserve them.
+
+The receive boundary is `receiveChanges([{ bytes, signer, actorSeq, writerClass }])`,
+or `receive(plaintext, writer)` for SOP-framed bytes. All unit metadata must
+come from verified LFCP units. Derive `writerClass` from this Identity Resource's
+Control state **at the unit's `control_ref`**, never its latest head. Wire
+authorization, decryption, equivocation and epoch cutoffs remain the caller's
+responsibility. The actor domain is inherited unchanged from SOP §8.
+Waiting dependencies and held actor sequences are retained; `rebuildWithout`
+takes excluded change hashes and replays remaining units, removing dependants.
+
+`fromSave(save, options, verifiedUnits)` and `fromSnapshot` verify the initial
+change against the root's actual unit 1 before exposing state. They replay all
+snapshot changes with their verified carrying units, which also verifies AI4
+ownership and historical writer classes. Missing proof refuses the snapshot;
+fetch/decrypt units and retry, including when an earlier epoch is KEY_BLOCKED.
+`identityCodec` and `identitySnapshotCodec` provide the shared SOP framing.
+
+Diagnostics are `PROFILE_INVALID` with a profile diagnostic and JSON Pointer
+for state errors. Conflicted requests/kind use `INVALID_FIELD_TYPE` because
+§4 provides no conflict-specific code. Tests use §12 ID-05 names and synthetic
+canonical changes; the LFCP-04-403 corpus is not available at this revision.
+Client DataProfileHandler wiring, durable journals, and pairing flows belong
+to LFCP-04-410.
+
 ## Automerge and WebAssembly
 
 The package depends on `@automerge/automerge` **3.5.0**, pinned exactly,

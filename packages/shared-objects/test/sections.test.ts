@@ -99,7 +99,12 @@ describe("profile dispatch (§1, §17)", () => {
   it("selects the model from the Genesis profile, exactly", () => {
     expect(profileModel(PROFILE_ID).kind).toBe("shared-objects");
     expect(profileModel(SECTIONS_PROFILE_ID).kind).toBe("shared-sections");
-    expect(SUPPORTED_DATA_PROFILES).toEqual([PROFILE_ID, SECTIONS_PROFILE_ID]);
+    expect(SUPPORTED_DATA_PROFILES).toEqual([
+      PROFILE_ID,
+      SECTIONS_PROFILE_ID,
+      "org.openlfcp.identity.v1",
+    ]);
+    expect(profileModel("org.openlfcp.identity.v1").kind).toBe("identity");
     for (const other of [
       "org.openlfcp.shared-sections.v2",
       "ORG.OPENLFCP.SHARED-SECTIONS.V1",
@@ -116,6 +121,7 @@ describe("profile dispatch (§1, §17)", () => {
   it("reads a Task reference with the model of its Resource's profile", () => {
     expect(taskRefModel(PROFILE_ID).kind).toBe("shared-objects");
     expect(taskRefModel(SECTIONS_PROFILE_ID).kind).toBe("shared-sections");
+    expect(taskRefModel("org.openlfcp.identity.v1").kind).toBe("profile-unsupported");
     expect(taskRefModel("com.example.other").kind).toBe("profile-unsupported");
   });
 });

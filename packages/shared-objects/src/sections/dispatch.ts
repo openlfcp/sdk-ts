@@ -1,3 +1,4 @@
+import { IDENTITY_PROFILE_ID } from "../identity/values.js";
 import { PROFILE_ID } from "../values.js";
 import { SECTIONS_PROFILE_ID } from "./values.js";
 
@@ -11,11 +12,16 @@ import { SECTIONS_PROFILE_ID } from "./values.js";
  */
 
 /** The models this package implements, by Data Profile. */
-export const SUPPORTED_DATA_PROFILES = Object.freeze([PROFILE_ID, SECTIONS_PROFILE_ID] as const);
+export const SUPPORTED_DATA_PROFILES = Object.freeze([
+  PROFILE_ID,
+  SECTIONS_PROFILE_ID,
+  IDENTITY_PROFILE_ID,
+] as const);
 
 export type ProfileModel =
   | { readonly kind: "shared-objects"; readonly dataProfile: typeof PROFILE_ID }
   | { readonly kind: "shared-sections"; readonly dataProfile: typeof SECTIONS_PROFILE_ID }
+  | { readonly kind: "identity"; readonly dataProfile: typeof IDENTITY_PROFILE_ID }
   /**
    * LFCP-WIRE-01 §62: no model here reads this profile. The Resource is
    * neither interpreted nor written; nothing is created or changed.
@@ -31,6 +37,7 @@ export type ProfileModel =
  * names `dataProfile`. Exact match only: no prefix, version or case folding.
  */
 export function profileModel(dataProfile: string): ProfileModel {
+  if (dataProfile === IDENTITY_PROFILE_ID) return Object.freeze({ kind: "identity", dataProfile });
   if (dataProfile === PROFILE_ID) return Object.freeze({ kind: "shared-objects", dataProfile });
   if (dataProfile === SECTIONS_PROFILE_ID)
     return Object.freeze({ kind: "shared-sections", dataProfile });
@@ -44,5 +51,11 @@ export function profileModel(dataProfile: string): ProfileModel {
  * Shared Objects Task.
  */
 export function taskRefModel(resourceDataProfile: string): ProfileModel {
+  if (resourceDataProfile === IDENTITY_PROFILE_ID)
+    return Object.freeze({
+      kind: "profile-unsupported",
+      code: "PROFILE_UNSUPPORTED",
+      dataProfile: resourceDataProfile,
+    });
   return profileModel(resourceDataProfile);
 }
