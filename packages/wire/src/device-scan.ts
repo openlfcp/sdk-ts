@@ -9,9 +9,12 @@ import { MAX_DEPTH } from "./cbor/index.js";
  * after this scan, so a declared count beyond a limit is refused without
  * walking or allocating its elements.
  *
- * The scan refuses only what the full decoder refuses too (every failure
- * is INVALID_STRUCTURE, MALFORMED_MESSAGE on the wire, §62 class 1); it
- * accepts nothing the decoder would not check again.
+ * The COSE envelope (§10) and the descriptor's fixed fields are checked
+ * here too, and a Genesis's null prev is skipped, so no shape reaches the
+ * decoder unscanned. The scan refuses only what the full decoder refuses
+ * too (COSE_MALFORMED for the envelope, INVALID_STRUCTURE otherwise, both
+ * MALFORMED_MESSAGE on the wire, §62 class 1); it accepts nothing the
+ * decoder would not check again.
  */
 
 const MAX_CHAIN = 4;
@@ -72,8 +75,13 @@ function skip(bytes: Uint8Array, pos: number, end: number, depth = 0): number {
       for (let i = 0; i < items; i++) p = skip(bytes, p, end, depth + 1);
       return p;
     }
+    case 7:
+      // false, true and null (a Genesis's prev is null, §13.1); the
+      // decoder refuses every other simple value and float too (§5.2).
+      if (h.value >= 20 && h.value <= 22 && h.next === pos + 1) return h.next;
+      return fail("a float or an unused simple value");
     default:
-      return fail("a tag or simple value"); // LFCP uses neither inside these structures
+      return fail("a tag"); // LFCP uses none (§5.2 rule 6)
   }
 }
 
@@ -102,7 +110,7 @@ function scanPayload(bytes: Uint8Array, start: number, end: number): boolean {
     fail("the label is not LFCP-DEVICE-CERT-v1");
   p = skip(bytes, p, end);
   p = bstr(bytes, p, end, 32)[1]; // root
-  p = skip(bytes, p, end); // descriptor, checked by the decoder
+  p = scanDescriptor(bytes, p, end);
   const kind = head(bytes, p, end);
   if (kind.major !== 0 || kind.value > 2) fail("the kind is not 0, 1 or 2");
   p = kind.next;
@@ -125,42 +133,66 @@ function scanPayload(bytes: Uint8Array, start: number, end: number): boolean {
   return managing;
 }
 
-/** A Device Certificate's COSE_Sign1 in `[start, end)`; returns whether its mask lists 12. */
-function scanCertificateAt(bytes: Uint8Array, start: number, end: number): boolean {
-  const a = arrayHead(bytes, start, end, "the certificate");
-  if (a.value !== 4) fail("the certificate is not a four-element COSE_Sign1");
-  let p = bstr(bytes, a.next, end)[1]; // protected header
-  p = skip(bytes, p, end); // unprotected header
-  const [ps, pe] = bstr(bytes, p, end);
-  const managing = scanPayload(bytes, ps, pe);
-  p = bstr(bytes, pe, end, 64)[1];
-  if (p !== end) fail("bytes follow the certificate");
-  return managing;
+/** The device descriptor at `pos`: the closed map {0, 1, 2} of 32-byte strings (§7, §7.3 rule 2). */
+function scanDescriptor(bytes: Uint8Array, pos: number, end: number): number {
+  const m = head(bytes, pos, end);
+  if (m.major !== 5 || m.value !== 3) fail("the descriptor is not a three-field map");
+  let p = m.next;
+  for (let key = 0; key < 3; key++) {
+    const k = head(bytes, p, end);
+    if (k.major !== 0 || k.value !== key) fail("the descriptor's keys are not 0, 1 and 2");
+    p = bstr(bytes, k.next, end, 32)[1];
+  }
+  return p;
 }
 
-/** Runs `locate`; a shape it does not expect is left to the full decoder (undefined). */
-function attempt<T>(locate: () => T): T | undefined {
-  try {
-    return locate();
-  } catch {
-    return undefined;
-  }
+function malformed(why: string): never {
+  throw new LfcpError("COSE_MALFORMED", `not a canonical LFCP COSE_Sign1 (scan): ${why}`);
 }
 
 /**
- * Checks the bounds of a standalone certificate's exact bytes. A COSE
- * envelope of another shape is left to parseSignedObject; the payload's
- * bounds are refused here.
+ * The payload range of the COSE_Sign1 in `[start, end)`, its envelope
+ * checked as parseSignedObject does (§10): a protected header of exactly
+ * {1: -8, 4: 32-byte kid}, the empty unprotected map, a present payload
+ * and a 64-byte signature. Nothing is decoded or copied.
+ */
+function envelope(bytes: Uint8Array, start: number, end: number): [number, number] {
+  const a = head(bytes, start, end);
+  if (a.major !== 4 || a.value !== 4) malformed("not a four-element array");
+  const [hs, he] = bstr(bytes, a.next, end);
+  const h = head(bytes, hs, he);
+  if (h.major !== 5 || h.value !== 2) malformed("protected header must be exactly {1: -8, 4: kid}");
+  const alg = head(bytes, h.next, he);
+  const algValue = head(bytes, alg.next, he);
+  if (alg.major !== 0 || alg.value !== 1 || algValue.major !== 1 || algValue.value !== 7)
+    malformed("alg must be -8 (EdDSA)");
+  const kid = head(bytes, algValue.next, he);
+  if (kid.major !== 0 || kid.value !== 4)
+    malformed("protected header must be exactly {1: -8, 4: kid}");
+  const k = head(bytes, kid.next, he);
+  if (k.major !== 2 || k.value !== 32 || k.next + 32 !== he)
+    malformed("kid must be a 32-byte Principal ID");
+  const u = head(bytes, he, end);
+  if (u.major !== 5 || u.value !== 0) malformed("unprotected header must be the empty map");
+  const payload = bstr(bytes, u.next, end);
+  const sig = head(bytes, payload[1], end);
+  if (sig.major !== 2 || sig.value !== 64) malformed("signature must be 64 bytes");
+  if (sig.next + 64 !== end) fail("bytes follow the signature");
+  return payload;
+}
+
+/** A Device Certificate's COSE_Sign1 in `[start, end)`; returns whether its mask lists 12. */
+function scanCertificateAt(bytes: Uint8Array, start: number, end: number): boolean {
+  const [ps, pe] = envelope(bytes, start, end);
+  return scanPayload(bytes, ps, pe);
+}
+
+/**
+ * Checks the envelope and the bounds of a standalone certificate on its
+ * exact bytes, before parseSignedObject decodes anything.
  */
 export function scanDeviceCertificate(bytes: Uint8Array): void {
-  const end = bytes.length;
-  const payload = attempt(() => {
-    const a = head(bytes, 0, end);
-    if (a.major !== 4 || a.value !== 4) return undefined;
-    const p = skip(bytes, bstr(bytes, a.next, end)[1], end);
-    return bstr(bytes, p, end);
-  });
-  if (payload !== undefined) scanPayload(bytes, payload[0], payload[1]);
+  scanCertificateAt(bytes, 0, bytes.length);
 }
 
 /** A certificate-chain at `pos`: 1–4 certificates, a managing leaf at most three deep. */
@@ -178,52 +210,44 @@ function scanChainAt(bytes: Uint8Array, pos: number, end: number): number {
   return p;
 }
 
+/**
+ * The value of unsigned key `key` in the map at `pos`, walking every
+ * entry without decoding it (the decoder checks order and duplicates).
+ */
+function field(bytes: Uint8Array, pos: number, end: number, key: number): number | undefined {
+  const m = head(bytes, pos, end);
+  if (m.major !== 5) fail("a map was expected");
+  if (m.value * 2 > end - m.next) fail("truncated");
+  let p = m.next;
+  let found: number | undefined;
+  for (let i = 0; i < m.value; i++) {
+    const k = head(bytes, p, end);
+    p = skip(bytes, p, end);
+    if (k.major === 0 && k.value === key) found = p;
+    p = skip(bytes, p, end);
+  }
+  return found;
+}
+
 /** The body key that holds a certificate chain, by Control Record type (§15, §23.3, §17.4). */
 const CHAIN_KEY: Readonly<Record<number, number>> = { 0: 5, 6: 2, 9: 1 };
 
 /**
- * Checks the bounds of the certificate chain a Control Record of type 0,
- * 6 or 9 carries, on its exact bytes. Anything that is not the expected
- * shape is left to the full decoder.
+ * Checks the envelope of a Control Record and the bounds of the
+ * certificate chain a record of type 0, 6 or 9 carries, on its exact
+ * bytes. Every refusal found is final: nothing is left to the decoder
+ * once the scan has seen it.
  */
 export function scanControlRecord(bytes: Uint8Array): void {
-  const end = bytes.length;
-  const found = attempt(() => {
-    const a = head(bytes, 0, end);
-    if (a.major !== 4 || a.value !== 4) return undefined;
-    const p = skip(bytes, bstr(bytes, a.next, end)[1], end);
-    const [ps, pe] = bstr(bytes, p, end);
-    const m = head(bytes, ps, pe);
-    if (m.major !== 5) return undefined;
-    let q = m.next;
-    let type: number | undefined;
-    let body: number | undefined;
-    for (let i = 0; i < m.value; i++) {
-      const k = head(bytes, q, pe);
-      q = skip(bytes, q, pe);
-      if (k.major === 0 && k.value === 3) {
-        const t = head(bytes, q, pe);
-        if (t.major === 0) type = t.value;
-      }
-      if (k.major === 0 && k.value === 5) {
-        // The body is the last field (keys sort ascending): never walk it here.
-        body = q;
-        break;
-      }
-      q = skip(bytes, q, pe);
-    }
-    const chainKey = type === undefined ? undefined : CHAIN_KEY[type];
-    if (chainKey === undefined || body === undefined) return undefined;
-    const b = head(bytes, body, pe);
-    if (b.major !== 5) return undefined;
-    let r = b.next;
-    for (let i = 0; i < b.value; i++) {
-      const k = head(bytes, r, pe);
-      r = skip(bytes, r, pe);
-      if (k.major === 0 && k.value === chainKey) return { at: r, end: pe };
-      r = skip(bytes, r, pe);
-    }
-    return undefined;
-  });
-  if (found !== undefined) scanChainAt(bytes, found.at, found.end);
+  const [ps, pe] = envelope(bytes, 0, bytes.length);
+  const typeAt = field(bytes, ps, pe, 3);
+  if (typeAt === undefined) return;
+  const t = head(bytes, typeAt, pe);
+  const chainKey = t.major === 0 ? CHAIN_KEY[t.value] : undefined;
+  if (chainKey === undefined) return;
+  const bodyAt = field(bytes, ps, pe, 5);
+  if (bodyAt === undefined) return;
+  if (head(bytes, bodyAt, pe).major !== 5) return; // the decoder names the wrong body type
+  const chainAt = field(bytes, bodyAt, pe, chainKey);
+  if (chainAt !== undefined) scanChainAt(bytes, chainAt, pe);
 }
