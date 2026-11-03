@@ -52,6 +52,8 @@ export interface DeviceBinding {
   readonly leafId: Hash32 | null;
   /** Device IDs of `chain[1..]`, nearest first; empty when the root issued the leaf. */
   readonly issuers: readonly PrincipalId[];
+  /** Accepted DEVICE_GRANT records whose leaf this device is (§17.4 rule 8: at most 8). */
+  readonly grantsAccepted: number;
 }
 
 /** §79 `Revocation` of an exact (root, device) pair; permanent (N5). */
@@ -74,13 +76,35 @@ export interface DeviceState {
   readonly devices: ReadonlyMap<string, DeviceBinding>;
   /** Revocations by `revocationKey(root, device)`. */
   readonly revoked: ReadonlyMap<string, DeviceRevocation>;
+  /**
+   * §17.4 rule 8, by root ID hex: the live Principals bound to the root,
+   * entries of `devices` whose pair is not in `revoked`. Every binding path
+   * adds (Genesis, transfer, Device Grant); a direct revocation releases.
+   */
+  readonly liveBound: ReadonlyMap<string, number>;
+  /** §17.5 rule 5, by root ID hex: revoked pairs (R, E) with `devices[E]` absent. */
+  readonly preemptive: ReadonlyMap<string, number>;
+  /** By device ID hex: the roots (hex) that revoked it while it was unbound. */
+  readonly preemptiveRoots: ReadonlyMap<string, ReadonlyMap<string, true>>;
 }
 
 export const EMPTY_DEVICE_STATE: DeviceState = Object.freeze({
   roles: PersistentMap.empty<DeviceRole>(),
   devices: PersistentMap.empty<DeviceBinding>(),
   revoked: PersistentMap.empty<DeviceRevocation>(),
+  liveBound: PersistentMap.empty<number>(),
+  preemptive: PersistentMap.empty<number>(),
+  preemptiveRoots: PersistentMap.empty<ReadonlyMap<string, true>>(),
 });
+
+/** §17.4 rule 8: live Principals bound to one root in a Resource. */
+export const MAX_LIVE_BOUND = 32;
+/** §17.4 rule 8: accepted Device Grants per (root, leaf) pair. */
+export const MAX_DEVICE_GRANTS = 8;
+/** §17.5 rule 5: pre-emptive revocations of unbound Principals per root. */
+export const MAX_PREEMPTIVE_REVOCATIONS = 64;
+
+const count = (map: ReadonlyMap<string, number>, key: string) => map.get(key) ?? 0;
 
 /** The key of `revoked` for the pair (root, device). */
 export const revocationKey = (root: PrincipalId, device: PrincipalId): string =>
@@ -291,6 +315,18 @@ export function authorizeDeviceGrant(
     )
       return deny("no consumed pairing approval names this leaf (§17.4 rule 7)");
   }
+  // Rule 8 (spec#2 bc03b0f): live bindings per root, grants per pair.
+  const fresh = body.chain.certificates.filter(
+    (c) => !state.devices.has(toHex(c.payload.device.principalId)),
+  ).length;
+  if (count(state.liveBound, toHex(root)) + fresh > MAX_LIVE_BOUND)
+    return deny(
+      `more than ${MAX_LIVE_BOUND} live devices would be bound to the root (§17.4 rule 8)`,
+    );
+  if ((existing?.grantsAccepted ?? 0) >= MAX_DEVICE_GRANTS)
+    return deny(
+      `the device has had ${MAX_DEVICE_GRANTS} Device Grants for its root (§17.4 rule 8)`,
+    );
   return ALLOW;
 }
 
@@ -319,31 +355,40 @@ export function authorizeDeviceRevoke(
     ownerAction(state, issuer) ||
     (bytesEqual(issuer, device) && body.reason === 0n && binding?.registered === true && !existing);
   if (!allowed) return deny("the issuer may not revoke this device (§17.5 rule 4)");
-  // Rule 5.
+  // Rule 5 (spec#2 bc03b0f): only a pre-emptive revocation is limited.
   if (existing) return deny("the pair is already revoked (§17.5 rule 5)");
+  if (binding === undefined && count(state.preemptive, toHex(root)) >= MAX_PREEMPTIVE_REVOCATIONS)
+    return deny(
+      `the root has ${MAX_PREEMPTIVE_REVOCATIONS} revocations of unbound Principals (§17.5 rule 5)`,
+    );
   return ALLOW;
 }
 
 // ---------------------------------------------------------------------------
 // Effects (applyRecord)
 
+/** The device part of a state, with the descriptors bindChain records. */
+type BindingState = DeviceState & Pick<ControlState, "principals">;
+
 /**
  * Binds every device of an accepted chain to its root and records the
- * leaf's chain (§17.4 rule 8, §15, §23.3). Intermediates keep their own
+ * leaf's chain (§17.4 rule 9, §15, §23.3). Intermediates keep their own
  * registration and current chains. `keepSameLeaf`: a transfer commit
  * leaves a leaf registered with the same certificate ID unchanged.
+ * `grant`: a Device Grant, which counts towards its leaf's eight.
  */
 export function bindChain(
-  state: DeviceState & Pick<ControlState, "principals">,
+  state: BindingState,
   chain: CertificateChain,
   inScope: boolean,
   keepSameLeaf: boolean,
-): Pick<ControlState, "roles" | "devices" | "principals"> {
-  let { roles, devices, principals } = state;
+  grant = false,
+): BindingState {
+  let { roles, devices, principals, liveBound, preemptive } = state;
   for (const c of chain.certificates) {
     const p = c.payload;
     const id = toHex(p.device.principalId);
-    if (!devices.has(id))
+    if (!devices.has(id)) {
       devices = put(
         devices,
         id,
@@ -356,21 +401,29 @@ export function bindChain(
           chain: null,
           leafId: null,
           issuers: Object.freeze([]),
+          grantsAccepted: 0,
         }),
       );
+      // A chain never holds a revoked pair (§7.3 step 4): the binding is live.
+      liveBound = put(liveBound, toHex(p.root), count(liveBound, toHex(p.root)) + 1);
+      // Its pre-emptive revocations no longer count: it is bound now.
+      for (const r of state.preemptiveRoots.get(id)?.keys() ?? [])
+        preemptive = put(preemptive, r, count(preemptive, r) - 1);
+    }
     if (roles.get(id) !== "device") roles = put(roles, id, "device");
     if (principals.get(id) !== p.device) principals = put(principals, id, p.device);
   }
   const leafKey = toHex(chain.leaf.payload.device.principalId);
   const leaf = devices.get(leafKey) as DeviceBinding;
+  const grantsAccepted = leaf.grantsAccepted + (grant ? 1 : 0);
   if (
-    !(
-      keepSameLeaf &&
-      leaf.registered &&
-      leaf.leafId !== null &&
-      bytesEqual(leaf.leafId, chain.leaf.id)
-    )
-  )
+    keepSameLeaf &&
+    leaf.registered &&
+    leaf.leafId !== null &&
+    bytesEqual(leaf.leafId, chain.leaf.id)
+  ) {
+    if (grant) devices = put(devices, leafKey, Object.freeze({ ...leaf, grantsAccepted }));
+  } else
     devices = put(
       devices,
       leafKey,
@@ -380,9 +433,10 @@ export function bindChain(
         leafId: chain.leaf.id,
         issuers: chain.issuers,
         registered: leaf.registered || inScope,
+        grantsAccepted,
       }),
     );
-  return { roles, devices, principals };
+  return { ...state, roles, devices, principals, liveBound, preemptive };
 }
 
 /** The in-scope result of an accepted DEVICE_GRANT's chain at the state it was accepted on. */
@@ -391,13 +445,19 @@ export const grantInScope = (state: ControlState, body: DeviceGrantBody): boolea
   return a.valid && a.inScope;
 };
 
-/** Records the revocation of an accepted DEVICE_REVOKE (§17.5 rule 6). */
+/**
+ * Records the revocation of an accepted DEVICE_REVOKE (§17.5 rule 6): a
+ * bound device releases its live place (§17.4 rule 8), an unbound one
+ * spends one of the root's pre-emptive revocations (§17.5 rule 5).
+ */
 export function recordRevocation(
   state: DeviceState,
   record: ControlRecord,
   body: DeviceRevokeBody,
-): ReadonlyMap<string, DeviceRevocation> {
-  return put(
+): Pick<DeviceState, "revoked" | "liveBound" | "preemptive" | "preemptiveRoots"> {
+  const root = toHex(body.root);
+  const device = toHex(body.device);
+  const revoked = put(
     state.revoked,
     revocationKey(body.root, body.device),
     Object.freeze({
@@ -408,6 +468,23 @@ export function recordRevocation(
       revokedBy: controlRecordId(record.signed.id),
     }),
   );
+  if (state.devices.has(device))
+    return {
+      revoked,
+      liveBound: put(state.liveBound, root, count(state.liveBound, root) - 1),
+      preemptive: state.preemptive,
+      preemptiveRoots: state.preemptiveRoots,
+    };
+  return {
+    revoked,
+    liveBound: state.liveBound,
+    preemptive: put(state.preemptive, root, count(state.preemptive, root) + 1),
+    preemptiveRoots: put(
+      state.preemptiveRoots,
+      device,
+      put(state.preemptiveRoots.get(device) ?? PersistentMap.empty<true>(), root, true),
+    ),
+  };
 }
 
 /** Assigns the `non-device` role (§79). */
