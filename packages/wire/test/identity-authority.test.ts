@@ -75,7 +75,9 @@ describe("Genesis by a device of the owner (§15)", () => {
     expect(f.state.roles.get(toHex(id(2)))).toBe("device");
     expect(ownerAction(f.state, id(2))).toBe(true);
     expect(hasAbility(f.state, id(2), 1n)).toBe(true); // owner/act overrides the mask
-    for (const code of [9n, 12n, 13n, 99n]) expect(hasAbility(f.state, id(2), code)).toBe(false);
+    // §80.1: owner/act confers 1-10 only, never invite/claim (11).
+    for (const code of [9n, 11n, 12n, 13n, 99n])
+      expect(hasAbility(f.state, id(2), code)).toBe(false);
     for (const [kind, mask, scope] of [
       [PERSONAL, [1], []],
       [SERVICE, [1], [RESOURCE]],
@@ -442,6 +444,26 @@ describe("grants, keys and transfers with devices (§17.2, §17.3, §25.2, §23.
     f.denied(3, capabilityGrant(7, [1]), /prove its authority through a parent/);
     f.push(1, capabilityGrant(1, [1], [1]));
     f.denied(2, capabilityGrant(7, [2], [], f.head), /not delegable under the parent/);
+  });
+});
+
+describe("invite/claim is never held by a device (§80.1, spec#2 1cfe51b)", () => {
+  it("is not conferred by mask code 11, even when the root holds an invitation", () => {
+    const f = new Fixture();
+    f.push(1, capabilityGrant(10, [1]));
+    f.push(1, capabilityGrant(10, [1, 11], [], undefined, 1));
+    f.register(10, 2, [1, 11]);
+    expect(hasAbility(f.state, id(10), ABILITY.INVITE_CLAIM)).toBe(true);
+    expect(hasAbility(f.state, id(2), ABILITY.INVITE_CLAIM)).toBe(false);
+    expect(hasAbility(f.state, id(2), ABILITY.DATA_READ)).toBe(true);
+    // The §25.2 invitation exception does not reach the device either.
+    const g = new Fixture();
+    g.push(1, capabilityGrant(10, [11], [], undefined, 1));
+    g.push(1, capabilityGrant(10, [2]));
+    g.register(10, 3, [2, 11]);
+    const a = canDistributeKey(g.state, id(1), id(3), dataEpoch(0n));
+    expect(a.allowed).toBe(false);
+    expect(canDistributeKey(g.state, id(1), id(10), dataEpoch(0n)).allowed).toBe(true);
   });
 });
 
