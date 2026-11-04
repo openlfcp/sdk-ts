@@ -101,4 +101,56 @@ describe("rotation recovery (review follow-up, IDENTITY-PROFILE-01 §8.3, §9.1�
     const mine = frontier.find((h) => bytesEqual(h.principalId, id(1)));
     expect([mine?.contiguous, mine?.extras]).toEqual([2n, []]);
   });
+
+  async function rootUnits() {
+    const w = await world(0);
+    const units = [...(w.server.hosted.get(toHex(w.I))?.units.values() ?? [])];
+    const at = (seq: bigint) =>
+      units.find((b) => parseDataUnit(b).payload.actorSeq === seq) as Uint8Array;
+    const chain = w.server.chain(w.I);
+    const dek = (await heldDeks(w.P.secrets, chain)).get("0");
+    const seal = (seq: bigint, prev: Uint8Array, text: string) =>
+      sealDataUnit(
+        {
+          resourceId: w.I,
+          dataEpoch: dataEpoch(0n),
+          actorSeq: seq as never,
+          prevDataUnitId: prev as never,
+          controlHead: chain.state.head,
+        },
+        new TextEncoder().encode(text),
+        dek as never,
+        w.P.installation.signer,
+      );
+    const channel = await w.P.network.connect(w.P.installation.signer, URL);
+    return { w, at, chain, seal, channel };
+  }
+  const contiguousOf = (
+    frontier: readonly {
+      principalId: Uint8Array;
+      contiguous: bigint;
+      extras: readonly unknown[];
+    }[],
+  ) => {
+    const mine = frontier.find((h) => bytesEqual(h.principalId, id(1)));
+    return [mine?.contiguous, mine?.extras];
+  };
+
+  test("12b.1: a stored unit and a fetched one at one sequence are both left out", async () => {
+    const { w, at, chain, seal, channel } = await rootUnits();
+    const stored = seal(3n, sha256(at(2n)), "stored");
+    const fetched = seal(3n, sha256(at(2n)), "fetched");
+    w.server.inject(w.I, fetched.bytes);
+    const frontier = await verifiedFrontier(channel, chain, {
+      units: [stored.bytes],
+      snapshot: [],
+    });
+    expect(contiguousOf(frontier)).toEqual([2n, []]);
+  });
+
+  test("12b.1: a unit naming an older unit than the actor's latest is not accepted", async () => {
+    const { w, at, chain, seal, channel } = await rootUnits();
+    w.server.inject(w.I, seal(3n, sha256(at(1n)), "skips 2").bytes);
+    expect(contiguousOf(await verifiedFrontier(channel, chain))).toEqual([2n, []]);
+  });
 });

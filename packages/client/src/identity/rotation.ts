@@ -9,7 +9,7 @@ import {
   resourceId,
   toHex,
 } from "@openlfcp/core";
-import { generateResourceDEK } from "@openlfcp/crypto";
+import { generateResourceDEK, sha256 } from "@openlfcp/crypto";
 import type { LfcpStorage } from "@openlfcp/storage";
 import {
   ABILITY,
@@ -27,7 +27,7 @@ import {
   parseDataUnit,
   rotateEpoch,
 } from "@openlfcp/wire";
-import { resourceSyncState } from "../outbound.js";
+import { snapshotFrontier } from "../outbound.js";
 import { loadControlChain } from "../storage.js";
 import {
   deliverKeys,
@@ -125,51 +125,70 @@ export function exposingRevocationsSince(chain: LinearChain): readonly ExposingR
 export async function verifiedFrontier(
   channel: IdentityChannel,
   chain: LinearChain,
-  local: HaveVector = [],
+  local: LocalAccepted = { units: [], snapshot: [] },
 ): Promise<HaveVector> {
   const R = chain.state.resourceId;
   const opened = await channel.open(R);
-  if (opened.kind === "nack") return local;
-  const ranges = opened.haves.flatMap((h) => {
-    const out = h.contiguous > 0n ? [{ actor: h.principalId, start: 1n, end: h.contiguous }] : [];
-    for (const [start, end] of h.ranges ?? []) out.push({ actor: h.principalId, start, end });
-    return out;
-  });
-  // Both units of an equivocation are excluded (W §26.2), whatever came first.
+  const ranges =
+    opened.kind === "nack"
+      ? []
+      : opened.haves.flatMap((h) => {
+          const out =
+            h.contiguous > 0n ? [{ actor: h.principalId, start: 1n, end: h.contiguous }] : [];
+          for (const [start, end] of h.ranges ?? []) out.push({ actor: h.principalId, start, end });
+          return out;
+        });
+  // The fetched and the locally stored units together: an equivocation between a
+  // stored unit and a fetched one excludes both, like one within the fetch (W §26.2).
+  const all = new Map<string, Uint8Array>();
+  for (const bytes of [...local.units, ...(await channel.dataUnits(R, ranges))])
+    all.set(toHex(sha256(bytes)), bytes);
   const units = withoutEquivocations(
     chain,
-    (await channel.dataUnits(R, ranges)).map((bytes) => ({ bytes, parsed: parseDataUnit(bytes) })),
+    [...all.values()].map((bytes) => ({ bytes, parsed: parseDataUnit(bytes) })),
   ).sort((a, b) => {
     const x = toHex(a.parsed.payload.actor);
     const y = toHex(b.parsed.payload.actor);
-    return x !== y
-      ? x < y
-        ? -1
-        : 1
-      : a.parsed.payload.actorSeq < b.parsed.payload.actorSeq
-        ? -1
-        : 1;
+    if (x !== y) return x < y ? -1 : 1;
+    return a.parsed.payload.actorSeq < b.parsed.payload.actorSeq ? -1 : 1;
   });
   const seen = new InMemorySeenUnits();
-  const accepted = new Map<string, Set<string>>();
-  let frontier: HaveVector = local;
+  // Per actor: the latest accepted unit (its ID and sequence).
+  const latest = new Map<string, { id: string; seq: bigint }>();
+  // Sequences covered by a verified Snapshot count as accepted (W §29.3).
+  let frontier: HaveVector = local.snapshot;
   for (const { bytes, parsed } of units) {
     const p = parsed.payload;
     const check = await checkDataUnit(chain, bytes, seen);
     if (check.kind !== "valid") continue;
-    // The actor's hash chain (W §26.2): a unit is accepted when it names an
-    // accepted unit of its actor, or none before the actor's first.
-    const mine = accepted.get(toHex(p.actor)) ?? new Set<string>();
+    const actor = toHex(p.actor);
+    const last = latest.get(actor);
+    const covered = hasSequence(local.snapshot, p.actor, p.actorSeq);
+    // The actor's hash chain (W §26.2): a unit is accepted when it names the
+    // actor's latest accepted unit, or none before the actor's first; across a
+    // Snapshot boundary whose unit is not held, the covered sequence just before.
+    const inSnapshot = local.snapshot.some((h) => bytesEqual(h.principalId, p.actor));
     const links =
-      p.prevDataUnitId === null
-        ? mine.size === 0 && !local.some((h) => bytesEqual(h.principalId, p.actor))
-        : mine.has(toHex(p.prevDataUnitId)) || hasSequence(local, p.actor, p.actorSeq - 1n);
+      covered ||
+      (p.prevDataUnitId === null
+        ? last === undefined && !inSnapshot
+        : last !== undefined && last.seq < p.actorSeq
+          ? last.id === toHex(p.prevDataUnitId) ||
+            (hasSequence(local.snapshot, p.actor, p.actorSeq - 1n) && last.seq < p.actorSeq - 1n)
+          : hasSequence(local.snapshot, p.actor, p.actorSeq - 1n));
     if (!links) continue;
-    mine.add(toHex(check.unitId));
-    accepted.set(toHex(p.actor), mine);
+    latest.set(actor, { id: toHex(check.unitId), seq: p.actorSeq });
     frontier = addSequence(frontier, p.actor, p.actorSeq);
   }
   return frontier;
+}
+
+/** This installation's stored units of a Resource and its verified Snapshots' coverage. */
+export interface LocalAccepted {
+  /** Every signature-valid unit the storage holds for the Resource (exact bytes). */
+  readonly units: readonly Uint8Array[];
+  /** The sequences verified Snapshots cover (W §29.3). */
+  readonly snapshot: HaveVector;
 }
 
 export type RotationStatus =
@@ -244,7 +263,7 @@ export async function rotateAfter(
         : "awaiting-rotation";
     },
     build: async (chain) => {
-      const frontier = await verifiedFrontier(o.channel, chain, await localHave(o, chain));
+      const frontier = await verifiedFrontier(o.channel, chain, await localAccepted(o, chain));
       const dek = (await getPendingDek(o.secrets, R, o.operation)) ?? generateResourceDEK();
       // The DEK before the record that commits to it (§9.1).
       await putPendingDek(o.secrets, R, o.operation, dek);
@@ -299,16 +318,21 @@ export async function rotateAfter(
  * stored accepted units and verified Snapshots, when the storage keeps them),
  * merged into the verified frontier (§8.3).
  */
-async function localHave(o: FlowOptions, chain: LinearChain): Promise<HaveVector> {
-  const s = o.storage as Partial<LfcpStorage>;
-  if (
-    s.dataUnits === undefined ||
-    s.outbound === undefined ||
-    s.syncState === undefined ||
-    s.snapshots === undefined
-  )
-    return [];
-  return (await resourceSyncState(s as LfcpStorage, chain.state.resourceId)).have;
+async function localAccepted(o: FlowOptions, chain: LinearChain): Promise<LocalAccepted> {
+  const st = o.storage as Partial<LfcpStorage>;
+  if (st.dataUnits === undefined || st.snapshots === undefined) return { units: [], snapshot: [] };
+  const R = chain.state.resourceId;
+  const units: Uint8Array[] = [];
+  for (const status of [
+    "merged",
+    "profile-pending",
+    "profile-held",
+    "profile-rejected",
+    "seen",
+    "held",
+  ] as const)
+    for (const u of await st.dataUnits.withStatus(R, status)) units.push(u.bytes);
+  return { units, snapshot: await snapshotFrontier(st as LfcpStorage, R) };
 }
 
 /**
