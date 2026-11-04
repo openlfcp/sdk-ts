@@ -42,6 +42,7 @@ interface CertificateFixture {
   readonly device: string;
   readonly issuer: string;
   readonly cose_sign1: Hex;
+  readonly payload_cbor: Hex;
   readonly certificate_id: Hex;
   readonly payload_digest: Hex;
 }
@@ -102,9 +103,20 @@ export function bytesOfRef(ref: Ref): Uint8Array {
 /** The record bytes of a control_record case. */
 export const recordOf = (id: string): Uint8Array => fromHex(wireCase(id).inputs.cose_sign1.hex);
 
-/** The chain a case was decided on (its context records). */
+/** The chain a case was decided on: its context records, a record set, the records after it. */
 export function contextOf(id: string): Uint8Array[] {
-  return (wireCase(id).context?.records ?? []).map(bytesOfRef);
+  const ctx = wireCase(id).context as
+    | { records?: readonly Ref[]; record_set?: string; records_after_set?: readonly Ref[] }
+    | undefined;
+  const set =
+    ctx?.record_set === undefined
+      ? []
+      : (wire.fixtures.record_sets[ctx.record_set].records as Hex[]).map((r) => fromHex(r.hex));
+  return [
+    ...(ctx?.records ?? []).map(bytesOfRef),
+    ...set,
+    ...(ctx?.records_after_set ?? []).map(bytesOfRef),
+  ];
 }
 
 /** The chain after an accepted control_record case: its context and its own record. */
