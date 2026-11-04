@@ -642,6 +642,17 @@ export function withoutEquivocations<
 }
 
 /**
+ * What became of a flow's unit of display data in the Identity Resource:
+ * none needed, written (`committed-own`), refused by the coordinator with
+ * `code`, or not sent because the coordinator was unreachable. Anything but
+ * `none` and `committed-own` leaves the flow's operation open.
+ */
+export interface DocumentWrite {
+  readonly state: "none" | "committed-own" | "refused" | "unreachable";
+  readonly code?: string;
+}
+
+/**
  * Sends one Data Unit durably (§9.1): its exact bytes are persisted before
  * they are sent and re-sent as they are after a restart, so an actor
  * sequence is never used twice (W §26.2). A coordinator answers a unit it

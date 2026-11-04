@@ -20,6 +20,7 @@ import {
   signControlRecord,
 } from "@openlfcp/wire";
 import {
+  type DocumentWrite,
   deliverKeys,
   fetchDeks,
   genesisOwner,
@@ -164,11 +165,6 @@ export function reconcileRecord(
         { type: "DEVICE_GRANT", root: step.root, chain: step.chain },
         signer,
       ).bytes;
-}
-
-export interface DocumentWrite {
-  readonly state: "none" | "committed-own" | "refused";
-  readonly code?: string;
 }
 
 export interface TargetReconciliation {

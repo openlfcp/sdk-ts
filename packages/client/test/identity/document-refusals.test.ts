@@ -18,9 +18,11 @@ import {
 } from "../../src/identity/pairing.js";
 import { requestPairing } from "../../src/identity/pairing-request.js";
 import { reconcileDevices } from "../../src/identity/reconcile.js";
+import { revokeDevice } from "../../src/identity/revocation.js";
+import { FakeIdentityDocument } from "./fake-document.js";
 import type { MemoryCoordinator, UploadEvent } from "./memory-coordinator.js";
 import { party, URL } from "./support.js";
-import { type Node, node, world } from "./world.js";
+import { type Node, node, pair, world } from "./world.js";
 
 const id = (n: number) => party(n).signer.descriptor.principalId as PrincipalId;
 
@@ -167,5 +169,75 @@ describe("reconciliation: the display unit of §7.1 step 4", { timeout: 60_000 }
     const again = await reconcileDevices({ ...w.P, only: [w.I] });
     expect(again.document).toEqual({ state: "committed-own" });
     expect((await documentOf(w.P, w.I)).devices().has(key)).toBe(true);
+  });
+});
+
+describe("revocation: the revoked flag of §8.2", { timeout: 60_000 }, () => {
+  test("refused as stale: written again on the current state", async () => {
+    const w = await world(0);
+    await pair(w, w.P, 2, "full");
+    nackUnits(w.server, id(1), w.I, "STALE_DATA_EPOCH", 1);
+    const r = await revokeDevice({ ...w.P, device: id(2), reason: 0n });
+    w.server.fault = () => undefined;
+    if (r.kind !== "revoked") throw new Error(r.kind);
+    expect(r.document).toEqual({ state: "committed-own" });
+    expect((await documentOf(w.P, w.I)).devices().get(principalRefOf(id(2)))?.revoked).toBe(true);
+  });
+
+  test("refused otherwise: reported, the operation open; resumed, the flag is written", async () => {
+    const w = await world(0);
+    await pair(w, w.P, 2, "full");
+    nackUnits(w.server, id(1), w.I, "AUTHORIZATION_FAILED");
+    const r = await revokeDevice({ ...w.P, device: id(2), reason: 0n });
+    w.server.fault = () => undefined;
+    if (r.kind !== "revoked") throw new Error(r.kind);
+    expect(r.document).toEqual({ state: "refused", code: "AUTHORIZATION_FAILED" });
+    expect((await new OperationJournal(w.P.storage).load(r.operation)).status).toBe("open");
+    expect((await documentOf(w.P, w.I)).devices().get(principalRefOf(id(2)))?.revoked).toBe(
+      undefined,
+    );
+
+    const again = await revokeDevice({ ...w.P, device: id(2), reason: 0n, operation: r.operation });
+    if (again.kind !== "revoked") throw new Error(again.kind);
+    expect(again.document).toEqual({ state: "committed-own" });
+    expect((await new OperationJournal(w.P.storage).load(r.operation)).status).toBe("done");
+    expect((await documentOf(w.P, w.I)).devices().get(principalRefOf(id(2)))?.revoked).toBe(true);
+  });
+
+  test("unreachable: the revocation goes on to the roster, the flag reported unwritten", async () => {
+    const w = await world(1);
+    await pair(w, w.P, 2, "full");
+    let lost = false;
+    w.server.fault = (e) => {
+      if (
+        lost ||
+        e.op !== "data-unit" ||
+        !bytesEqual(e.signer.descriptor.principalId, id(1)) ||
+        !bytesEqual(e.resource, w.I)
+      )
+        return undefined;
+      lost = true;
+      return "drop-request";
+    };
+    const r = await revokeDevice({ ...w.P, device: id(2), reason: 0n });
+    w.server.fault = () => undefined;
+    if (r.kind !== "revoked") throw new Error(r.kind);
+    expect(r.document).toEqual({ state: "unreachable" });
+    expect(r.results.map((x) => x.revoke)).toEqual(["revoked", "revoked"]);
+    expect((await new OperationJournal(w.P.storage).load(r.operation)).status).toBe("open");
+  });
+
+  test("any other error of the display write is thrown, not dropped", async () => {
+    const w = await world(0);
+    await pair(w, w.P, 2, "full");
+    class Broken extends FakeIdentityDocument {
+      override write(): Uint8Array {
+        throw new Error("the document is broken");
+      }
+    }
+    const P = { ...w.P, document: () => new Broken() };
+    await expect(revokeDevice({ ...P, device: id(2), reason: 0n })).rejects.toThrow(
+      "the document is broken",
+    );
   });
 });

@@ -11,6 +11,7 @@ export {
   selfRegistrationRecord,
 } from "./accept.js";
 export {
+  type DocumentWrite,
   deliverKeys,
   extendChain,
   fetchDeks,

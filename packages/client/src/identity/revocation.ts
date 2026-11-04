@@ -16,6 +16,7 @@ import {
   validateControlChain,
 } from "@openlfcp/wire";
 import {
+  type DocumentWrite,
   fetchDeks,
   genesisOwner,
   IdentityConflict,
@@ -234,6 +235,12 @@ export type RevokeDeviceResult =
       readonly kind: "revoked";
       readonly operation: string;
       readonly results: readonly RevocationResult[];
+      /**
+       * §8.2 display: the device's `revoked` flag in the Identity Resource.
+       * Refused or unreachable leaves the operation open; resuming it
+       * writes the flag again.
+       */
+      readonly document: DocumentWrite;
     }
   /** The revoker's chain passes through the device: obtain a fresh chain first (§8.1). */
   | { readonly kind: "self-dependent" }
@@ -351,8 +358,10 @@ export async function revokeDevice(
       return { kind: "superseded", operation };
     }
     // §8.2: display only.
-    if (!selfRetire && (first.revoke === "revoked" || first.revoke === "complete"))
-      await markRevoked(o, channel, journal, operation, target.resource, o.device);
+    const document: DocumentWrite =
+      !selfRetire && (first.revoke === "revoked" || first.revoke === "complete")
+        ? await markRevoked(o, channel, journal, operation, target.resource, o.device)
+        : { state: "none" };
     for (const t of roster) {
       try {
         const c = await pool.get(o.installation.signer, t.url);
@@ -369,15 +378,18 @@ export async function revokeDevice(
         else throw e;
       }
     }
-    const open = results.some(
-      (r) =>
-        r.revoke === "unreachable" ||
-        r.revoke === "conflict" ||
-        r.rotation?.status === "awaiting-key-holder" ||
-        r.rotation?.status === "unreachable",
-    );
+    const open =
+      document.state === "refused" ||
+      document.state === "unreachable" ||
+      results.some(
+        (r) =>
+          r.revoke === "unreachable" ||
+          r.revoke === "conflict" ||
+          r.rotation?.status === "awaiting-key-holder" ||
+          r.rotation?.status === "unreachable",
+      );
     await journal.setStatus(operation, open ? "open" : "done");
-    return { kind: "revoked", operation, results: Object.freeze(results) };
+    return { kind: "revoked", operation, results: Object.freeze(results), document };
   } catch (e) {
     if (e instanceof IdentityUnavailable)
       return { kind: "unavailable", operation, reason: e.message };
@@ -440,7 +452,13 @@ async function retireElsewhere(
   }
   const open = results.some((r) => r.revoke === "unreachable");
   await journal.setStatus(op.id, open ? "open" : "done");
-  return { kind: "revoked", operation: op.id, results: Object.freeze(results) };
+  // A self-retirement writes no display flag (§8.2).
+  return {
+    kind: "revoked",
+    operation: op.id,
+    results: Object.freeze(results),
+    document: { state: "none" },
+  };
 }
 
 async function markRevoked(
@@ -450,34 +468,50 @@ async function markRevoked(
   operation: string,
   I: ResourceId,
   device: PrincipalId,
-): Promise<void> {
-  const chain = await syncChain(o.storage, channel, I);
-  const doc = o.document(I, genesisOwner(chain));
-  const deks = await fetchDeks(o.storage, o.secrets, channel, chain, o.installation);
-  const load = await loadIdentityDocument({ channel, chain, deks, doc });
+): Promise<DocumentWrite> {
   const key = principalRefOf(device);
-  const entry = doc.devices().get(key);
-  if (entry === undefined || entry.revoked === true) return;
-  // The device's missing_keys hint is written only by the device (§3 AI5).
-  const { missing_keys: _hint, ...display } = entry;
+  /** I's current state, and the device's entry as a flag to write, if any. */
+  const current = async () => {
+    const chain = await syncChain(o.storage, channel, I);
+    const doc = o.document(I, genesisOwner(chain));
+    const deks = await fetchDeks(o.storage, o.secrets, channel, chain, o.installation);
+    const load = await loadIdentityDocument({ channel, chain, deks, doc });
+    const entry = doc.devices().get(key);
+    return { chain, doc, deks, load, entry };
+  };
   try {
-    await runUnitPhase(channel, journal, operation, {
+    const { entry } = await current();
+    if (entry === undefined || entry.revoked === true) return { state: "none" };
+    // Built on the current state of I (a rotation after the revocation makes an
+    // earlier unit stale, W §19.1); a resumed operation writes a refused flag again.
+    const unit = await runUnitPhase(channel, journal, operation, {
       id: "display",
       resource: I,
-      build: () =>
-        sealIdentityUnit({
+      rebuildOn: ["STALE_DATA_EPOCH"],
+      rebuildRefused: true,
+      build: async () => {
+        const now = await current();
+        if (now.entry === undefined) throw new Error("the device entry is gone");
+        // The device's missing_keys hint is written only by the device (§3 AI5).
+        const { missing_keys: _hint, ...display } = now.entry;
+        return sealIdentityUnit({
           storage: o.storage,
-          chain,
-          deks,
+          chain: now.chain,
+          deks: now.deks,
           signer: o.installation.signer,
-          doc,
-          latest: load.latest,
+          doc: now.doc,
+          latest: now.load.latest,
           intents: [{ intent: "device.put", key, entry: { ...display, revoked: true } }],
-        }),
+        });
+      },
     });
+    return unit.state === "committed-own"
+      ? { state: "committed-own" }
+      : { state: "refused", code: unit.code ?? "refused" };
   } catch (e) {
-    // Display data only (§4 rule 5): a refused or impossible write is not an error of the revocation.
-    if (e instanceof IdentityUnavailable) throw e;
+    // The revocation stands without its display flag; anything else is an error.
+    if (e instanceof IdentityUnavailable) return { state: "unreachable" };
+    throw e;
   }
 }
 
