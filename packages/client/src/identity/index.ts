@@ -115,6 +115,13 @@ export {
   recordSeq,
 } from "./phases.js";
 export {
+  planReconciliation,
+  type ReconcileStep,
+  reconcileDevices,
+  reconcileRecord,
+  type TargetReconciliation,
+} from "./reconcile.js";
+export {
   type CreatedIdentityResource,
   type CreateIdentityResourceOptions,
   createIdentityResource,
