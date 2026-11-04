@@ -197,9 +197,11 @@ export async function reconcileDevices(
   readonly operation: string;
   readonly targets: readonly TargetReconciliation[];
   /**
-   * Step 4's unit of display data in `I`: not needed (`none`), written, or
-   * refused with `code`. A refused unit leaves the operation open; the next
-   * run proposes the missing entries again.
+   * Step 4's unit of display data in `I`: not needed (`none`), written,
+   * found written by another manager when built (`complete`, nothing sent),
+   * or refused with `code`. A refused unit leaves this operation open.
+   * Reconciliation has no resume: a later call is a new operation that
+   * proposes the entries still missing then, and does not close this one.
    */
   readonly document: DocumentWrite;
 }> {
@@ -283,6 +285,9 @@ export async function reconcileDevices(
           const deks = await fetchDeks(o.storage, o.secrets, channel, now, o.installation);
           const fresh = o.document(target.resource, R);
           const loaded = await loadIdentityDocument({ channel, chain: now, deks, doc: fresh });
+          // Another manager may have written the entries since the first read (§7.1).
+          const intents = displayIntents(now, fresh, R);
+          if (intents.length === 0) return null;
           return sealIdentityUnit({
             storage: o.storage,
             chain: now,
@@ -290,7 +295,7 @@ export async function reconcileDevices(
             signer: me,
             doc: fresh,
             latest: loaded.latest,
-            intents: displayIntents(now, fresh, R),
+            intents,
           });
         },
       });

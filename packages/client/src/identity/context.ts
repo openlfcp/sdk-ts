@@ -658,12 +658,13 @@ export function withoutEquivocations<
 
 /**
  * What became of a flow's unit of display data in the Identity Resource:
- * none needed, written (`committed-own`), refused by the coordinator with
- * `code`, or not sent because the coordinator was unreachable. Anything but
- * `none` and `committed-own` leaves the flow's operation open.
+ * none needed, written (`committed-own`), found already written by another
+ * writer when the unit was built (`complete`, nothing sent), refused by the
+ * coordinator with `code`, or not sent because the coordinator was
+ * unreachable. `refused` and `unreachable` leave the flow's operation open.
  */
 export interface DocumentWrite {
-  readonly state: "none" | "committed-own" | "refused" | "unreachable";
+  readonly state: "none" | "committed-own" | "complete" | "refused" | "unreachable";
   readonly code?: string;
 }
 
@@ -680,7 +681,12 @@ export async function runUnitPhase(
   spec: {
     readonly id: string;
     readonly resource: ResourceId;
-    readonly build: () => Promise<Uint8Array>;
+    /**
+     * The unit to send, built on the current state; null when that state
+     * already holds the phase's effect, written by another hand: the phase is
+     * then `complete` and nothing is sent.
+     */
+    readonly build: () => Promise<Uint8Array | null>;
     /**
      * Refusals after which the phase's intent is written again as a new unit
      * on the current state, e.g. STALE_DATA_EPOCH after a rotation (W §19.1);
@@ -695,10 +701,11 @@ export async function runUnitPhase(
      */
     readonly rebuildRefused?: boolean;
   },
-): Promise<{ readonly state: "committed-own" | "refused"; readonly code?: string }> {
+): Promise<{ readonly state: "committed-own" | "complete" | "refused"; readonly code?: string }> {
   for (let attempt = 0; ; attempt++) {
     const before = phaseOf(await journal.load(operation), spec.id);
     if (before?.state === "committed-own") return { state: "committed-own" };
+    if (before?.state === "complete") return { state: "complete" };
     const retry =
       before?.state === "refused" &&
       before.code !== undefined &&
@@ -708,18 +715,32 @@ export async function runUnitPhase(
     let bytes: Uint8Array;
     if (before?.bytes !== undefined && !retry) bytes = fromHex(before.bytes);
     else {
-      bytes = await spec.build();
+      const built = await spec.build();
+      const facts =
+        before?.bytes !== undefined && retry
+          ? { facts: { ...before.facts, [`stale${attempt}`]: before.bytes } }
+          : before?.facts === undefined
+            ? {}
+            : { facts: before.facts };
+      if (built === null) {
+        // Another hand wrote the effect on the state the unit would build on (§9.2).
+        await journal.putPhase(operation, {
+          id: spec.id,
+          kind: "unit",
+          resource: toHex(spec.resource),
+          state: "complete",
+          ...facts,
+        });
+        return { state: "complete" };
+      }
+      bytes = built;
       await journal.putPhase(operation, {
         id: spec.id,
         kind: "unit",
         resource: toHex(spec.resource),
         state: "pending",
         bytes: toHex(bytes),
-        ...(before?.bytes !== undefined && retry
-          ? { facts: { ...before.facts, [`stale${attempt}`]: before.bytes } }
-          : before?.facts === undefined
-            ? {}
-            : { facts: before.facts }),
+        ...facts,
       });
     }
     const answer = await channel.putDataUnit(spec.resource, bytes);
