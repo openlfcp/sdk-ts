@@ -1,5 +1,6 @@
-import { bytesEqual, type ControlRecordId, type ResourceId } from "@openlfcp/core";
+import { bytesEqual, type ControlRecordId, type ResourceId, toHex } from "@openlfcp/core";
 import { ABILITY, hasAbility, revokedReaderPrefix, validateControlChain } from "@openlfcp/wire";
+import { setWriteBarrier } from "../storage.js";
 import type { FlowOptions } from "./devices.js";
 import { ChannelPool, IdentityRefused, IdentityUnavailable } from "./network.js";
 
@@ -37,6 +38,24 @@ export type RevocationStatus =
   | { readonly kind: "unreachable"; readonly reason: string };
 
 export async function revocationStatus(
+  o: FlowOptions & { readonly resource: ResourceId; readonly url: string },
+): Promise<RevocationStatus> {
+  const status = await observe(o);
+  // §8.6: in both states the device creates no Data Unit for the Resource; the
+  // barrier is durable, so a restart on an old chain cannot write either.
+  if (status.kind === "access-refused")
+    await setWriteBarrier(o.storage, o.resource, { state: "access-refused", reason: status.code });
+  else if (status.kind === "revocation-proven")
+    await setWriteBarrier(o.storage, o.resource, {
+      state: "revocation-proven",
+      record: toHex(status.record),
+      reason: String(status.reason),
+    });
+  else if (status.kind === "active") await setWriteBarrier(o.storage, o.resource, null);
+  return status;
+}
+
+async function observe(
   o: FlowOptions & { readonly resource: ResourceId; readonly url: string },
 ): Promise<RevocationStatus> {
   const me = o.installation.signer;

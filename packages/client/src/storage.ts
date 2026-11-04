@@ -406,6 +406,60 @@ export async function createQueuedDataUnit<T>(
   );
 }
 
+const BARRIER = "identity-write-barrier:";
+
+/**
+ * The write barrier of a Resource (IDENTITY-PROFILE-01 §8.6): set once this
+ * device has evidence that it lost access there ("access refused") or that
+ * it was revoked ("revocation proven"). While it is set, the device creates
+ * no Data Unit for that Resource; the local replica stays readable and
+ * unsent work stays exportable. Evidence that the device is active again
+ * clears it.
+ */
+export interface WriteBarrier {
+  readonly state: "access-refused" | "revocation-proven";
+  /** The revoking DEVICE_REVOKE (hex), when proven. */
+  readonly record?: string;
+  readonly reason?: string;
+}
+
+export async function writeBarrier(
+  storage: Pick<LfcpStorage, "localMarks">,
+  resource: ResourceId,
+): Promise<WriteBarrier | undefined> {
+  const v = await storage.localMarks.get(`${BARRIER}${toHex(resource)}`);
+  return v === undefined ? undefined : (JSON.parse(v) as WriteBarrier);
+}
+
+export async function setWriteBarrier(
+  storage: Pick<LfcpStorage, "commit">,
+  resource: ResourceId,
+  barrier: WriteBarrier | null,
+): Promise<void> {
+  const r = await storage.commit([
+    {
+      op: "put-local-mark",
+      key: `${BARRIER}${toHex(resource)}`,
+      value: barrier === null ? null : JSON.stringify(barrier),
+    },
+  ]);
+  if (!r.ok) throw new Error(`the write barrier was not stored: ${r.reason}`);
+}
+
+/** Refuses to create a Data Unit behind a write barrier (§8.6), when the storage keeps local marks. */
+export async function checkWriteBarrier(
+  storage: Partial<Pick<LfcpStorage, "localMarks">>,
+  resource: ResourceId,
+): Promise<void> {
+  if (storage.localMarks === undefined) return;
+  const b = await writeBarrier(storage as Pick<LfcpStorage, "localMarks">, resource);
+  if (b !== undefined)
+    throw new LfcpError(
+      "AUTHORIZATION_FAILED",
+      `this device must not write to the Resource: ${b.state} (IDENTITY-PROFILE-01 §8.6)`,
+    );
+}
+
 async function createQueuedDataUnitNow<T>(
   storage: Pick<LfcpStorage, "actorSequences" | "commit" | "dataUnits">,
   options: Parameters<typeof createQueuedDataUnit<T>>[1],
@@ -414,6 +468,7 @@ async function createQueuedDataUnitNow<T>(
   actor: PrincipalId,
 ): Promise<CreatedDataUnit> {
   const { onCreated, previousUnitId, ...create } = options;
+  await checkWriteBarrier(storage as Partial<LfcpStorage>, resource);
   const latest = await latestAcceptedOwnUnit(storage, resource, actor);
   // §26.2: a null previous only when the writer holds no own unit as
   // accepted (before its first, or after a first that went stale); while it
@@ -502,6 +557,7 @@ export async function commitOperation<T>(
     }
     const { onCreated, operationId, intents, values, affectedNodeIds, modelRevision, ...create } =
       options;
+    await checkWriteBarrier(storage, resource);
     void intents;
     const first = await latestAcceptedOwnUnit(storage, resource, actor);
     const created: CreatedDataUnit[] = [];
