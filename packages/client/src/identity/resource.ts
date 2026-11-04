@@ -14,7 +14,7 @@ import { signControlRecord, validateControlChain } from "@openlfcp/wire";
 import { createDataUnit } from "../data-unit.js";
 import { loadControlChain } from "../storage.js";
 import {
-  heldDeks,
+  fetchDeks,
   type IdentityStorage,
   type Installation,
   loadIdentityDocument,
@@ -280,7 +280,7 @@ export async function resumeIdentityCreation(
     await loadIdentityDocument({
       channel,
       chain,
-      deks: await heldDeks(options.secrets, chain),
+      deks: await fetchDeks(options.storage, options.secrets, channel, chain, options.installation),
       doc: document,
     });
     return { kind: "created", identity: I, chain, document, operation };
