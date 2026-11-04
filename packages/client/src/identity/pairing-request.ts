@@ -42,8 +42,13 @@ import {
   syncChain,
 } from "./context.js";
 import type { FlowOptions } from "./devices.js";
-import { IDENTITY_PROFILE, principalRefOf, resourceRef } from "./document.js";
-import { newOperationId, OperationJournal, pairingSecretRef } from "./journal.js";
+import {
+  IDENTITY_PROFILE,
+  type PairingRequestValue,
+  principalRefOf,
+  resourceRef,
+} from "./document.js";
+import { newOperationId, OperationJournal, pairingSecretRef, phaseOf } from "./journal.js";
 import {
   ChannelPool,
   IDENTITY_EXTENSION,
@@ -119,7 +124,25 @@ export async function requestPairing(o: RequestPairingOptions): Promise<RequestP
   const B = o.installation.signer.descriptor;
   const pool = new ChannelPool(o.network);
   const journal = new OperationJournal(o.storage);
+  let operation: string | undefined;
   try {
+    // A request already journaled for this session and installation is resumed (§9.1).
+    const open = (await journal.list({ kind: "pairing-request", status: "open" })).find(
+      (op) =>
+        op.intent.pairingDevice === toHex(J.descriptor.principalId) &&
+        op.intent.device === toHex(B.principalId),
+    );
+    if (open !== undefined) {
+      operation = open.id;
+      const sent = await sendRequest(o, pool, open.id);
+      if (sent !== "committed-own") return { kind: "refused", operation, code: sent.code };
+      return {
+        kind: "requested",
+        operation,
+        identity: I,
+        fingerprint: deviceFingerprint(B.principalId),
+      };
+    }
     const channel = await pool.get(J, url);
     const chain = await syncChain(o.storage, channel, I);
     const R = genesisOwner(chain);
@@ -134,7 +157,7 @@ export async function requestPairing(o: RequestPairingOptions): Promise<RequestP
     const pairing: Installation = { signer: J, agreement: link.secret.agreementKey };
     const deks = await fetchDeks(o.storage, o.secrets, channel, chain, pairing);
     const doc = o.document(I, R);
-    const load = await loadIdentityDocument({ channel, chain, deks, doc });
+    await loadIdentityDocument({ channel, chain, deks, doc });
     if (!doc.initialized())
       return {
         kind: "missing-material",
@@ -157,7 +180,9 @@ export async function requestPairing(o: RequestPairingOptions): Promise<RequestP
     } finally {
       secret.fill(0);
     }
-    const operation = newOperationId("pairing-request", secureRandom(8));
+    // The whole request is durable before anything is sent (§9.1): a restart
+    // resumes it from the journal (completePairing), never a second request.
+    operation = newOperationId("pairing-request", secureRandom(8));
     await journal.begin({
       id: operation,
       kind: "pairing-request",
@@ -171,44 +196,21 @@ export async function requestPairing(o: RequestPairingOptions): Promise<RequestP
         kind: o.kind,
         label: o.label,
         candidates,
+        request: {
+          descriptor: toBase64url(encodePrincipalDescriptor(B)),
+          pairing: principalRefOf(J.descriptor.principalId),
+          label: o.label,
+          kind: o.kind,
+          ...(o.kind === 1
+            ? { scope: candidates.map((c) => toBase64url(fromHex(c.resource))) }
+            : {}),
+          ...(o.platform === undefined ? {} : { platform: o.platform }),
+          ...(o.requestedAt === undefined ? {} : { requested_at: o.requestedAt }),
+        },
       },
     });
-    const key = principalRefOf(B.principalId);
-    const previous = load.latest.get(toHex(J.descriptor.principalId));
-    const unit = await runUnitPhase(channel, journal, operation, {
-      id: "request",
-      resource: I,
-      build: () =>
-        sealIdentityUnit({
-          storage: o.storage,
-          chain,
-          deks,
-          signer: J,
-          doc,
-          latest: load.latest,
-          // J may be used by another installation: the next sequence after the one it sees (§5.3).
-          seq: (previous?.seq ?? 0n) + 1n,
-          intents: [
-            {
-              intent: "request.put",
-              key,
-              entry: {
-                descriptor: toBase64url(encodePrincipalDescriptor(B)),
-                pairing: principalRefOf(J.descriptor.principalId),
-                label: o.label,
-                kind: o.kind,
-                ...(o.kind === 1
-                  ? { scope: candidates.map((c) => toBase64url(fromHex(c.resource))) }
-                  : {}),
-                ...(o.platform === undefined ? {} : { platform: o.platform }),
-                ...(o.requestedAt === undefined ? {} : { requested_at: o.requestedAt }),
-              },
-            },
-          ],
-        }),
-    });
-    if (unit.state === "refused")
-      return { kind: "refused", operation, code: unit.code ?? "refused" };
+    const sent = await sendRequest(o, pool, operation);
+    if (sent !== "committed-own") return { kind: "refused", operation, code: sent.code };
     return {
       kind: "requested",
       operation,
@@ -221,11 +223,80 @@ export async function requestPairing(o: RequestPairingOptions): Promise<RequestP
       e instanceof IdentityRefused ||
       e instanceof IdentityConflict
     )
-      return { kind: "unavailable", reason: e.message };
+      return {
+        kind: "unavailable",
+        ...(operation === undefined ? {} : { operation }),
+        reason: e.message,
+      };
     throw e;
   } finally {
     pool.closeAll();
   }
+}
+
+/** The pairing device of a journaled request, from the SecretStore (§9.8). */
+async function pairingSigner(o: FlowOptions, J: PrincipalId): Promise<Installation | undefined> {
+  const bytes = await o.secrets.get(pairingSecretRef(J));
+  if (bytes === undefined) return undefined;
+  try {
+    const secret = decodeInviteSecret(bytes);
+    return {
+      signer: { key: secret.signingKey, descriptor: invitationPrincipal(secret) },
+      agreement: secret.agreementKey,
+    };
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+/**
+ * Sends the journaled request as the pairing device: the journaled exact
+ * bytes when they exist, else a unit built from the journaled request at the
+ * next sequence the pairing device has on the coordinator (§5.3 step 3).
+ */
+async function sendRequest(
+  o: FlowOptions & { readonly document: IdentityDocumentFactory },
+  pool: ChannelPool,
+  operation: string,
+): Promise<"committed-own" | { readonly code: string }> {
+  const journal = new OperationJournal(o.storage);
+  const op = await journal.load(operation);
+  if (phaseOf(op, "request")?.state === "committed-own") return "committed-own";
+  const I = resourceId(fromHex(op.intent.identity as string));
+  const R = principalId(fromHex(op.intent.root as string));
+  const pairing = await pairingSigner(o, principalId(fromHex(op.intent.pairingDevice as string)));
+  if (pairing === undefined) return { code: "PAIRING_SECRET_GONE" };
+  const channel = await pool.get(pairing.signer, op.intent.url as string);
+  const B = principalId(fromHex(op.intent.device as string));
+  const unit = await runUnitPhase(channel, journal, operation, {
+    id: "request",
+    resource: I,
+    build: async () => {
+      const chain = await syncChain(o.storage, channel, I);
+      const deks = await fetchDeks(o.storage, o.secrets, channel, chain, pairing);
+      const doc = o.document(I, R);
+      const load = await loadIdentityDocument({ channel, chain, deks, doc });
+      const previous = load.latest.get(toHex(pairing.signer.descriptor.principalId));
+      return sealIdentityUnit({
+        storage: o.storage,
+        chain,
+        deks,
+        signer: pairing.signer,
+        doc,
+        latest: load.latest,
+        // J may be used by another installation: the next sequence after the one it sees (§5.3).
+        seq: (previous?.seq ?? 0n) + 1n,
+        intents: [
+          {
+            intent: "request.put",
+            key: principalRefOf(B),
+            entry: op.intent.request as PairingRequestValue,
+          },
+        ],
+      });
+    },
+  });
+  return unit.state === "committed-own" ? "committed-own" : { code: unit.code ?? "refused" };
 }
 
 /** §6: the status of one Resource for the new device, from its own observations only. */
@@ -324,7 +395,7 @@ export function candidateEvidence(
  * (and while `J` is active, from the link's secret in the SecretStore).
  */
 export async function completePairing(
-  o: FlowOptions & { readonly operation: string; readonly document?: IdentityDocumentFactory },
+  o: FlowOptions & { readonly operation: string; readonly document: IdentityDocumentFactory },
 ): Promise<PairingOutcome> {
   const journal = new OperationJournal(o.storage);
   let op = await journal.load(o.operation);
@@ -336,6 +407,17 @@ export async function completePairing(
   const kind = op.intent.kind as 0 | 1;
   const pool = new ChannelPool(o.network);
   try {
+    // A request that never reached the coordinator is sent first, from the journal (§9.1).
+    if (op.intent.result === undefined && phaseOf(op, "request")?.state !== "committed-own") {
+      try {
+        const sent = await sendRequest(o, pool, o.operation);
+        if (sent !== "committed-own" && sent.code !== "PAIRING_SECRET_GONE")
+          return { kind: "unknown", reason: `the request was refused: ${sent.code}` };
+      } catch (e) {
+        // J no longer reads: the session ended; its result is read below.
+        if (!(e instanceof IdentityRefused)) throw e;
+      }
+    }
     // Step 8: the session's result, from J's view of I (W §41 after its revocation).
     if (op.intent.result === undefined) {
       const bytes = await o.secrets.get(pairingSecretRef(Jid));
