@@ -40,8 +40,8 @@ without notice until the profile is in a baseline.
 ## Identity profile (MVP 0.4 Working Draft)
 
 `@openlfcp/shared-objects/identity` implements IDENTITY-PROFILE-01 §§2–4
-(`org.openlfcp.identity.v1`, spec revision `d9f2873` with spec#3 §4 clarifications, LFCP-04-409).
-`IdentityReplica` admits changes with AI0–AI4, validates every concurrent
+(`org.openlfcp.identity.v1`, `mvp-0.4-baseline.2`, LFCP-04-409 and 409b).
+`IdentityReplica` admits changes with AI0–AI5, validates every concurrent
 field value and exposes `roster()`, `devices()` and `requests()`. Invalid
 entries are omitted; an invalid root makes all three readers empty.
 Concurrent request maps remain invalid: readers never select a winning
@@ -64,8 +64,11 @@ with `roster.put`, `device.put`, or `request.put`; matching `.delete` intents
 remove entries. Updates preserve unknown fields; omitted optional fields
 remain unchanged. Writers produce scalar strings and uints, including
 lossless bigint epochs in `missing_keys` (safe epochs read back as numbers).
-The writer permits `missing_keys` only on the signer's own device entry (§2.1);
-receivers implement the admission table AI0–AI4 without adding a new rule.
+The writer permits `missing_keys` only on the signer's own device entry, and
+receivers refuse any other writer's `missing_keys` as `UNAUTHORIZED_WRITER`
+(§3 AI5, decision I8). AI2 and AI5 are decided on the objects of the causal
+history, values the engine does not select and maps since replaced or deleted
+included; AI2 looks only at the objects a write names as its predecessors.
 Reserved `recovery`/`succession` keys have no writer intent; readers preserve them.
 
 The receive boundary is `receiveChanges([{ bytes, signer, actorSeq, writerClass }])`,
@@ -89,7 +92,7 @@ for state errors. Conflicted requests/kind report the first invalid value's
 diagnostic in table order; `INVALID_FIELD_TYPE` is the fallback when every
 concurrent value is valid on its own (§4 rule 2). Unknown request fields also
 invalidate the entry when conflicted. Tests use §12 ID-05 names and synthetic
-canonical changes, including the diagnostic cases beyond the spec#3 corpus.
+canonical changes, including the diagnostic cases beyond the corpus.
 Admission retains causal, object and sequence indexes across calls. It applies
 new changes without cloning history and replays the trusted byte log only to
 recover from an engine error; local writes validate one candidate on a fork.

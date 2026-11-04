@@ -220,6 +220,14 @@ export class IdentityAdmission {
           if (type === "list" || (type === "map" && path.length <= 2))
             found.add("CONTAINER_REPLACED");
         }
+      // AI5: devices[k].missing_keys and everything under it, in every entry
+      // map of the history (hidden, replaced or deleted ones included), is
+      // written only by the Principal k names.
+      const hint =
+        path[0] === "devices" &&
+        ((path.length === 2 && key === "missing_keys") ||
+          (path.length >= 3 && path[2] === "missing_keys"));
+      if (hint && path[1] !== own) found.add("UNAUTHORIZED_WRITER");
       // AI3 checks structural value kinds, leaving scalar field semantics to §4.
       const defined =
         (path.length === 1 && TABLES.has(top)) ||

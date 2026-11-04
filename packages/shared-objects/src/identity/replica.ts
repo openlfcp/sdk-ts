@@ -360,7 +360,7 @@ export class IdentityReplica {
       ? intent
       : [intent as IdentityIntent];
     if (intents.length === 0) throw new LfcpError("PROFILE_INVALID", "no intent to write");
-    // §2.1 is a writer obligation; AI0–AI4 do not turn it into a new receive rule.
+    // AI5 (§3) refuses the change anyway; say why before building it.
     for (const i of intents)
       if (
         i.intent === "device.put" &&
@@ -369,7 +369,7 @@ export class IdentityReplica {
       )
         refuseIdentity(
           "UNAUTHORIZED_WRITER",
-          "a device writes only its own missing_keys hints (§2.1)",
+          "a device writes only its own missing_keys hints (§3 AI5)",
         );
     const actor = toHex(deriveIdentityActorId(this.#options.resource, writer.signer));
     const fork = A.clone(this.#doc, { actor });

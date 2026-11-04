@@ -14,16 +14,20 @@ import {
   otherWriter,
   pairing,
   pairingWriter,
+  personal,
   personalWriter,
   request,
   resourceRef,
+  root,
   rootWriter,
+  roster,
   S,
   secondDevice,
+  U,
   unit,
 } from "./support/identity.js";
 
-describe("identity admission / ID-05 (§3 AI0–AI4)", () => {
+describe("identity admission / ID-05 (§3 AI0–AI5)", () => {
   for (const container of ["roster", "devices", "requests", "extensions"]) {
     it(`AI0: ${container} must start empty; AI2: cannot replace or delete it`, () => {
       const bad = initial(rootWriter, (d) => {
@@ -84,6 +88,175 @@ describe("identity admission / ID-05 (§3 AI0–AI4)", () => {
         options,
       ).result.refused[0]?.diagnostic,
     ).toBe("CONTAINER_REPLACED");
+  });
+
+  describe("AI5: devices[k].missing_keys is written only by k", () => {
+    const own = principalRef(personal);
+    // Uints are assigned on live proxies (Automerge 3.5.0 imports nested Uint wrappers as maps).
+    const setHint = (entry: Doc, epoch = 1) => {
+      entry.missing_keys = { [resourceRef]: [] };
+      entry.missing_keys[resourceRef][0] = U(epoch);
+    };
+    const base = () => {
+      const first = initial();
+      const entry = edit(
+        first,
+        (d) => {
+          d.devices[own] = { label: S("phone") };
+          d.devices[principalRef(root)] = { label: S("desktop") };
+        },
+        { ...rootWriter, actorSeq: 2 },
+      );
+      return { entry, units: [unit(first), unit(entry, { ...rootWriter, actorSeq: 2 })] };
+    };
+    const root3 = { ...rootWriter, actorSeq: 3 };
+    const admit = (doc: A.Doc<Doc>, writer: typeof rootWriter, units = base().units) =>
+      IdentityReplica.fromChanges([...units, unit(doc, writer)], options).result;
+
+    it("the device writes, appends to and clears its own hint; the root its own entry's", () => {
+      const b = base();
+      const written = edit(b.entry, (d) => {
+        setHint(d.devices[own]);
+      });
+      expect(admit(written, personalWriter).refused).toEqual([]);
+      const appended = edit(
+        written,
+        (d) => {
+          d.devices[own].missing_keys[resourceRef][1] = U(2);
+        },
+        { ...personalWriter, actorSeq: 2 },
+      );
+      const cleared = edit(
+        appended,
+        (d) => {
+          delete d.devices[own].missing_keys;
+        },
+        { ...personalWriter, actorSeq: 3 },
+      );
+      const r = IdentityReplica.fromChanges(
+        [
+          ...b.units,
+          unit(written, personalWriter),
+          unit(appended, { ...personalWriter, actorSeq: 2 }),
+          unit(cleared, { ...personalWriter, actorSeq: 3 }),
+        ],
+        options,
+      );
+      expect(r.result.refused).toEqual([]);
+      const rootOwn = edit(
+        b.entry,
+        (d) => {
+          setHint(d.devices[principalRef(root)]);
+        },
+        root3,
+      );
+      expect(admit(rootOwn, root3).refused).toEqual([]);
+    });
+
+    it("any other writer, the root included, is UNAUTHORIZED_WRITER", () => {
+      const b = base();
+      for (const fn of [
+        (d: Doc) => {
+          setHint(d.devices[own]);
+        },
+        (d: Doc) => {
+          d.devices[own] = { label: S("phone") };
+          setHint(d.devices[own]);
+        },
+        (d: Doc) => {
+          d.devices[own].label = S("relabelled");
+          setHint(d.devices[own]);
+        },
+      ]) {
+        const bad = edit(b.entry, fn, rootWriter);
+        expect(admit(bad, root3).refused[0]?.diagnostic).toBe("UNAUTHORIZED_WRITER");
+      }
+      const withHint = edit(b.entry, (d) => {
+        setHint(d.devices[own]);
+      });
+      const units = [...b.units, unit(withHint, personalWriter)];
+      for (const fn of [
+        (d: Doc) => {
+          d.devices[own].missing_keys[resourceRef][1] = U(2);
+        },
+        (d: Doc) => {
+          delete d.devices[own].missing_keys;
+        },
+        (d: Doc) => {
+          d.devices[own].missing_keys[resourceRef].deleteAt(0);
+        },
+      ]) {
+        const bad = edit(withHint, fn, rootWriter);
+        expect(admit(bad, root3, units).refused[0]?.diagnostic).toBe("UNAUTHORIZED_WRITER");
+      }
+    });
+
+    it("deleting or replacing the entry is not a write of missing_keys", () => {
+      const b = base();
+      const withHint = edit(b.entry, (d) => {
+        setHint(d.devices[own]);
+      });
+      const units = [...b.units, unit(withHint, personalWriter)];
+      for (const fn of [
+        (d: Doc) => {
+          delete d.devices[own];
+        },
+        (d: Doc) => {
+          d.devices[own] = { label: S("replaced") };
+        },
+      ])
+        expect(admit(edit(withHint, fn, rootWriter), root3, units).refused).toEqual([]);
+    });
+
+    it("concurrent writes: the device's is admitted, the root's refused with its dependants", () => {
+      const b = base();
+      const mine = edit(b.entry, (d) => {
+        setHint(d.devices[own]);
+      });
+      const theirs = edit(
+        b.entry,
+        (d) => {
+          setHint(d.devices[own], 7);
+        },
+        root3,
+      );
+      const after = edit(
+        theirs,
+        (d) => {
+          d.roster[resourceRef] = roster();
+        },
+        { ...rootWriter, actorSeq: 4 },
+      );
+      for (const order of [
+        [
+          unit(mine, personalWriter),
+          unit(theirs, root3),
+          unit(after, { ...rootWriter, actorSeq: 4 }),
+        ],
+        [
+          unit(theirs, root3),
+          unit(after, { ...rootWriter, actorSeq: 4 }),
+          unit(mine, personalWriter),
+        ],
+      ]) {
+        const r = IdentityReplica.fromChanges([...b.units, ...order], options);
+        expect(r.result.refused.map((x) => x.diagnostic)).toEqual(["UNAUTHORIZED_WRITER"]);
+        expect(r.result.waiting).toHaveLength(1);
+        expect(r.replica.devices()[own]?.missing_keys).toEqual({ [resourceRef]: [1] });
+      }
+    });
+
+    it("the writer refuses another device's hint before building a change", () => {
+      const b = base();
+      const r = IdentityReplica.fromChanges(b.units, options).replica;
+      expect(() =>
+        r.write(root3, {
+          intent: "device.put",
+          key: own,
+          entry: { label: "phone", kind: 0, missing_keys: { [resourceRef]: [1] } },
+        }),
+      ).toThrow(/own missing_keys/);
+    });
   });
 
   it("AI4: no deletion, map replacement, pairing conflict, or departure from own pairing", () => {
