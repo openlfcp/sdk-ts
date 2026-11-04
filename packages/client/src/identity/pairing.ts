@@ -35,7 +35,6 @@ import {
   type Signer,
   signControlRecord,
 } from "@openlfcp/wire";
-import { loadControlChain } from "../storage.js";
 import {
   deliverKeys,
   genesisOwner,
@@ -77,7 +76,7 @@ import {
 } from "./journal.js";
 import { ChannelPool, type IdentityChannel, IdentityUnavailable } from "./network.js";
 import { classifyCancel, classifyConsume, classifyRegister, type LinearChain } from "./phases.js";
-import { type IdentityDocumentFactory, localIdentityResource } from "./resource.js";
+import { type IdentityFlowOptions, identityTarget } from "./resource.js";
 
 /**
  * Pairing a new installation, the managing side `A` (IDENTITY-PROFILE-01
@@ -109,24 +108,6 @@ export class PairingLinkText {
   [Symbol.for("nodejs.util.inspect.custom")](): string {
     return "[redacted]";
   }
-}
-
-export interface IdentityFlowOptions extends FlowOptions {
-  /** The Identity Resource; default: the one recorded locally, at its chain's coordinator. */
-  readonly identity?: { readonly resource: ResourceId; readonly url: string };
-  readonly document: IdentityDocumentFactory;
-}
-
-/** The Identity Resource of this installation and its coordinator. */
-export async function identityTarget(
-  o: Pick<IdentityFlowOptions, "identity" | "storage">,
-): Promise<{ readonly resource: ResourceId; readonly url: string }> {
-  if (o.identity !== undefined) return o.identity;
-  const resource = await localIdentityResource(o.storage);
-  if (resource === undefined) throw new Error("this installation has no Identity Resource");
-  const chain = await loadControlChain(o.storage, resource);
-  if (chain?.kind !== "linear") throw new Error("the Identity Resource's chain is not stored");
-  return { resource, url: chain.state.route.coordinatorUrl };
 }
 
 export type PairingSessionResult =

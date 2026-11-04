@@ -12,6 +12,7 @@ import { dekCommitment, generateResourceDEK } from "@openlfcp/crypto";
 import type { SecretStore } from "@openlfcp/storage";
 import { signControlRecord, validateControlChain } from "@openlfcp/wire";
 import { createDataUnit } from "../data-unit.js";
+import { loadControlChain } from "../storage.js";
 import {
   heldDeks,
   type IdentityStorage,
@@ -21,6 +22,7 @@ import {
   storeDek,
   syncChain,
 } from "./context.js";
+import type { FlowOptions } from "./devices.js";
 import {
   IDENTITY_PROFILE,
   type IdentityDocumentPort,
@@ -289,4 +291,22 @@ export async function resumeIdentityCreation(
   } finally {
     pool.closeAll();
   }
+}
+
+export interface IdentityFlowOptions extends FlowOptions {
+  /** The Identity Resource; default: the one recorded locally, at its chain's coordinator. */
+  readonly identity?: { readonly resource: ResourceId; readonly url: string };
+  readonly document: IdentityDocumentFactory;
+}
+
+/** The Identity Resource of this installation and its coordinator. */
+export async function identityTarget(
+  o: Pick<IdentityFlowOptions, "identity" | "storage">,
+): Promise<{ readonly resource: ResourceId; readonly url: string }> {
+  if (o.identity !== undefined) return o.identity;
+  const resource = await localIdentityResource(o.storage);
+  if (resource === undefined) throw new Error("this installation has no Identity Resource");
+  const chain = await loadControlChain(o.storage, resource);
+  if (chain?.kind !== "linear") throw new Error("the Identity Resource's chain is not stored");
+  return { resource, url: chain.state.route.coordinatorUrl };
 }
