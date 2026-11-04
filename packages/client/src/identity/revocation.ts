@@ -27,7 +27,7 @@ import {
 } from "./context.js";
 import { type FlowOptions, mayManageDevices } from "./devices.js";
 import { principalRefOf } from "./document.js";
-import { newOperationId, OperationJournal, phaseOf } from "./journal.js";
+import { type JournalOperation, newOperationId, OperationJournal, phaseOf } from "./journal.js";
 import {
   ChannelPool,
   IDENTITY_EXTENSION,
@@ -40,6 +40,7 @@ import { type IdentityFlowOptions, identityTarget } from "./resource.js";
 import {
   exposingRevocationsSince,
   type RotationOutcome,
+  resumeRotations,
   rotateAfter,
   rotatorTest,
 } from "./rotation.js";
@@ -54,6 +55,7 @@ export interface ResourcePreview {
   readonly resource: ResourceId;
   readonly status:
     | "ok"
+    | "self-dependent"
     | "already-revoked"
     | "not-authorized"
     | "unreachable"
@@ -87,7 +89,7 @@ function revokeOn(
   root: PrincipalId,
   device: PrincipalId,
   reason: bigint,
-): { bytes: Uint8Array; after: LinearChain } | undefined {
+): { bytes: Uint8Array; after: LinearChain } | "self-dependent" | undefined {
   const signed = signControlRecord(
     {
       resourceId: chain.state.resourceId,
@@ -98,7 +100,17 @@ function revokeOn(
     o.installation.signer,
   );
   const after = validateControlChain([...chain.records.map((r) => r.signed.bytes), signed.bytes]);
-  return after.kind === "linear" ? { bytes: signed.bytes, after } : undefined;
+  if (after.kind !== "linear") return undefined;
+  // §8.1: the revoker must stay active in this Resource's post-state; a chain
+  // through the target is re-certified first, here, not only in I.
+  const me = o.installation.signer.descriptor.principalId;
+  if (
+    !bytesEqual(me, device) &&
+    activeDevice(chain.state, me) !== undefined &&
+    activeDevice(after.state, me) === undefined
+  )
+    return "self-dependent";
+  return { bytes: signed.bytes, after };
 }
 
 function previewOn(
@@ -113,6 +125,7 @@ function previewOn(
   if (chain.state.revoked.has(`${toHex(root)}:${toHex(device)}`))
     return { resource: R, status: "already-revoked", ...empty };
   const sim = revokeOn(chain, o, root, device, reason);
+  if (sim === "self-dependent") return { resource: R, status: "self-dependent", ...empty };
   if (sim === undefined) return { resource: R, status: "not-authorized", ...empty };
   const before = new Set(toKeep(chain.state, root).map(toHex));
   const after = new Set(toKeep(sim.after.state, root).map(toHex));
@@ -184,7 +197,11 @@ export async function previewRevocation(
         else throw e;
       }
     }
-    return { device: o.device, selfDependent, resources };
+    return {
+      device: o.device,
+      selfDependent: selfDependent || resources.some((r) => r.status === "self-dependent"),
+      resources,
+    };
   } finally {
     pool.closeAll();
   }
@@ -198,6 +215,8 @@ export interface RevocationResult {
     | "complete"
     | "superseded"
     | "not-authorized"
+    /** The revoker's own chain passes through the device here: re-certify it here first (§8.1). */
+    | "self-dependent"
     | "refused"
     | "unreachable"
     | "unsupported"
@@ -222,6 +241,7 @@ export type RevokeDeviceResult =
   | { readonly kind: "conflict" };
 
 class NotAuthorized extends Error {}
+class SelfDependent extends Error {}
 
 /**
  * §8.2–§8.5: `DEVICE_REVOKE {R, D, r}` in `I`, then in every roster
@@ -248,14 +268,26 @@ export async function revokeDevice(
   const pool = new ChannelPool(o.network);
   const operation = o.operation ?? newOperationId("revoke-device", secureRandom(8));
   try {
+    // Rotations an earlier operation committed but did not adopt are finished first (§9.1).
+    if (!selfRetire) await resumeRotations({ ...o, pool });
     const channel = await pool.get(o.installation.signer, target.url);
-    const I = await syncChain(o.storage, channel, target.resource);
+    const known = await journal.get(operation);
+    let I: LinearChain;
+    try {
+      I = await syncChain(o.storage, channel, target.resource);
+    } catch (e) {
+      // A resumed self-retirement no longer reads I: its targets come from the journal.
+      if (!(e instanceof IdentityRefused) || !selfRetire || known === undefined) throw e;
+      return retireElsewhere(o, pool, journal, known);
+    }
     const R = genesisOwner(I);
     if (!selfRetire && !mayManageDevices(I.state, me, R)) return { kind: "not-authorized" };
     const mine = activeDevice(I.state, me);
     if (!selfRetire && mine !== undefined && mine.issuers.some((e) => bytesEqual(e, o.device)))
       return { kind: "self-dependent" };
-    if ((await journal.get(operation)) === undefined)
+    // The targets are journaled before the first record: a self-retiring device
+    // cannot read I's roster once I has revoked it (§9.1).
+    if (known === undefined)
       await journal.begin({
         id: operation,
         kind: "revoke-device",
@@ -265,8 +297,13 @@ export async function revokeDevice(
           device: toHex(o.device),
           root: toHex(R),
           reason: String(o.reason),
+          targets: (await rosterTargets(o, channel, I)).map((t) => ({
+            resource: toHex(t.resource),
+            url: t.url,
+          })),
         },
       });
+    const roster = targetsOf(await journal.load(operation));
     const results: RevocationResult[] = [];
     const one = async (c: IdentityChannel, X: ResourceId): Promise<RevocationResult> => {
       let outcome: Awaited<ReturnType<typeof runControlPhase>>;
@@ -278,12 +315,14 @@ export async function revokeDevice(
           classify: (chain) => classifyRevoke(chain.state, R, o.device),
           build: (chain) => {
             const sim = revokeOn(chain, o, R, o.device, o.reason);
+            if (sim === "self-dependent") throw new SelfDependent();
             if (sim === undefined) throw new NotAuthorized();
             return sim.bytes;
           },
         });
       } catch (e) {
         if (e instanceof NotAuthorized) return { resource: X, revoke: "not-authorized" };
+        if (e instanceof SelfDependent) return { resource: X, revoke: "self-dependent" };
         throw e;
       }
       if (outcome.state === "superseded") return { resource: X, revoke: "superseded" };
@@ -300,8 +339,6 @@ export async function revokeDevice(
       }
       return { resource: X, revoke, rotation };
     };
-    // The roster is read before I's revocation: a self-retiring device cannot read I after it.
-    const roster = await rosterTargets(o, channel, I);
     const first = await one(channel, target.resource);
     results.push(first);
     if (first.revoke === "superseded") {
@@ -344,6 +381,61 @@ export async function revokeDevice(
   } finally {
     pool.closeAll();
   }
+}
+
+const targetsOf = (op: JournalOperation) =>
+  ((op.intent.targets as { resource: string; url: string }[] | undefined) ?? []).map((t) => ({
+    resource: resourceId(fromHex(t.resource)),
+    url: t.url,
+  }));
+
+/** A resumed self-retirement whose I revocation already holds: the journaled roster targets. */
+async function retireElsewhere(
+  o: IdentityFlowOptions & { readonly device: PrincipalId; readonly reason: 0n | 1n | 2n },
+  pool: ChannelPool,
+  journal: OperationJournal,
+  op: JournalOperation,
+): Promise<RevokeDeviceResult> {
+  const R = principalId(fromHex(op.intent.root as string));
+  const results: RevocationResult[] = [
+    { resource: resourceId(fromHex(op.intent.identity as string)), revoke: "complete" },
+  ];
+  for (const t of targetsOf(op)) {
+    try {
+      const c = await pool.get(o.installation.signer, t.url);
+      const outcome = await runControlPhase(o.storage, c, journal, op.id, {
+        id: `revoke:${toHex(t.resource)}`,
+        kind: "revoke",
+        resource: t.resource,
+        classify: (chain) => classifyRevoke(chain.state, R, o.device),
+        build: (chain) => {
+          const sim = revokeOn(chain, o, R, o.device, o.reason);
+          if (sim === undefined || sim === "self-dependent") throw new NotAuthorized();
+          return sim.bytes;
+        },
+      });
+      results.push({
+        resource: t.resource,
+        revoke:
+          outcome.state === "committed-own"
+            ? "revoked"
+            : outcome.state === "refused"
+              ? "refused"
+              : outcome.state === "superseded"
+                ? "superseded"
+                : "complete",
+      });
+    } catch (e) {
+      if (e instanceof NotAuthorized)
+        results.push({ resource: t.resource, revoke: "not-authorized" });
+      else if (e instanceof IdentityUnavailable || e instanceof IdentityRefused)
+        results.push({ resource: t.resource, revoke: "unreachable" });
+      else throw e;
+    }
+  }
+  const open = results.some((r) => r.revoke === "unreachable");
+  await journal.setStatus(op.id, open ? "open" : "done");
+  return { kind: "revoked", operation: op.id, results: Object.freeze(results) };
 }
 
 async function markRevoked(
