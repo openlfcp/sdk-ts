@@ -46,7 +46,7 @@ import {
 import { classifyRegister, classifyRevoke, type LinearChain, type PhaseState } from "./phases.js";
 import { type IdentityFlowOptions, identityTarget } from "./resource.js";
 import { rotateIfExposed } from "./revocation.js";
-import type { RotationOutcome } from "./rotation.js";
+import { type RotationOutcome, resumeRotations } from "./rotation.js";
 
 /**
  * Reconciliation (IDENTITY-PROFILE-01 §7.1): carries the Identity
@@ -118,12 +118,30 @@ export function planReconciliation(
     } else if (d.kind === DEVICE_KIND.SERVICE) {
       if (revocationOf(I, R, D) !== undefined) continue;
       if (!d.scope.some((s) => bytesEqual(s, X.resourceId))) continue;
-      if (x !== undefined) continue;
+      // Absent from X, or bound there with another leaf and suspended by the cascade:
+      // I's chain re-certifies it (§7.1 step 2, third item; F09). Kind, mask and
+      // scope are immutable (N8): a binding with others is left alone.
+      if (x !== undefined) {
+        if (x.leafId !== null && bytesEqual(x.leafId, d.leafId)) continue;
+        if (activeDevice(X, D) !== undefined || !sameBinding(x, d)) continue;
+      }
       steps.push({ kind: "register", root: R, device: D, chain: d.chain });
     }
   }
   return Object.freeze(steps);
 }
+
+const sameSet = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((v) => b.includes(v));
+
+/** N8: the same kind, mask and scope. */
+const sameBinding = (
+  a: { kind: number; mask: readonly bigint[]; scope: readonly Uint8Array[] },
+  b: { kind: number; mask: readonly bigint[]; scope: readonly Uint8Array[] },
+) =>
+  a.kind === b.kind &&
+  sameSet(a.mask.map(String), b.mask.map(String)) &&
+  sameSet(a.scope.map(toHex), b.scope.map(toHex));
 
 /** The record of a step on the target's head, signed by the reconciler. */
 export function reconcileRecord(
@@ -189,7 +207,10 @@ export async function reconcileDevices(
   });
   const pool = new ChannelPool(o.network);
   const out: TargetReconciliation[] = [];
+  let open = false;
   try {
+    // A rotation an earlier run committed but did not adopt is finished first (§9.1).
+    await resumeRotations({ ...o, pool });
     const channel = await pool.get(me, target.url);
     const I = await syncChain(o.storage, channel, target.resource);
     const R = genesisOwner(I);
@@ -268,7 +289,14 @@ export async function reconcileDevices(
             intents,
           }),
       });
-    await journal.setStatus(operation, "done");
+    open = out.some(
+      (t) =>
+        t.status === "unreachable" ||
+        t.status === "conflict" ||
+        t.rotation?.status === "unreachable" ||
+        t.rotation?.status === "awaiting-key-holder",
+    );
+    await journal.setStatus(operation, open ? "open" : "done");
   } catch (e) {
     if (e instanceof IdentityConflict)
       out.push({ resource: target.resource, status: "conflict", steps: [] });

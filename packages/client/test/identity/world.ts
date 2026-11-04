@@ -9,7 +9,13 @@ import {
   storeDek,
   syncChain,
 } from "../../src/identity/context.js";
-import type { FlowOptions, MaskPreset } from "../../src/identity/devices.js";
+import {
+  type FlowOptions,
+  leafPayload,
+  type MaskPreset,
+  registerDevice,
+  signChain,
+} from "../../src/identity/devices.js";
 import { resourceRef } from "../../src/identity/document.js";
 import {
   approvePairing,
@@ -139,4 +145,27 @@ export async function addToRoster(
   });
   const answer = await channel.putDataUnit(I, bytes);
   if (answer.kind !== "ack") throw new Error(answer.code);
+}
+
+/** The root re-certifies `who` directly (same kind, mask and scope, a new serial) in I only. */
+export async function recertifyInI(
+  w: Awaited<ReturnType<typeof world>>,
+  who: number,
+  kind: 0 | 1,
+  mask: readonly bigint[],
+  scope: Uint8Array[],
+) {
+  const channel = await w.P.network.connect(w.P.installation.signer, URL);
+  const I = await syncChain(w.P.storage, channel, w.I);
+  const leaf = leafPayload(
+    party(1).signer.descriptor.principalId,
+    party(who).signer.descriptor,
+    kind,
+    mask,
+    scope as never,
+  );
+  const chain = signChain(I.state, w.P.installation.signer, leaf);
+  const r = await registerDevice({ ...w.P, chain, targets: [{ resource: w.I, url: URL }] });
+  if (r.results[0]?.status !== "registered")
+    throw new Error(`re-certification: ${r.results[0]?.status}`);
 }
