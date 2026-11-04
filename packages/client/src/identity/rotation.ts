@@ -322,14 +322,21 @@ async function localAccepted(o: FlowOptions, chain: LinearChain): Promise<LocalA
   const st = o.storage as Partial<LfcpStorage>;
   if (st.dataUnits === undefined || st.snapshots === undefined) return { units: [], snapshot: [] };
   const R = chain.state.resourceId;
+  // Every stored unit takes part: the storage keeps only signature-valid units,
+  // whatever became of their content, and equivocation evidence (both twins,
+  // stored as "equivocation") must reach the check (W §26.2).
   const units: Uint8Array[] = [];
   for (const status of [
+    "seen",
     "merged",
     "profile-pending",
+    "held",
+    "quarantined",
+    "equivocation",
+    "local-failure",
     "profile-held",
     "profile-rejected",
-    "seen",
-    "held",
+    "profile-unsupported",
   ] as const)
     for (const u of await st.dataUnits.withStatus(R, status)) units.push(u.bytes);
   return { units, snapshot: await snapshotFrontier(st as LfcpStorage, R) };
