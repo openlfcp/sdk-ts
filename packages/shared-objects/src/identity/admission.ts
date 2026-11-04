@@ -156,7 +156,6 @@ export class IdentityAdmission {
     const own = principalRef(writer.signer);
     const touched = new Set<string>();
     const createdRequests = new Set<string>();
-    const writtenTypes = new Map<string, string[]>();
     const pairings = new Map<string, Map<string, Value>>();
 
     if (initial) {
@@ -212,13 +211,15 @@ export class IdentityAdmission {
       }
       if (!initial && top === "identity") found.add("IMMUTABLE_FIELD_MUTATED");
 
-      if (TABLES.has(top) && key !== undefined && op.action === "set") {
-        const old = writtenTypes.get(`${op.obj}/${key}`) ?? all(op.obj, key).map(([type]) => type);
-        if (old.some((type) => type === "list" || (path.length === 1 && type === "map")))
-          found.add("CONTAINER_REPLACED");
-      }
-      if (key !== undefined && (made !== undefined || op.action === "set" || op.action === "del"))
-        writtenTypes.set(`${op.obj}/${key}`, op.action === "del" ? [] : [made ?? "scalar"]);
+      // AI2 on the causal history: the objects a scalar replaces are those its
+      // operation names as predecessors (SOP §11.4 R6), made in the history or
+      // earlier in this change, selected by the engine or not.
+      if (TABLES.has(top) && key !== undefined && op.action === "set")
+        for (const pred of op.pred) {
+          const type = info(pred)?.type;
+          if (type === "list" || (type === "map" && path.length <= 2))
+            found.add("CONTAINER_REPLACED");
+        }
       // AI3 checks structural value kinds, leaving scalar field semantics to §4.
       const defined =
         (path.length === 1 && TABLES.has(top)) ||

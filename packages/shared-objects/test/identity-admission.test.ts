@@ -62,6 +62,30 @@ describe("identity admission / ID-05 (§3 AI0–AI4)", () => {
     ).toBe("CONTAINER_REPLACED");
   });
 
+  it("AI2: a scalar over a map held in an entry field, by the objects its operation replaces", () => {
+    const base = filled();
+    const withMap = edit(base.doc, (d) => {
+      d.roster[resourceRef].future = { keep: true };
+    });
+    const bad = edit(
+      withMap,
+      (d) => {
+        d.roster[resourceRef].future = S("scalar");
+      },
+      { ...personalWriter, actorSeq: 2 },
+    );
+    expect(
+      IdentityReplica.fromChanges(
+        [
+          ...base.units,
+          unit(withMap, personalWriter),
+          unit(bad, { ...personalWriter, actorSeq: 2 }),
+        ],
+        options,
+      ).result.refused[0]?.diagnostic,
+    ).toBe("CONTAINER_REPLACED");
+  });
+
   it("AI4: no deletion, map replacement, pairing conflict, or departure from own pairing", () => {
     const first = initial();
     const own = edit(
