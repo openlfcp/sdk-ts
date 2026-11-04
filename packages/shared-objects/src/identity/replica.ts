@@ -303,6 +303,38 @@ export class IdentityReplica {
   }
 
   /**
+   * The admitted changes that created, wrote into or deleted `table[key]`
+   * (nested lists and maps included), in admission (causal) order, each
+   * with the signer of the unit that carried it. This is the provenance a
+   * managing device checks before it shows a pairing request
+   * (IDENTITY-PROFILE-01 §5.3 step 4: written only by the session's
+   * pairing device) and the change hashes it journals with an approval.
+   */
+  origins(
+    table: "roster" | "devices" | "requests",
+    key: string,
+  ): readonly { readonly hash: string; readonly signer: PrincipalId }[] {
+    const containers = new Set<string>();
+    const entry = new Set<string>();
+    const out: { hash: string; signer: PrincipalId }[] = [];
+    for (const [hash, unit] of this.#accepted) {
+      const change = A.decodeChange(unit.bytes);
+      let touched = false;
+      change.ops.forEach((op, i) => {
+        const id = `${change.startOp + i}@${change.actor}`;
+        const makes = op.action === "makeMap" || op.action === "makeList";
+        if (op.obj === "_root" && op.key === table && op.action === "makeMap") containers.add(id);
+        else if ((containers.has(op.obj) && op.key === key) || entry.has(op.obj)) {
+          touched = true;
+          if (makes) entry.add(id);
+        }
+      });
+      if (touched) out.push({ hash, signer: unit.signer.slice() as PrincipalId });
+    }
+    return Object.freeze(out);
+  }
+
+  /**
    * One transaction (one change) for the intent, or for several intents in
    * order, e.g. the fill change of IDENTITY-PROFILE-01 §5.1 or the devices
    * entry and the request deletion of §5.3 step 6; scalar strings/uints,
