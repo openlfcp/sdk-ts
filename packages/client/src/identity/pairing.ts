@@ -77,6 +77,8 @@ import {
 import { ChannelPool, type IdentityChannel, IdentityUnavailable } from "./network.js";
 import { classifyCancel, classifyConsume, classifyRegister, type LinearChain } from "./phases.js";
 import { type IdentityFlowOptions, identityTarget } from "./resource.js";
+import { rotateIfExposed } from "./revocation.js";
+import type { RotationOutcome } from "./rotation.js";
 
 /**
  * Pairing a new installation, the managing side `A` (IDENTITY-PROFILE-01
@@ -502,6 +504,8 @@ export type ApprovalResult =
       readonly chain: CertificateChain;
       /** §5.3 step 10: the Resources of the roster (or the approved scope). */
       readonly registrations: readonly RegistrationResult[];
+      /** §5.3 step 9: the consumed pairing device was a reader of I (§8.4). */
+      readonly rotation: RotationOutcome;
     }
   /** The entry changed since the human confirmed it: ask again (§5.3 step 4). */
   | { readonly kind: "reconfirm"; readonly review: PairingReview | undefined }
@@ -796,6 +800,9 @@ export async function resumeApproval(
           deks: await heldDeks(o.secrets, chain),
         });
 
+      // Step 9: J, consumed, was a reader of I: the rotation policy of §8.4 applies to I.
+      const rotation = await rotateIfExposed({ ...o, channel, operation, resource: I });
+
       // Step 10: register B in the roster (or the approved scope).
       const { doc } = await openIdentity(o, channel, I);
       const targets = [...doc.roster()]
@@ -817,6 +824,7 @@ export async function resumeApproval(
         device: principalId(leaf.device.principalId),
         chain: chainB,
         registrations: registered.results,
+        rotation,
       };
     },
     (reason) => ({ kind: "unavailable", operation, reason }),
@@ -825,7 +833,7 @@ export async function resumeApproval(
 }
 
 export type CancelResult =
-  | { readonly kind: "cancelled" }
+  | { readonly kind: "cancelled"; readonly rotation: RotationOutcome }
   /** The session was consumed by an approval: not cancelled (§9.2 Cancel: superseded). */
   | { readonly kind: "consumed" }
   | { readonly kind: "refused"; readonly code: string }
@@ -878,7 +886,9 @@ export async function cancelPairing(
       if (cancel.state === "refused") return { kind: "refused", code: cancel.code ?? "refused" };
       await journal.setStatus(o.session, "abandoned");
       await o.secrets.delete(pairingSecretRef(J));
-      return { kind: "cancelled" };
+      // A cancelled J was a reader of I: the rotation policy applies (§5.3 step 9, §8.4).
+      const rotation = await rotateIfExposed({ ...o, channel, operation: o.session, resource: I });
+      return { kind: "cancelled", rotation };
     },
     (reason) => ({ kind: "unavailable", reason }),
     () => ({ kind: "conflict" }),

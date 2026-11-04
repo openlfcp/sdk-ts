@@ -61,10 +61,18 @@ describe("pairing a personal installation (IDENTITY-PROFILE-01 §5.3)", { timeou
     const approved = await approvePairing({ ...w.P, review, preset: "full" });
     if (approved.kind !== "approved") throw new Error(JSON.stringify(approved));
     expect(approved.registrations.map((r) => r.status)).toEqual(["registered"]);
-    expect(types(w.server, w.I).slice(-3)).toEqual([
+    // Phase 1, phase 2, then the rotation of I: the consumed J was a reader (§5.3 step 9).
+    expect(types(w.server, w.I).slice(-4)).toEqual([
       "DEVICE_GRANT",
       "DEVICE_REVOKE",
       "DEVICE_GRANT",
+      "KEY_EPOCH",
+    ]);
+    expect(approved.rotation.status).toBe("rotated");
+    // The new DEK went to every reader except the consumed J and the rotator itself: B.
+    const epoch1 = w.server.packagesOf(w.I).filter((p) => p.dataEpoch === 1n);
+    expect(epoch1.map((p) => toHex(p.recipient))).toEqual([
+      toHex(party(3).signer.descriptor.principalId),
     ]);
 
     const done = await completePairing({ ...B, operation: req.operation });
