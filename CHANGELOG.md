@@ -68,8 +68,12 @@ A unit of the Identity Resource's document that the coordinator refuses
 is no longer dropped while the flow answers success (review of sdk-ts#16,
 P2). Each flow rebuilds a unit refused as `STALE_DATA_EPOCH` on the
 current state (W §19.1), reports any other refusal and keeps its operation
-open, and the resumed operation writes the unit again (`runUnitPhase`
-`rebuildRefused`). The Control Records already committed stand.
+open, and a resumed operation writes the unit again (`runUnitPhase`
+`rebuildRefused`; reconciliation has no resume, see below). The Control
+Records already committed stand. When the state a unit is built on
+already holds its effect, written by another writer since the flow's
+first read, nothing is sent and the phase is `complete` (a `build` that
+returns null).
 
 - `approvePairing` / `resumeApproval`: `document-incomplete` (with the
   device, chain, registrations, rotation and the code) when the device
@@ -79,12 +83,19 @@ open, and the resumed operation writes the unit again (`runUnitPhase`
   deletion is refused; `J` is cancelled, the session stays open, and the
   same call writes the deletion again.
 - `reconcileDevices`: a `document` result (`DocumentWrite`: `none`,
-  `committed-own`, `refused`) for the entries of §7.1 step 4, built on the
-  current state of `I`; a refusal leaves the operation open.
-- `revokeDevice`: a `document` result for the `revoked` flag of §8.2,
-  `unreachable` included. The display write no longer drops every error:
-  only `IdentityUnavailable` is caught, and the revocation goes on to the
-  roster; any other error is thrown.
+  `committed-own`, `complete`, `refused`) for the entries of §7.1 step 4,
+  built on the current state of `I`. `complete`: another manager wrote the
+  missing entries meanwhile, and the operation is done. A refusal leaves the
+  operation open. There is no resume: a later `reconcileDevices` is a new
+  operation that proposes the entries still missing then; it does not close
+  the open one.
+- `revokeDevice`: a `document` result for the `revoked` flag of §8.2:
+  `none` when the device has no entry (also when another writer deleted it
+  meanwhile), `complete` when another writer set the flag, and `refused` or
+  `unreachable`, which leave the operation open; `revokeDevice` with that
+  `operation` writes the flag again. The display write no longer drops
+  every error: only `IdentityUnavailable` is caught, and the revocation
+  goes on to the roster; any other error is thrown.
 - `loadIdentityDocument`: `unapplied` names the units the wire accepted
   whose change the document did not take (refused or held).
 
