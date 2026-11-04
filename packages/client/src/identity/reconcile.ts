@@ -166,6 +166,11 @@ export function reconcileRecord(
       ).bytes;
 }
 
+export interface DocumentWrite {
+  readonly state: "none" | "committed-own" | "refused";
+  readonly code?: string;
+}
+
 export interface TargetReconciliation {
   readonly resource: ResourceId;
   readonly status: "done" | "unsupported" | "unreachable" | "conflict" | "not-authorized";
@@ -192,7 +197,16 @@ export async function reconcileDevices(
     /** Apply the rotation policy of §8.4 to each target (default true). */
     readonly rotate?: boolean;
   },
-): Promise<{ readonly operation: string; readonly targets: readonly TargetReconciliation[] }> {
+): Promise<{
+  readonly operation: string;
+  readonly targets: readonly TargetReconciliation[];
+  /**
+   * Step 4's unit of display data in `I`: not needed (`none`), written, or
+   * refused with `code`. A refused unit leaves the operation open; the next
+   * run proposes the missing entries again.
+   */
+  readonly document: DocumentWrite;
+}> {
   const target = await identityTarget(o);
   const me = o.installation.signer;
   const journal = new OperationJournal(o.storage);
@@ -206,6 +220,7 @@ export async function reconcileDevices(
   });
   const pool = new ChannelPool(o.network);
   const out: TargetReconciliation[] = [];
+  let document: DocumentWrite = { state: "none" };
   let open = false;
   try {
     // A rotation an earlier run committed but did not adopt is finished first (§9.1).
@@ -217,10 +232,11 @@ export async function reconcileDevices(
       return {
         operation,
         targets: [{ resource: target.resource, status: "not-authorized", steps: [] }],
+        document,
       };
     const doc = o.document(target.resource, R);
     const deksI = await fetchDeks(o.storage, o.secrets, channel, I, o.installation);
-    const load = await loadIdentityDocument({ channel, chain: I, deks: deksI, doc });
+    await loadIdentityDocument({ channel, chain: I, deks: deksI, doc });
     const hints = (resource: ResourceId) => {
       const ref = resourceRef(resource);
       const m = new Map<string, Set<string>>();
@@ -259,42 +275,39 @@ export async function reconcileDevices(
     }
 
     // Step 4: display data for devices in I's chain without a valid entry (labels default to the fingerprint).
-    const intents: IdentityIntent[] = [];
-    for (const [hex, d] of I.state.devices) {
-      if (!bytesEqual(d.root, R) || d.chain === null || d.kind === DEVICE_KIND.PAIRING) continue;
-      const key = principalRefOf(principalId(fromHex(hex)));
-      if (doc.devices().has(key)) continue;
-      intents.push({
-        intent: "device.put",
-        key,
-        entry: {
-          label: deviceFingerprint(principalId(fromHex(hex))),
-          kind: d.kind === DEVICE_KIND.SERVICE ? 1 : 0,
+    if (displayIntents(I, doc, R).length > 0 && doc.initialized()) {
+      // Built on the current state of I: a rotation of I by this run, or by
+      // anyone, makes an earlier unit stale (W §19.1), and it is written again.
+      document = await runUnitPhase(channel, journal, operation, {
+        id: "display",
+        resource: target.resource,
+        rebuildOn: ["STALE_DATA_EPOCH"],
+        build: async () => {
+          const now = await syncChain(o.storage, channel, target.resource);
+          const deks = await fetchDeks(o.storage, o.secrets, channel, now, o.installation);
+          const fresh = o.document(target.resource, R);
+          const loaded = await loadIdentityDocument({ channel, chain: now, deks, doc: fresh });
+          return sealIdentityUnit({
+            storage: o.storage,
+            chain: now,
+            deks,
+            signer: me,
+            doc: fresh,
+            latest: loaded.latest,
+            intents: displayIntents(now, fresh, R),
+          });
         },
       });
     }
-    if (intents.length > 0 && doc.initialized())
-      await runUnitPhase(channel, journal, operation, {
-        id: "display",
-        resource: target.resource,
-        build: () =>
-          sealIdentityUnit({
-            storage: o.storage,
-            chain: I,
-            deks: deksI,
-            signer: me,
-            doc,
-            latest: load.latest,
-            intents,
-          }),
-      });
-    open = out.some(
-      (t) =>
-        t.status === "unreachable" ||
-        t.status === "conflict" ||
-        t.rotation?.status === "unreachable" ||
-        t.rotation?.status === "awaiting-key-holder",
-    );
+    open =
+      document.state === "refused" ||
+      out.some(
+        (t) =>
+          t.status === "unreachable" ||
+          t.status === "conflict" ||
+          t.rotation?.status === "unreachable" ||
+          t.rotation?.status === "awaiting-key-holder",
+      );
     await journal.setStatus(operation, open ? "open" : "done");
   } catch (e) {
     if (e instanceof IdentityConflict)
@@ -305,7 +318,30 @@ export async function reconcileDevices(
   } finally {
     pool.closeAll();
   }
-  return { operation, targets: Object.freeze(out) };
+  return { operation, targets: Object.freeze(out), document };
+}
+
+/** §7.1 step 4: a device entry for each device of R in I's chain without one. */
+function displayIntents(
+  I: LinearChain,
+  doc: { devices(): ReadonlyMap<string, unknown> },
+  R: PrincipalId,
+): IdentityIntent[] {
+  const intents: IdentityIntent[] = [];
+  for (const [hex, d] of I.state.devices) {
+    if (!bytesEqual(d.root, R) || d.chain === null || d.kind === DEVICE_KIND.PAIRING) continue;
+    const key = principalRefOf(principalId(fromHex(hex)));
+    if (doc.devices().has(key)) continue;
+    intents.push({
+      intent: "device.put",
+      key,
+      entry: {
+        label: deviceFingerprint(principalId(fromHex(hex))),
+        kind: d.kind === DEVICE_KIND.SERVICE ? 1 : 0,
+      },
+    });
+  }
+  return intents;
 }
 
 async function reconcileTarget(

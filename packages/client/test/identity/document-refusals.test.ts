@@ -4,6 +4,7 @@
 // explicit result and keep their operation open, and a resumed operation
 // writes the unit again.
 import { bytesEqual, type PrincipalId, type ResourceId, toHex } from "@openlfcp/core";
+import { deviceFingerprint } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
 import { heldDeks, loadIdentityDocument, syncChain } from "../../src/identity/context.js";
 import { principalRefOf } from "../../src/identity/document.js";
@@ -16,6 +17,7 @@ import {
   resumeApproval,
 } from "../../src/identity/pairing.js";
 import { requestPairing } from "../../src/identity/pairing-request.js";
+import { reconcileDevices } from "../../src/identity/reconcile.js";
 import type { MemoryCoordinator, UploadEvent } from "./memory-coordinator.js";
 import { party, URL } from "./support.js";
 import { type Node, node, world } from "./world.js";
@@ -128,5 +130,42 @@ describe("pairing rejection: the unit that deletes the request (§5.3 step 4)", 
     expect((await cancelPairing({ ...w.P, session, reject: key })).kind).toBe("cancelled");
     expect((await documentOf(w.P, w.I)).requests().has(key)).toBe(false);
     expect((await new OperationJournal(w.P.storage).load(session)).status).toBe("abandoned");
+  });
+});
+
+describe("reconciliation: the display unit of §7.1 step 4", { timeout: 60_000 }, () => {
+  /** Device 2 approved in I's chain, its device entry never written. */
+  async function withoutEntry() {
+    const w = await world(0);
+    const { review, key } = await reviewed(w);
+    nackUnits(w.server, id(1), w.I, "AUTHORIZATION_FAILED");
+    const a = await approvePairing({ ...w.P, review, preset: "full" });
+    w.server.fault = () => undefined;
+    if (a.kind !== "document-incomplete") throw new Error(`approval: ${a.kind}`);
+    return { w, key };
+  }
+
+  test("refused as stale: written again on the current state of I", async () => {
+    const { w, key } = await withoutEntry();
+    nackUnits(w.server, id(1), w.I, "STALE_DATA_EPOCH", 1);
+    const r = await reconcileDevices({ ...w.P, only: [w.I] });
+    w.server.fault = () => undefined;
+    expect(r.document).toEqual({ state: "committed-own" });
+    expect((await documentOf(w.P, w.I)).devices().get(key)?.label).toBe(deviceFingerprint(id(2)));
+    expect((await new OperationJournal(w.P.storage).load(r.operation)).status).toBe("done");
+  });
+
+  test("refused otherwise: reported, the operation open; the next run writes the entry", async () => {
+    const { w, key } = await withoutEntry();
+    nackUnits(w.server, id(1), w.I, "AUTHORIZATION_FAILED");
+    const r = await reconcileDevices({ ...w.P, only: [w.I] });
+    w.server.fault = () => undefined;
+    expect(r.document).toEqual({ state: "refused", code: "AUTHORIZATION_FAILED" });
+    expect((await new OperationJournal(w.P.storage).load(r.operation)).status).toBe("open");
+    expect((await documentOf(w.P, w.I)).devices().has(key)).toBe(false);
+
+    const again = await reconcileDevices({ ...w.P, only: [w.I] });
+    expect(again.document).toEqual({ state: "committed-own" });
+    expect((await documentOf(w.P, w.I)).devices().has(key)).toBe(true);
   });
 });
