@@ -155,4 +155,12 @@ describe("the rotation frontier and the local accepted set (re-review 12c)", {
     for (const u of [four, five]) w.server.inject(R, u.bytes);
     expect(await rotate("probe-forward")).toEqual([2n, [[5n, 5n]]]);
   });
+
+  test("12d.2: a unit below a higher Snapshot-covered position is not accepted", async () => {
+    const { w, R, seal, b, actor, storeSnapshot, rotate } = await setup();
+    // The Snapshot covers 1..2 and 4, not 3: the actor's accepted position is already 4.
+    await storeSnapshot([{ principalId: actor, contiguous: 2n, ranges: [[4n, 4n]] }]);
+    w.server.inject(R, seal(3, b.unitId, "late hole").bytes);
+    expect(await rotate("probe-sparse")).toEqual([2n, [[4n, 4n]]]);
+  });
 });

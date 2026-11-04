@@ -168,9 +168,10 @@ export async function verifiedFrontier(
     let links: boolean;
     if (hasSequence(local.snapshot, p.actor, p.actorSeq)) links = true;
     else {
-      // The actor's last accepted position before this unit: its latest held unit
-      // or the highest sequence a verified Snapshot covers, whichever is later.
-      const covered = coveredBelow(local.snapshot, p.actor, p.actorSeq);
+      // The actor's last accepted position: its latest held unit or the highest
+      // sequence a verified Snapshot covers, whichever is later. A unit at or below
+      // an accepted position is not a link of the actor's chain (W §26.2).
+      const covered = coveredTop(local.snapshot, p.actor);
       const position = (last?.seq ?? 0n) > covered ? (last?.seq ?? 0n) : covered;
       const prev = p.prevDataUnitId === null ? null : toHex(p.prevDataUnitId);
       // W §26.2: the unit names the actor's latest accepted unit (gaps allowed),
@@ -178,7 +179,8 @@ export async function verifiedFrontier(
       // Snapshot without its bytes here, its ID cannot be compared: the link is
       // taken only when it names no unit known here at all (not an accepted older
       // one, not an excluded twin, not a later unit of this pass).
-      if (position === 0n) links = prev === null;
+      if (position >= p.actorSeq) links = false;
+      else if (position === 0n) links = prev === null;
       else if (prev === null) links = false;
       else if (last !== undefined && last.seq === position) links = last.id === prev;
       else links = !knownIds.has(prev);
@@ -191,16 +193,12 @@ export async function verifiedFrontier(
   return frontier;
 }
 
-/** The highest sequence of `actor` below `seq` that `vector` covers, or 0. */
-function coveredBelow(vector: HaveVector, actor: Uint8Array, seq: bigint): bigint {
+/** The highest sequence of `actor` that `vector` covers, or 0. */
+function coveredTop(vector: HaveVector, actor: Uint8Array): bigint {
   const h = vector.find((x) => bytesEqual(x.principalId, actor));
   if (h === undefined) return 0n;
-  let best = h.contiguous < seq ? h.contiguous : seq - 1n;
-  for (const [start, end] of h.extras)
-    if (start < seq) {
-      const top = end < seq ? end : seq - 1n;
-      if (top > best) best = top;
-    }
+  let best = h.contiguous;
+  for (const [, end] of h.extras) if (end > best) best = end;
   return best;
 }
 
