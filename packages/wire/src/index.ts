@@ -127,6 +127,8 @@ export {
 export {
   activeDevice,
   actsFor,
+  authorizeDeviceGrant,
+  authorizeDeviceRevoke,
   type DeviceBinding,
   type DeviceRevocation,
   type DeviceRole,
