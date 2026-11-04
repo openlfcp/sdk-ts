@@ -92,7 +92,8 @@ for state errors. Conflicted requests/kind report the first invalid value's
 diagnostic in table order; `INVALID_FIELD_TYPE` is the fallback when every
 concurrent value is valid on its own (§4 rule 2). Unknown request fields also
 invalidate the entry when conflicted. Tests use §12 ID-05 names and synthetic
-canonical changes, including the diagnostic cases beyond the corpus.
+canonical changes, including the diagnostic cases beyond the corpus;
+`conformance/identity/profile.test.ts` runs IDENTITY-PROFILE-TEST-VECTORS-01.
 Admission retains causal, object and sequence indexes across calls. It applies
 new changes without cloning history and replays the trusted byte log only to
 recover from an engine error; local writes validate one candidate on a fork.
