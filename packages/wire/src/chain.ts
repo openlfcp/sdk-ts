@@ -690,12 +690,10 @@ export function validateControlChain(
         );
         continue;
       }
-      const verified = dependenciesAndSignatures(k.record, state, options);
-      if (verified !== undefined) {
-        problems.push(problem(verified.problem, at(k), verified.reason));
-        continue;
-      }
       // §19: "The new epoch number MUST be exactly the previous Data Epoch plus one."
+      // A chain placement check, §62 class 2: before dependencies, signatures
+      // and authority, so a wrong number is INVALID_CONTROL_CHAIN even when
+      // the signature does not verify or the issuer is unknown (decision I9).
       if (k.record.body.type === "KEY_EPOCH" && k.record.body.epoch !== state.epoch.epoch + 1n) {
         problems.push(
           problem(
@@ -704,6 +702,11 @@ export function validateControlChain(
             `Key Epoch ${k.record.body.epoch} after epoch ${state.epoch.epoch}: must be the previous epoch plus one (§19)`,
           ),
         );
+        continue;
+      }
+      const verified = dependenciesAndSignatures(k.record, state, options);
+      if (verified !== undefined) {
+        problems.push(problem(verified.problem, at(k), verified.reason));
         continue;
       }
       const decision = authorize(k.record, state);

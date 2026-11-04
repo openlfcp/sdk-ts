@@ -442,6 +442,25 @@ describe("key rotation, routes and Key Packages", () => {
     expect(outcome(c)).toMatch(/does not hold key\/rotate/);
   });
 
+  it("checks the new epoch number in chain placement, before dependencies and authority (§19, §62 class 2)", () => {
+    const epoch = (n: bigint): ControlBody => ({
+      type: "KEY_EPOCH",
+      epoch: dataEpoch(n),
+      dekCommitment: seq32(11) as never,
+      finalFrontier: [],
+      reason: 0n,
+    });
+    for (const by of [OWNER, BRUNO, DORA]) {
+      const c = new Chain();
+      c.add(grant(BRUNO, [DATA_WRITE]), OWNER);
+      c.add(epoch(2n), by);
+      expect(outcome(c)).toMatch(/^EPOCH\/INVALID_CONTROL_CHAIN: /);
+    }
+    const unknown = new Chain();
+    unknown.add(epoch(1n), DORA);
+    expect(outcome(unknown)).toMatch(/\/MISSING_DEPENDENCY: /);
+  });
+
   it("requires route/update and an increasing route version (§20), and applies the route", () => {
     const route = (v: bigint): ControlBody => ({
       type: "ROUTE_UPDATE",
