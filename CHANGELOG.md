@@ -30,8 +30,31 @@ stays `mvp-0.2-baseline.12` until `mvp-0.4-baseline.1` is published.
 - `@openlfcp/wire`: pairing links (`lfcp://pair/…`, `parsePairingUri`,
   `assemblePairingUri`, `pairingDeviceSigner`) and `deviceFingerprint`
   (IDENTITY-PROFILE-01 §5.2).
+- `@openlfcp/wire`: `exposedReaders` / `isExposingRevocation` (W §17.5
+  Exposure) and `revokedReaderPrefix` (W §41 control read for a revoked
+  reader); `authorizeDeviceGrant` and `authorizeDeviceRevoke` are exported.
+- `@openlfcp/client`: the identity flows of IDENTITY-PROFILE-01 (LFCP-04-410,
+  checked against spec PR 3's IDENTITY-FLOW-FIXTURES-01 at a pinned commit):
+  the durable operation journal, the §9.2 phase classifier and the package
+  ledger (§9); `createIdentityResource` (§5.1); pairing on the managing side
+  (`createPairingSession`, `pairingRequests`, `approvePairing`,
+  `cancelPairing`, resumable) and on the new side (`requestPairing`,
+  `completePairing` with the §6 statuses); `registerDevice`,
+  `reconcileDevices` (§7.1), `previewRevocation` and `revokeDevice` with the
+  rotator test, the verified frontier and the rotation policy by exposure
+  (§8); `acceptInvitationAsDevice` and `createResourceAsDevice` (§7.2, §7.3);
+  `revocationStatus` (§8.6). The flows talk to coordinators through an
+  `IdentityNetwork` port (`connectionNetwork()` over `LfcpConnection`) and to
+  the Identity Resource's document through an `IdentityDocumentPort` backed
+  by `@openlfcp/shared-objects`' `IdentityReplica`.
+- `@openlfcp/shared-objects`: `IdentityReplica.write` takes several intents
+  for one change.
 
 ### Changed
+- `planRevocation` (and `SyncClient.revokeAccess`) seal the new DEK to every
+  Principal holding `data/read` at the new head, and a revoker that is not
+  the rotator of IDENTITY-PROFILE-01 §8.1 revokes without a Key Epoch and
+  reports `awaitingRotation` instead of refusing.
 
 - A record of type 9 is no longer an unknown core type: a type-9 record
   whose body is not a `device-grant-body` is `MALFORMED_MESSAGE`, not
