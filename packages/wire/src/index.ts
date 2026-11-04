@@ -318,6 +318,7 @@ export {
   principalDescriptorFromKeys,
   principalDescriptorToCbor,
 } from "./principal.js";
+export { type RevokedReaderPrefix, revokedReaderPrefix } from "./revoked-reader.js";
 export {
   type ClientConnectionEvent,
   type ClientConnectionState,
