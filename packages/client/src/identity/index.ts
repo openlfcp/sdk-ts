@@ -126,6 +126,15 @@ export {
   setLocalIdentityResource,
 } from "./resource.js";
 export {
+  previewRevocation,
+  type ResourcePreview,
+  type RevocationPreview,
+  type RevocationResult,
+  type RevokeDeviceResult,
+  revokeDevice,
+  rotateIfExposed,
+} from "./revocation.js";
+export {
   type ExposingRevocation,
   exposingRevocationsSince,
   type RotationOutcome,
