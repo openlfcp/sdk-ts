@@ -509,7 +509,7 @@ export async function loadIdentityDocument(options: {
   });
   const seen = new InMemorySeenUnits();
   const latest = new Map<string, { seq: bigint; unitId: DataUnitId }>();
-  const pending: { plaintext: Uint8Array; author: IdentityAuthor }[] = [];
+  const pending: { plaintext: Uint8Array; author: IdentityAuthor; unitId: DataUnitId }[] = [];
   const apply = (plaintext: Uint8Array, author: IdentityAuthor): boolean =>
     doc.receive(plaintext, author);
   for (const { bytes, parsed } of units) {
@@ -525,7 +525,7 @@ export async function loadIdentityDocument(options: {
       actorSeq: r.seq,
       writerClass: identityWriterClass(at, root, r.actor),
     };
-    if (!apply(r.value, author)) pending.push({ plaintext: r.value, author });
+    if (!apply(r.value, author)) pending.push({ plaintext: r.value, author, unitId: r.unitId });
     latest.set(toHex(r.actor), { seq: r.seq, unitId: r.unitId });
   }
   // Changes of other actors that depend on a change applied later (SOP §14.1).
@@ -539,13 +539,28 @@ export async function loadIdentityDocument(options: {
       } else i++;
     }
   }
-  return { latest };
+  const unapplied = pending.map((p) =>
+    Object.freeze({ actor: p.author.signer, seq: p.author.actorSeq, unitId: p.unitId }),
+  );
+  return { latest, unapplied: Object.freeze(unapplied) };
 }
 
 /** What loadIdentityDocument learned besides the document. */
 export interface IdentityDocumentLoad {
   /** Each actor's latest accepted unit (by Principal hex): the next unit's previous (W §26.2). */
   readonly latest: ReadonlyMap<string, { readonly seq: bigint; readonly unitId: DataUnitId }>;
+  /**
+   * The units the wire accepted whose change the document did not take,
+   * after every change it could: refused by its admission (IDENTITY-PROFILE-01
+   * §3), or held for a change it never got (SOP §14.1). The port does not
+   * tell the two apart. In delivery order; empty when the document holds
+   * every unit.
+   */
+  readonly unapplied: readonly {
+    readonly actor: PrincipalId;
+    readonly seq: bigint;
+    readonly unitId: DataUnitId;
+  }[];
 }
 
 /** The Genesis owner of a chain: the root of an Identity Resource (§2.3). */

@@ -6,8 +6,13 @@
 import { bytesEqual, type PrincipalId, type ResourceId, toHex } from "@openlfcp/core";
 import { deviceFingerprint } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
-import { heldDeks, loadIdentityDocument, syncChain } from "../../src/identity/context.js";
-import { principalRefOf } from "../../src/identity/document.js";
+import {
+  heldDeks,
+  loadIdentityDocument,
+  sealIdentityUnit,
+  syncChain,
+} from "../../src/identity/context.js";
+import { principalRefOf, resourceRef } from "../../src/identity/document.js";
 import { OperationJournal } from "../../src/identity/journal.js";
 import {
   approvePairing,
@@ -239,5 +244,71 @@ describe("revocation: the revoked flag of §8.2", { timeout: 60_000 }, () => {
     await expect(revokeDevice({ ...P, device: id(2), reason: 0n })).rejects.toThrow(
       "the document is broken",
     );
+  });
+});
+
+describe("loading the document: units the document does not take", { timeout: 60_000 }, () => {
+  test("a unit the wire accepts and admission refuses is returned, not dropped", async () => {
+    const w = await world(0);
+    const B = await pair(w, w.P, 2, "full");
+    const before = await (async () => {
+      const channel = await w.P.network.connect(w.P.installation.signer, URL);
+      const chain = await syncChain(w.P.storage, channel, w.I);
+      const doc = w.P.document(w.I, chain.state.owner.principalId);
+      return loadIdentityDocument({
+        channel,
+        chain,
+        deks: await heldDeks(w.P.secrets, chain),
+        doc,
+      });
+    })();
+    expect(before.unapplied).toEqual([]);
+
+    // B writes a hint into the root's entry: a valid unit, refused by AI5.
+    const channel = await B.network.connect(B.installation.signer, URL);
+    const chain = await syncChain(B.storage, channel, w.I);
+    const deks = await heldDeks(B.secrets, chain);
+    const plaintext = new TextEncoder().encode(
+      JSON.stringify({
+        intents: [
+          {
+            intent: "device.put",
+            key: principalRefOf(id(1)),
+            entry: { label: "laptop", kind: 0, missing_keys: { [resourceRef(w.I)]: [0] } },
+          },
+        ],
+        deps: [],
+      }),
+    );
+    const doc = new FakeIdentityDocument();
+    const load = await loadIdentityDocument({ channel, chain, deks, doc });
+    // The forged change goes out as written: B's own document would refuse it.
+    class Forged extends FakeIdentityDocument {
+      override write(): Uint8Array {
+        return plaintext;
+      }
+    }
+    const bytes = await sealIdentityUnit({
+      storage: B.storage,
+      chain,
+      deks,
+      signer: B.installation.signer,
+      doc: new Forged(),
+      latest: load.latest,
+      intents: [],
+    });
+    expect((await channel.putDataUnit(w.I, bytes)).kind).toBe("ack");
+
+    const p = await w.P.network.connect(w.P.installation.signer, URL);
+    const now = await syncChain(w.P.storage, p, w.I);
+    const after = await loadIdentityDocument({
+      channel: p,
+      chain: now,
+      deks: await heldDeks(w.P.secrets, now),
+      doc: w.P.document(w.I, now.state.owner.principalId),
+    });
+    expect(after.unapplied.map((u) => [toHex(u.actor), u.seq])).toEqual([
+      [toHex(id(2)), after.latest.get(toHex(id(2)))?.seq],
+    ]);
   });
 });
