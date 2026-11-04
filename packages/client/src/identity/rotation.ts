@@ -153,8 +153,9 @@ export async function verifiedFrontier(
     return a.parsed.payload.actorSeq < b.parsed.payload.actorSeq ? -1 : 1;
   });
   const seen = new InMemorySeenUnits();
-  // Per actor: the latest accepted unit (its ID and sequence).
+  // Per actor: the latest accepted unit held as bytes, and every accepted unit ID.
   const latest = new Map<string, { id: string; seq: bigint }>();
+  const known = new Map<string, Set<string>>();
   // Sequences covered by a verified Snapshot count as accepted (W §29.3).
   let frontier: HaveVector = local.snapshot;
   for (const { bytes, parsed } of units) {
@@ -163,24 +164,45 @@ export async function verifiedFrontier(
     if (check.kind !== "valid") continue;
     const actor = toHex(p.actor);
     const last = latest.get(actor);
-    const covered = hasSequence(local.snapshot, p.actor, p.actorSeq);
-    // The actor's hash chain (W §26.2): a unit is accepted when it names the
-    // actor's latest accepted unit, or none before the actor's first; across a
-    // Snapshot boundary whose unit is not held, the covered sequence just before.
-    const inSnapshot = local.snapshot.some((h) => bytesEqual(h.principalId, p.actor));
-    const links =
-      covered ||
-      (p.prevDataUnitId === null
-        ? last === undefined && !inSnapshot
-        : last !== undefined && last.seq < p.actorSeq
-          ? last.id === toHex(p.prevDataUnitId) ||
-            (hasSequence(local.snapshot, p.actor, p.actorSeq - 1n) && last.seq < p.actorSeq - 1n)
-          : hasSequence(local.snapshot, p.actor, p.actorSeq - 1n));
+    const ids = known.get(actor) ?? new Set<string>();
+    let links: boolean;
+    if (hasSequence(local.snapshot, p.actor, p.actorSeq)) links = true;
+    else {
+      // The actor's last accepted position before this unit: its latest held unit
+      // or the highest sequence a verified Snapshot covers, whichever is later.
+      const covered = coveredBelow(local.snapshot, p.actor, p.actorSeq);
+      const position = (last?.seq ?? 0n) > covered ? (last?.seq ?? 0n) : covered;
+      const prev = p.prevDataUnitId === null ? null : toHex(p.prevDataUnitId);
+      // W §26.2: the unit names the actor's latest accepted unit (gaps allowed),
+      // or none before the actor's first. When that unit is covered by a
+      // Snapshot without its bytes here, its ID cannot be compared; a unit that
+      // names an older accepted unit is still refused.
+      if (position === 0n) links = prev === null;
+      else if (prev === null) links = false;
+      else if (last !== undefined && last.seq === position) links = last.id === prev;
+      else links = !ids.has(prev);
+    }
     if (!links) continue;
-    latest.set(actor, { id: toHex(check.unitId), seq: p.actorSeq });
+    if (last === undefined || last.seq < p.actorSeq)
+      latest.set(actor, { id: toHex(check.unitId), seq: p.actorSeq });
+    ids.add(toHex(check.unitId));
+    known.set(actor, ids);
     frontier = addSequence(frontier, p.actor, p.actorSeq);
   }
   return frontier;
+}
+
+/** The highest sequence of `actor` below `seq` that `vector` covers, or 0. */
+function coveredBelow(vector: HaveVector, actor: Uint8Array, seq: bigint): bigint {
+  const h = vector.find((x) => bytesEqual(x.principalId, actor));
+  if (h === undefined) return 0n;
+  let best = h.contiguous < seq ? h.contiguous : seq - 1n;
+  for (const [start, end] of h.extras)
+    if (start < seq) {
+      const top = end < seq ? end : seq - 1n;
+      if (top > best) best = top;
+    }
+  return best;
 }
 
 /** This installation's stored units of a Resource and its verified Snapshots' coverage. */

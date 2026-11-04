@@ -111,4 +111,20 @@ describe("the rotation frontier and the local accepted set (re-review 12c)", {
     for (const u of [a, b, c]) w.server.inject(R, u.bytes);
     expect(await rotate("probe-equivocation")).toEqual([2n, []]);
   });
+
+  test("12c.2: a gap after a verified Snapshot keeps the next unit that names its last unit", async () => {
+    const { w, R, seal, b, storeSnapshot, rotate } = await setup();
+    await storeSnapshot();
+    // 3 was reserved and abandoned; 4 names 2, the Snapshot's last covered unit.
+    w.server.inject(R, seal(4, b.unitId, "four").bytes);
+    expect(await rotate("probe-gap")).toEqual([2n, [[4n, 4n]]]);
+  });
+
+  test("12c.2: a unit naming a unit older than the Snapshot's last is not accepted", async () => {
+    const { w, R, seal, a, applier, storeSnapshot, rotate } = await setup();
+    expect((await applier.receive(w.server.chain(R), a.bytes)).kind).toBe("applied");
+    await storeSnapshot();
+    w.server.inject(R, seal(3, a.unitId, "wrong previous").bytes);
+    expect(await rotate("probe-previous")).toEqual([2n, []]);
+  });
 });
