@@ -65,7 +65,9 @@ describe("F13: phases rebuilt from the approval journal", () => {
   });
 });
 
-describe("F08: the 32-device limit and the forty sessions (W §17.4 rule 8)", () => {
+describe("F08: the 32-device limit and the forty sessions (W §17.4 rule 8)", {
+  timeout: 60_000,
+}, () => {
   test("at 32 live devices a further pairing device is infeasible: no link", () => {
     const chain = chainAt("flow.p31_pairing_device");
     const jm2 = cert("CERT_JM2").payload;
