@@ -15,6 +15,7 @@ import {
   principalRefOf,
   reconcileDevices,
   requestPairing,
+  revokeDevice,
   sealIdentityUnit,
   syncChain,
 } from "@openlfcp/client";
@@ -135,6 +136,19 @@ async function unitOf(
   });
 }
 
+/** Sends a unit of `who` in I carrying `intents`. */
+async function putAs(
+  server: MemoryCoordinator,
+  who: Node,
+  I: ResourceId,
+  intents: IdentityIntent[],
+) {
+  const bytes = await unitOf(server, who, I, intents);
+  const channel = await server.network().connect(who.installation.signer, URL);
+  const answer = await channel.putDataUnit(I, bytes);
+  if (answer.kind !== "ack") throw new Error(`the concurrent write: ${answer.code}`);
+}
+
 /** P's Data Units to I. */
 const rootUnits = (server: MemoryCoordinator, I: ResourceId) =>
   server.unitsOf(I).filter((u) => bytesEqual(u.actor, ROOT)).length;
@@ -201,5 +215,43 @@ describe("identity display writes racing another writer (IdentityReplica)", {
     const doc = (await open(w.server, w.P, w.I)).doc;
     expect(doc.devices().get(key)?.label).toBe("phone");
     expect(doc.devices().get(key)?.label).not.toBe(deviceFingerprint(id(3)));
+  });
+
+  test("revoke: A deletes the device's entry between the two reads; none, and the roster is revoked", async () => {
+    const w = await realWorld(1);
+    await pair({ server: w.server }, w.P, 3, "edit", { document: replicaPort as never });
+    const key = principalRefOf(id(3));
+    w.armAfterRead("current/markRevoked", async () => {
+      await putAs(w.server, w.A, w.I, [{ intent: "device.delete", key }]);
+    });
+    const r = await revokeDevice({ ...w.P, device: id(3), reason: 0n });
+    expect(w.armed()).toBe(false);
+    if (r.kind !== "revoked") throw new Error(r.kind);
+    expect(r.document).toEqual({ state: "none" });
+    expect(r.results.map((x) => x.revoke)).toEqual(["revoked", "revoked"]);
+    expect((await new OperationJournal(w.P.storage).load(r.operation)).status).toBe("done");
+    expect((await open(w.server, w.P, w.I)).doc.devices().has(key)).toBe(false);
+  });
+
+  test("revoke: A sets the flag between the two reads; complete, nothing is sent", async () => {
+    const w = await realWorld(1);
+    await pair({ server: w.server }, w.P, 3, "edit", { document: replicaPort as never });
+    const key = principalRefOf(id(3));
+    w.armAfterRead("current/markRevoked", async () => {
+      const entry = (await open(w.server, w.A, w.I)).doc.devices().get(key);
+      if (entry === undefined) throw new Error("no device entry");
+      const { missing_keys: _hint, ...display } = entry;
+      await putAs(w.server, w.A, w.I, [
+        { intent: "device.put", key, entry: { ...display, revoked: true } },
+      ]);
+    });
+    const before = rootUnits(w.server, w.I);
+    const r = await revokeDevice({ ...w.P, device: id(3), reason: 0n });
+    expect(w.armed()).toBe(false);
+    if (r.kind !== "revoked") throw new Error(r.kind);
+    expect(r.document).toEqual({ state: "complete" });
+    expect(rootUnits(w.server, w.I)).toBe(before);
+    expect(r.results.map((x) => x.revoke)).toEqual(["revoked", "revoked"]);
+    expect((await open(w.server, w.P, w.I)).doc.devices().get(key)?.revoked).toBe(true);
   });
 });

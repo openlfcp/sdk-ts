@@ -236,9 +236,10 @@ export type RevokeDeviceResult =
       readonly operation: string;
       readonly results: readonly RevocationResult[];
       /**
-       * §8.2 display: the device's `revoked` flag in the Identity Resource.
-       * Refused or unreachable leaves the operation open; resuming it
-       * writes the flag again.
+       * §8.2 display: the device's `revoked` flag in the Identity Resource:
+       * `none` when the device has no entry, `complete` when another writer
+       * set the flag. Refused or unreachable leaves the operation open;
+       * revokeDevice with that `operation` writes the flag again.
        */
       readonly document: DocumentWrite;
     }
@@ -481,9 +482,11 @@ async function markRevoked(
   };
   try {
     const { entry } = await current();
-    if (entry === undefined || entry.revoked === true) return { state: "none" };
+    if (entry === undefined) return { state: "none" };
     // Built on the current state of I (a rotation after the revocation makes an
     // earlier unit stale, W §19.1); a resumed operation writes a refused flag again.
+    // Another writer may delete the entry or set the flag meanwhile: nothing is sent.
+    let gone = false;
     const unit = await runUnitPhase(channel, journal, operation, {
       id: "display",
       resource: I,
@@ -491,7 +494,8 @@ async function markRevoked(
       rebuildRefused: true,
       build: async () => {
         const now = await current();
-        if (now.entry === undefined) throw new Error("the device entry is gone");
+        gone = now.entry === undefined;
+        if (now.entry === undefined || now.entry.revoked === true) return null;
         // The device's missing_keys hint is written only by the device (§3 AI5).
         const { missing_keys: _hint, ...display } = now.entry;
         return sealIdentityUnit({
@@ -505,9 +509,8 @@ async function markRevoked(
         });
       },
     });
-    return unit.state === "committed-own"
-      ? { state: "committed-own" }
-      : { state: "refused", code: unit.code ?? "refused" };
+    if (unit.state === "refused") return { state: "refused", code: unit.code ?? "refused" };
+    return { state: gone ? "none" : unit.state };
   } catch (e) {
     // The revocation stands without its display flag; anything else is an error.
     if (e instanceof IdentityUnavailable) return { state: "unreachable" };
