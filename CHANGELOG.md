@@ -8,7 +8,55 @@ remove or rename any.
 
 Multi-device identity, wire codecs (LFCP-04-405, against openlfcp/spec PR 2,
 LFCP-WIRE-01 §7.2, §7.3, §14, §15, §17.4, §17.5, §23.3, §62). The spec pin
-stays `mvp-0.2-baseline.12` until `mvp-0.4-baseline.1` is published.
+is `mvp-0.4-baseline.2` (LFCP-04-409b, below).
+
+### Spec pin: `mvp-0.4-baseline.2`
+
+- `spec.lock` pins `mvp-0.4-baseline.2` (`2af5d97`), moving from
+  `mvp-0.2-baseline.12` with the changes of `mvp-0.4-baseline.1` and
+  `mvp-0.4-baseline.2` (`migrations/mvp-0.4-baseline.*/value-changes.json`).
+  The identity corpora are read from the pinned tag like every other suite:
+  `conformance/identity/spec3.mjs` and its pin on spec PR 3 (`ff81262`) are
+  gone.
+- Conformance runs IDENTITY-PROFILE-TEST-VECTORS-01 as a suite (all 191
+  cases: framing, admission AI0 to AI5 with the writer class taken at the
+  unit's `control_ref`, per-entry validation, the replica scenarios, pairing
+  links, fingerprints, the approval digest, rootOf tables), every Control
+  Record case of LFCP-IDENTITY-TEST-VECTORS-01 with its verdict, wire code
+  and post-state (owner, sequence, epoch, rootOf table), and
+  `READY_identity_01` byte for byte. The CDDL fixture run decodes the
+  `invalid-device-*` fixtures. `unknown_core_type_C1` uses type 31 and is
+  `INVALID_CONTROL_CHAIN` again: the runner's superseding entry for type 9
+  is removed.
+- `@openlfcp/shared-objects/identity`: admission rule AI5
+  (IDENTITY-PROFILE-01 §3, decision I8). A change that creates, writes or
+  deletes `devices[k].missing_keys`, or anything inside it, is
+  `UNAUTHORIZED_WRITER` unless it is signed by the Principal `k` names (the
+  root for its own entry); deleting or replacing the entry itself is not
+  such a write. Entry maps are those created in the causal history, values
+  the engine does not select and maps since replaced or deleted included.
+  Concurrent writes are each decided by themselves: the device's is
+  admitted, the other refused with its dependants.
+- `@openlfcp/shared-objects/identity`: AI2 is decided on the objects a write
+  names as its predecessors, not on the values visible at its dependencies.
+  A scalar whose operation replaces no object is admitted even beside a list
+  in the same field (§4 then judges the field), and a scalar over a map held
+  in an entry field is `CONTAINER_REPLACED`, as over a list.
+- `@openlfcp/wire`: the new epoch number of a `KEY_EPOCH` is checked in chain
+  placement (LFCP-WIRE-01 §19, §62 class 2, decision I9), before
+  dependencies, signatures and authority: a wrong number is
+  `INVALID_CONTROL_CHAIN` even when the signature does not verify
+  (`INVALID_SIGNATURE` before) or the issuer is unknown
+  (`MISSING_DEPENDENCY` before).
+- `@openlfcp/client`: `revokeDevice` sets a revoked device's `revoked`
+  display flag without rewriting the device's `missing_keys` hint. It used
+  to copy the whole entry, so the write was refused for any device with a
+  hint, and the refusal, display data only, was dropped silently.
+- A rejected pairing link (IDENTITY-PROFILE-01 §5.2) stays a client-local
+  outcome with no wire code: `requestPairing` reports `invalid-link` or
+  `not-a-session` and sends nothing more as the pairing device. The corpora
+  name it `PAIRING_LINK_REJECTED`; the SDK's parsers throw the client-local
+  `INVALID_INVITATION`.
 
 ### Added
 
@@ -34,7 +82,7 @@ stays `mvp-0.2-baseline.12` until `mvp-0.4-baseline.1` is published.
   Exposure) and `revokedReaderPrefix` (W §41 control read for a revoked
   reader); `authorizeDeviceGrant` and `authorizeDeviceRevoke` are exported.
 - `@openlfcp/client`: the identity flows of IDENTITY-PROFILE-01 (LFCP-04-410,
-  checked against spec PR 3's IDENTITY-FLOW-FIXTURES-01 at a pinned commit):
+  checked against IDENTITY-FLOW-FIXTURES-01 of `mvp-0.4-baseline.2`):
   the durable operation journal, the §9.2 phase classifier and the package
   ledger (§9); `createIdentityResource` (§5.1); pairing on the managing side
   (`createPairingSession`, `pairingRequests`, `approvePairing`,
@@ -65,8 +113,8 @@ stays `mvp-0.2-baseline.12` until `mvp-0.4-baseline.1` is published.
 
 - A record of type 9 is no longer an unknown core type: a type-9 record
   whose body is not a `device-grant-body` is `MALFORMED_MESSAGE`, not
-  `INVALID_CONTROL_CHAIN` (baseline.12's `unknown_core_type_C1`; the
-  conformance runner records the superseding value).
+  `INVALID_CONTROL_CHAIN` (baseline.12's `unknown_core_type_C1`, which
+  `mvp-0.4-baseline.1` moves to type 31).
 - Structure before placement (§62): a transfer commit's offer and accept
   are parsed with the commit, so a malformed one is `MALFORMED_MESSAGE`
   even when the commit is misplaced or its issuer unknown; a misplaced

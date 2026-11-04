@@ -131,7 +131,7 @@ The official vectors belong to `openlfcp/spec` and are never copied into
 sdk-ts. `spec.lock` pins the spec version the SDK implements:
 
 ```json
-{ "tag": "mvp-0.2-baseline.10", "commit": "a3161f7a29f42462eac7e13c37e2d57db65866c1" }
+{ "tag": "mvp-0.4-baseline.2", "commit": "2af5d977f2a07407d1568af2fe406353b72aa00a" }
 ```
 
 `conformance/spec.mjs` reads spec files with `git show <commit>:<path>`
@@ -177,6 +177,16 @@ or actor it does not read (§14.1, finding F1); baseline.10 adds SS88 to SS91. T
 production SDK already met these rules; its conformance adapter now counts a
 change held at a taken sequence number (§14.1) among the held, not the refused.
 
+`mvp-0.4-baseline.2` is `mvp-0.2-baseline.12` plus multi-device root identity
+(ADR 0011): LFCP-WIRE-01 §7.1 to §7.3 and the device records, IDENTITY-PROFILE-01
+and its three corpora, with the clarifications of decisions I8 and I9 (admission
+rule AI5, the epoch number of a `KEY_EPOCH` in §62 class 2). The identity corpora
+are read from the pinned tag like the others: `conformance/identity/profile.test.ts`
+runs IDENTITY-PROFILE-TEST-VECTORS-01 as a suite, `wire-identity.test.ts` every
+Control Record case of LFCP-IDENTITY-TEST-VECTORS-01 and `READY_identity_01`, and
+the other `conformance/identity` tests the flow fixtures and the wire cases the
+flows use.
+
 ```sh
 pnpm build
 pnpm test:conformance   # only the conformance run and its self-tests
@@ -184,7 +194,8 @@ pnpm test:conformance   # only the conformance run and its self-tests
 
 `conformance/runner.ts` runs a suite through handlers keyed by
 `<type>/<kind>` (`conformance/wire/handlers.ts` for LFCP-TEST-VECTORS-01,
-`conformance/shared-objects/handlers.ts` for SHARED-OBJECTS-TEST-VECTORS-01).
+`conformance/shared-objects/handlers.ts` for SHARED-OBJECTS-TEST-VECTORS-01,
+`conformance/identity/profile-handlers.ts` for IDENTITY-PROFILE-TEST-VECTORS-01).
 Every case must resolve to exactly one of:
 
 - a handler, whose checks must all pass;
