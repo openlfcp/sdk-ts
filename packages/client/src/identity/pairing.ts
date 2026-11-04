@@ -516,6 +516,22 @@ export type ApprovalResult =
   /** Phase 2 meets the 32-device limit: retry after a revocation; the approval stays consumed (§5.3 step 6). */
   | { readonly kind: "limit"; readonly operation: string }
   | { readonly kind: "refused"; readonly operation: string; readonly code: string }
+  /**
+   * Approved in the chain (phases 1 and 2, keys, rotation and registrations
+   * as for `approved`), but the coordinator refused the document unit of
+   * §5.3 step 6 with `code`: the device entry is not written and the request
+   * not removed. The operation stays open; resumeApproval writes the unit
+   * again on the current state.
+   */
+  | {
+      readonly kind: "document-incomplete";
+      readonly operation: string;
+      readonly device: PrincipalId;
+      readonly chain: CertificateChain;
+      readonly registrations: readonly RegistrationResult[];
+      readonly rotation: RotationOutcome;
+      readonly code: string;
+    }
   | { readonly kind: "conflict" }
   | { readonly kind: "unavailable"; readonly operation?: string; readonly reason: string };
 
@@ -767,10 +783,13 @@ export async function resumeApproval(
         ...(op.intent.platform === undefined ? {} : { platform: op.intent.platform as string }),
         ...(op.intent.addedAt === undefined ? {} : { added_at: op.intent.addedAt as string }),
       };
-      // Display data only: a refused unit is restored by reconciliation (§7.1 step 4).
-      await runUnitPhase(channel, journal, operation, {
+      // A unit refused as stale is written again in the current epoch (W §19.1);
+      // another refusal is reported, and a resumed approval writes it again.
+      const document = await runUnitPhase(channel, journal, operation, {
         id: "document",
         resource: I,
+        rebuildOn: ["STALE_DATA_EPOCH"],
+        rebuildRefused: true,
         build: async () => {
           const { chain, doc, load } = await openIdentity(o, channel, I);
           return sealIdentityUnit({
@@ -816,16 +835,19 @@ export async function resumeApproval(
         );
       const registered = await registerDevice({ ...o, chain: chainB, targets });
       await journal.updateIntent(operation, { registration: registered.operation });
-      await journal.setStatus(operation, "done");
+      // The session is consumed either way; the approval stays open until its document is written.
       await journal.setStatus(op.intent.session as string, "done");
-      return {
-        kind: "approved",
+      const approved = {
         operation,
         device: principalId(leaf.device.principalId),
         chain: chainB,
         registrations: registered.results,
         rotation,
       };
+      if (document.state === "refused")
+        return { kind: "document-incomplete", ...approved, code: document.code ?? "refused" };
+      await journal.setStatus(operation, "done");
+      return { kind: "approved", ...approved };
     },
     (reason) => ({ kind: "unavailable", operation, reason }),
     () => ({ kind: "conflict" }),

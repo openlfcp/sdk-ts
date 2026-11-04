@@ -661,6 +661,13 @@ export async function runUnitPhase(
      * the refused bytes are kept in the phase as stale, never sent again.
      */
     readonly rebuildOn?: readonly string[];
+    /**
+     * A phase an earlier run left refused, whatever the code, is written
+     * again once as a new unit on the current state: how a flow that
+     * reported the refusal resumes the write (the refused bytes are kept as
+     * stale, never sent again).
+     */
+    readonly rebuildRefused?: boolean;
   },
 ): Promise<{ readonly state: "committed-own" | "refused"; readonly code?: string }> {
   for (let attempt = 0; ; attempt++) {
@@ -669,7 +676,8 @@ export async function runUnitPhase(
     const retry =
       before?.state === "refused" &&
       before.code !== undefined &&
-      (spec.rebuildOn ?? []).includes(before.code);
+      ((spec.rebuildOn ?? []).includes(before.code) ||
+        (attempt === 0 && spec.rebuildRefused === true));
     if (retry && attempt > 3) return { state: "refused", code: before?.code ?? "refused" };
     let bytes: Uint8Array;
     if (before?.bytes !== undefined && !retry) bytes = fromHex(before.bytes);
