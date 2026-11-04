@@ -1,4 +1,10 @@
-import { dataEpoch, generateResourceId, type ResourceId, toHex } from "@openlfcp/core";
+import {
+  dataEpoch,
+  generateResourceId,
+  type PrincipalId,
+  type ResourceId,
+  toHex,
+} from "@openlfcp/core";
 import { dekCommitment, generateResourceDEK } from "@openlfcp/crypto";
 import { signControlRecord, validateControlChain } from "@openlfcp/wire";
 import {
@@ -16,7 +22,7 @@ import {
   registerDevice,
   signChain,
 } from "../../src/identity/devices.js";
-import { resourceRef } from "../../src/identity/document.js";
+import { type IdentityDocumentPort, resourceRef } from "../../src/identity/document.js";
 import {
   approvePairing,
   createPairingSession,
@@ -30,7 +36,7 @@ import { device, party, URL } from "./support.js";
 
 /** One installation of the test world: its Principal, storage and secrets, and its flow options. */
 export interface Node extends FlowOptions {
-  readonly document: (r: ResourceId, root: Uint8Array) => FakeIdentityDocument;
+  readonly document: (r: ResourceId, root: PrincipalId) => IdentityDocumentPort;
 }
 
 export function node(server: MemoryCoordinator, who: Installation, local = device()): Node {
@@ -67,7 +73,7 @@ export async function hostResource(
   if (chain.kind !== "linear") throw new Error(chain.kind);
   await storeDek(owner.storage, owner.secrets, chain, dataEpoch(0n), dek);
   server.seed([genesis.bytes]);
-  return { resource: R, entry: { profile, endpoints: [URL], coordinator: URL } };
+  return { resource: R, dek, entry: { profile, endpoints: [URL], coordinator: URL } };
 }
 
 /** Root P with an Identity Resource whose roster lists `n` raw Resources. */
@@ -94,11 +100,14 @@ export async function pair(
   approver: Node,
   who: number,
   preset: MaskPreset,
-  options: { kind?: 0 | 1; scope?: readonly ResourceId[] } = {},
+  options: { kind?: 0 | 1; scope?: readonly ResourceId[]; document?: Node["document"] } = {},
 ): Promise<Node> {
   const s = await createPairingSession(approver);
   if (s.kind !== "created") throw new Error(`session: ${s.kind}`);
-  const n = node(w.server, party(who));
+  const n: Node = {
+    ...node(w.server, party(who)),
+    ...(options.document === undefined ? {} : { document: options.document }),
+  };
   const req = await requestPairing({
     ...n,
     link: s.link,

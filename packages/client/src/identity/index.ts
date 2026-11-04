@@ -1,6 +1,15 @@
 /** Identity flows (IDENTITY-PROFILE-01 §§5–9, LFCP-04-410). */
 
 export {
+  acceptInvitationAsDevice,
+  claimForRootRecord,
+  createResourceAsDevice,
+  type DeviceAcceptResult,
+  type DeviceCreateResult,
+  type DeviceResourceResult,
+  selfRegistrationRecord,
+} from "./accept.js";
+export {
   deliverKeys,
   extendChain,
   fetchDeks,
