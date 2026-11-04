@@ -41,7 +41,11 @@ is `mvp-0.4-baseline.2` (LFCP-04-409b, below).
   names as its predecessors, not on the values visible at its dependencies.
   A scalar whose operation replaces no object is admitted even beside a list
   in the same field (§4 then judges the field), and a scalar over a map held
-  in an entry field is `CONTAINER_REPLACED`, as over a list.
+  in an entry field is `CONTAINER_REPLACED`, as over a list. AI2 has two
+  levels only, an entry map and a list or map in one of its fields: a scalar
+  over a deeper list (`devices[k].missing_keys[X]`, an unknown field's
+  value) or over a list standing in place of an entry map is admitted and
+  left to §4, where it was `CONTAINER_REPLACED` (review of sdk-ts#16).
 - `@openlfcp/wire`: the new epoch number of a `KEY_EPOCH` is checked in chain
   placement (LFCP-WIRE-01 §19, §62 class 2, decision I9), before
   dependencies, signatures and authority: a wrong number is
