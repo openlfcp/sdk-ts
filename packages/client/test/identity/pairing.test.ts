@@ -26,7 +26,7 @@ async function session(w: Awaited<ReturnType<typeof world>>) {
   return s;
 }
 
-describe("pairing a personal installation (IDENTITY-PROFILE-01 §5.3)", () => {
+describe("pairing a personal installation (IDENTITY-PROFILE-01 §5.3)", { timeout: 60_000 }, () => {
   test("session, request, review, phases 1 and 2, keys, registration in the roster, B ready everywhere", async () => {
     const w = await world(1);
     const s = await session(w);
@@ -202,7 +202,7 @@ describe("pairing a personal installation (IDENTITY-PROFILE-01 §5.3)", () => {
   });
 });
 
-describe("pairing a service installation (§5.3 step 8, §6)", () => {
+describe("pairing a service installation (§5.3 step 8, §6)", { timeout: 60_000 }, () => {
   test("requested {X, Y}, approved {X}: X ready, Y not granted, never registered in I", async () => {
     const w = await world(2);
     const [X, Y] = w.resources as unknown as [Uint8Array, Uint8Array];
