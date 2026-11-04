@@ -125,3 +125,13 @@ export {
   resumeIdentityCreation,
   setLocalIdentityResource,
 } from "./resource.js";
+export {
+  type ExposingRevocation,
+  exposingRevocationsSince,
+  type RotationOutcome,
+  type RotationStatus,
+  type RotatorTest,
+  rotateAfter,
+  rotatorTest,
+  verifiedFrontier,
+} from "./rotation.js";
