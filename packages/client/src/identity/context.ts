@@ -90,14 +90,24 @@ export async function syncChain(
   channel: IdentityChannel,
   resource: ResourceId,
 ): Promise<LinearChain> {
+  // A fork this installation already knows stays blocking (§9.7): no branch is chosen.
+  if ((await storage.control.conflict(resource)) !== undefined)
+    throw new IdentityConflict(resource, "the Control Chain is forked (§9.7)");
   const local = await loadControlChain(storage, resource);
   const have = local?.kind === "linear" ? local.records.map((r) => r.signed.bytes) : [];
   let chain = validateControlChain([
     ...have,
     ...(await channel.control(resource, BigInt(have.length))),
   ]);
-  if (chain.kind !== "linear" && have.length > 0)
-    chain = validateControlChain([...(await channel.control(resource, 0n))]);
+  if (chain.kind !== "linear" && have.length > 0) {
+    // The coordinator's chain does not extend the stored one: validate both
+    // together, so a competing record on a known prev is a conflict (§9.7),
+    // never a silent switch to the coordinator's branch.
+    const all = new Map<string, Uint8Array>();
+    for (const r of [...have, ...(await channel.control(resource, 0n))])
+      all.set(toHex(sha256(r)), r);
+    chain = validateControlChain([...all.values()]);
+  }
   if (chain.kind === "conflict") {
     await saveControlConflict(storage, resource, chain);
     throw new IdentityConflict(resource, "the Control Chain is forked (§9.7)");
