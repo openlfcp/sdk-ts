@@ -48,7 +48,14 @@ stays `mvp-0.2-baseline.12` until `mvp-0.4-baseline.1` is published.
   the Identity Resource's document through an `IdentityDocumentPort` backed
   by `@openlfcp/shared-objects`' `IdentityReplica`.
 - `@openlfcp/shared-objects`: `IdentityReplica.write` takes several intents
-  for one change.
+  for one change; `IdentityReplica.origins` names the admitted changes that
+  wrote an entry, with their signers (the provenance a pairing approval
+  checks and journals).
+- `@openlfcp/client`: a durable write barrier per Resource
+  (`writeBarrier`, `setWriteBarrier`): `revocationStatus` sets it on a
+  refused read or a proven revocation (IDENTITY-PROFILE-01 §8.6), and
+  `createQueuedDataUnit`, `commitOperation` and the identity flows refuse
+  to write behind it.
 
 ### Changed
 - `planRevocation` (and `SyncClient.revokeAccess`) seal the new DEK to every
