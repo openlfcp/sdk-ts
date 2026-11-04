@@ -135,6 +135,9 @@ export {
   StoredSeenUnits,
   saveControlChain,
   saveControlConflict,
+  setWriteBarrier,
+  type WriteBarrier,
+  writeBarrier,
 } from "./storage.js";
 export {
   type CommitBinding,

@@ -42,6 +42,7 @@ import {
 } from "@openlfcp/wire";
 import {
   adoptStoredDeks,
+  checkWriteBarrier,
   loadControlChain,
   saveControlChain,
   saveControlConflict,
@@ -572,6 +573,7 @@ export async function sealIdentityUnit(options: {
 }): Promise<Uint8Array> {
   const { chain, signer } = options;
   const R = chain.state.resourceId;
+  await checkWriteBarrier(options.storage, R);
   const epoch = chain.state.epoch.epoch;
   const dek = options.deks.get(String(epoch));
   if (dek === undefined)
