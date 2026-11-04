@@ -57,14 +57,20 @@ async function setup() {
     ],
   } as never);
   /** A verified Snapshot covering 1..2, stored as the client stores one it loaded. */
-  const storeSnapshot = async () => {
+  const storeSnapshot = async (
+    frontier: readonly {
+      principalId: Uint8Array;
+      contiguous: bigint;
+      ranges?: readonly (readonly [bigint, bigint])[];
+    }[] = [{ principalId: actor, contiguous: 2n }],
+  ) => {
     const snapshot = await createSnapshot({
       view: chain,
       controlHead: chain.state.head,
       publisher: w.P.installation.signer,
       dek,
       sequences: (w.P.storage as unknown as LfcpStorage).snapshotSequences,
-      frontier: [{ principalId: actor, contiguous: 2n }],
+      frontier,
       profile: codec,
       value: new TextEncoder().encode("one,two"),
     } as never);
@@ -95,7 +101,7 @@ async function setup() {
     const mine = last.finalFrontier.find((h) => bytesEqual(h.principalId, actor));
     return [mine?.contiguous, mine?.extras];
   };
-  return { w, R, seal, a, b, applier, storeSnapshot, rotate };
+  return { w, R, seal, a, b, actor, applier, storeSnapshot, rotate };
 }
 
 describe("the rotation frontier and the local accepted set (re-review 12c)", {
@@ -126,5 +132,27 @@ describe("the rotation frontier and the local accepted set (re-review 12c)", {
     await storeSnapshot();
     w.server.inject(R, seal(3, a.unitId, "wrong previous").bytes);
     expect(await rotate("probe-previous")).toEqual([2n, []]);
+  });
+
+  test("12d.1: a unit naming an excluded equivocating unit is not accepted after a Snapshot", async () => {
+    const { w, R, seal, b, applier, storeSnapshot, rotate } = await setup();
+    const c = seal(3, b.unitId, "three");
+    const d = seal(3, b.unitId, "twin");
+    const chain = w.server.chain(R);
+    // Bytes 1..2 were never fetched: unit 3 waits for its predecessor, then the twin arrives.
+    expect((await applier.receive(chain, c.bytes)).kind).toBe("held");
+    expect((await applier.receive(chain, d.bytes)).kind).toBe("equivocation");
+    await storeSnapshot();
+    w.server.inject(R, seal(4, c.unitId, "depends on an excluded 3").bytes);
+    expect(await rotate("probe-excluded")).toEqual([2n, []]);
+  });
+
+  test("12d.1: a unit naming a later unit is not accepted after a Snapshot", async () => {
+    const { w, R, seal, b, storeSnapshot, rotate } = await setup();
+    await storeSnapshot();
+    const five = seal(5, b.unitId, "five");
+    const four = seal(4, five.unitId, "points forward to five");
+    for (const u of [four, five]) w.server.inject(R, u.bytes);
+    expect(await rotate("probe-forward")).toEqual([2n, [[5n, 5n]]]);
   });
 });

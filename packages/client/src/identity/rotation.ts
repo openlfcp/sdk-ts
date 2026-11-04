@@ -143,19 +143,20 @@ export async function verifiedFrontier(
   const all = new Map<string, Uint8Array>();
   for (const bytes of [...local.units, ...(await channel.dataUnits(R, ranges))])
     all.set(toHex(sha256(bytes)), bytes);
-  const units = withoutEquivocations(
-    chain,
-    [...all.values()].map((bytes) => ({ bytes, parsed: parseDataUnit(bytes) })),
-  ).sort((a, b) => {
+  const parsedAll = [...all.values()].map((bytes) => ({ bytes, parsed: parseDataUnit(bytes) }));
+  // Every unit ID this installation knows of, whatever became of the unit (accepted,
+  // excluded as equivocation, or later in this pass): a previous naming one of them
+  // is a known fact about the link, never an unknown unit at a Snapshot position.
+  const knownIds = new Set(parsedAll.map((u) => toHex(u.parsed.signed.id)));
+  const units = withoutEquivocations(chain, parsedAll).sort((a, b) => {
     const x = toHex(a.parsed.payload.actor);
     const y = toHex(b.parsed.payload.actor);
     if (x !== y) return x < y ? -1 : 1;
     return a.parsed.payload.actorSeq < b.parsed.payload.actorSeq ? -1 : 1;
   });
   const seen = new InMemorySeenUnits();
-  // Per actor: the latest accepted unit held as bytes, and every accepted unit ID.
+  // Per actor: the latest accepted unit held as bytes.
   const latest = new Map<string, { id: string; seq: bigint }>();
-  const known = new Map<string, Set<string>>();
   // Sequences covered by a verified Snapshot count as accepted (W §29.3).
   let frontier: HaveVector = local.snapshot;
   for (const { bytes, parsed } of units) {
@@ -164,7 +165,6 @@ export async function verifiedFrontier(
     if (check.kind !== "valid") continue;
     const actor = toHex(p.actor);
     const last = latest.get(actor);
-    const ids = known.get(actor) ?? new Set<string>();
     let links: boolean;
     if (hasSequence(local.snapshot, p.actor, p.actorSeq)) links = true;
     else {
@@ -175,18 +175,17 @@ export async function verifiedFrontier(
       const prev = p.prevDataUnitId === null ? null : toHex(p.prevDataUnitId);
       // W §26.2: the unit names the actor's latest accepted unit (gaps allowed),
       // or none before the actor's first. When that unit is covered by a
-      // Snapshot without its bytes here, its ID cannot be compared; a unit that
-      // names an older accepted unit is still refused.
+      // Snapshot without its bytes here, its ID cannot be compared: the link is
+      // taken only when it names no unit known here at all (not an accepted older
+      // one, not an excluded twin, not a later unit of this pass).
       if (position === 0n) links = prev === null;
       else if (prev === null) links = false;
       else if (last !== undefined && last.seq === position) links = last.id === prev;
-      else links = !ids.has(prev);
+      else links = !knownIds.has(prev);
     }
     if (!links) continue;
     if (last === undefined || last.seq < p.actorSeq)
       latest.set(actor, { id: toHex(check.unitId), seq: p.actorSeq });
-    ids.add(toHex(check.unitId));
-    known.set(actor, ids);
     frontier = addSequence(frontier, p.actor, p.actorSeq);
   }
   return frontier;
