@@ -487,13 +487,20 @@ export async function loadIdentityDocument(options: {
     for (const [start, end] of h.ranges ?? []) out.push({ actor: h.principalId, start, end });
     return out;
   });
+  // Units in the order of their Control Heads, then by actor and sequence: a writer
+  // synchronises before writing, so a change rarely references a head older than
+  // the changes it saw, and changes reach the document after their dependencies
+  // (a held change is still admitted later; provenance comes from the port).
+  // Both units of an equivocation are excluded first (W §26.2).
+  const headSeq = (head: Uint8Array) => chain.stateAt(head)?.seq ?? chain.state.seq + 1n;
   const units = withoutEquivocations(
     chain,
-    (await options.channel.dataUnits(R, ranges)).map((bytes) => ({
-      bytes,
-      parsed: parseDataUnit(bytes),
-    })),
+    (await options.channel.dataUnits(R, ranges)).map((bytes) => {
+      const parsed = parseDataUnit(bytes);
+      return { bytes, parsed, at: headSeq(parsed.payload.controlHead) };
+    }),
   ).sort((a, b) => {
+    if (a.at !== b.at) return a.at < b.at ? -1 : 1;
     const x = toHex(a.parsed.payload.actor);
     const y = toHex(b.parsed.payload.actor);
     if (x !== y) return x < y ? -1 : 1;
