@@ -7,7 +7,7 @@ import {
   sealIdentityUnit,
   syncChain,
 } from "../../src/identity/context.js";
-import { principalRefOf } from "../../src/identity/document.js";
+import { principalRefOf, resourceRef } from "../../src/identity/document.js";
 import { OperationJournal } from "../../src/identity/journal.js";
 import { reconcileDevices } from "../../src/identity/reconcile.js";
 import { previewRevocation, revokeDevice } from "../../src/identity/revocation.js";
@@ -88,7 +88,7 @@ describe("revoking a device (IDENTITY-PROFILE-01 §8)", { timeout: 60_000 }, () 
     const a = await openI(A, w.I);
     const own = a.doc.devices().get(key);
     if (own === undefined) throw new Error("no device entry");
-    const hint = { [toHex(w.I)]: [0] };
+    const hint = { [resourceRef(w.I as never)]: [0] };
     const bytes = await sealIdentityUnit({
       storage: A.storage,
       chain: a.chain,
