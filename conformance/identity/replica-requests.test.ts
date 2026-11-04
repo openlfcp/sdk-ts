@@ -27,30 +27,28 @@ describe("pairing requests with IdentityReplica", { timeout: 120_000 }, () => {
     const P = real(1) as ReturnType<typeof node>;
     const created = await createIdentityResource({ ...P, url: URL, label: "laptop", roster: [] });
     if (created.kind !== "created") throw new Error(created.kind);
-    const sessions: Created[] = [];
-    for (;;) {
+    // Two sessions where the later pairing device sorts before the earlier one.
+    let first: Created | undefined;
+    let last: Created | undefined;
+    for (let i = 0; last === undefined; i++) {
+      if (i > 24) throw new Error("no ordering found");
       const s = await createPairingSession(P);
       if (s.kind !== "created") throw new Error(s.kind);
-      sessions.push(s);
-      const [first] = sessions;
-      // The later session's pairing device must sort before the first one's.
-      if (sessions.length > 1 && toHex(s.pairingDevice) < toHex((first as Created).pairingDevice))
-        break;
-      if (sessions.length > 12) throw new Error("no ordering found");
+      if (first !== undefined && toHex(s.pairingDevice) < toHex(first.pairingDevice)) last = s;
+      else if (first === undefined || toHex(s.pairingDevice) > toHex(first.pairingDevice))
+        first = s;
     }
-    const first = sessions[0] as Created;
-    const last = sessions.at(-1) as Created;
     const B1 = real(3) as ReturnType<typeof node>;
     const B2 = real(4) as ReturnType<typeof node>;
-    expect((await requestPairing({ ...B1, link: first.link, label: "one", kind: 0 })).kind).toBe(
-      "requested",
-    );
+    expect(
+      (await requestPairing({ ...B1, link: (first as Created).link, label: "one", kind: 0 })).kind,
+    ).toBe("requested");
     expect((await requestPairing({ ...B2, link: last.link, label: "two", kind: 0 })).kind).toBe(
       "requested",
     );
-    expect((await pairingRequests({ ...P, session: first.session })).map((r) => r.label)).toEqual([
-      "one",
-    ]);
+    expect(
+      (await pairingRequests({ ...P, session: (first as Created).session })).map((r) => r.label),
+    ).toEqual(["one"]);
     expect((await pairingRequests({ ...P, session: last.session })).map((r) => r.label)).toEqual([
       "two",
     ]);
