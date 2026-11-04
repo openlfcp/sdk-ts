@@ -46,6 +46,8 @@ export interface CreateDataUnitOptions<T> {
   readonly previousUnitId: DataUnitId | null;
   readonly profile: DataProfileCodec<T>;
   readonly value: T;
+  /** The Resource's durable write barrier (writeBarrier), if any: a set barrier refuses the write (§8.6). */
+  readonly writeBarrier?: { readonly state: string } | undefined;
 }
 
 export interface CreatedDataUnit {
@@ -62,10 +64,22 @@ export interface CreatedDataUnit {
  * Resource's, that the actor holds data/write at the head and that the DEK
  * is the one committed for the head's current epoch; then it reserves the
  * next sequence and seals the unit (sealDataUnit).
+ *
+ * Contract (IDENTITY-PROFILE-01 §8.6): this primitive sees no storage, so
+ * it cannot know that the device was refused or proven revoked after the
+ * view was validated. Callers that write for a stored Resource pass its
+ * durable `writeBarrier` (or call `checkWriteBarrier` first); the
+ * storage-backed paths (createQueuedDataUnit, commitOperation, the
+ * identity flows) do it themselves.
  */
 export async function createDataUnit<T>(
   options: CreateDataUnitOptions<T>,
 ): Promise<CreatedDataUnit> {
+  if (options.writeBarrier !== undefined)
+    throw new LfcpError(
+      "AUTHORIZATION_FAILED",
+      `this device must not write to the Resource: ${options.writeBarrier.state} (IDENTITY-PROFILE-01 §8.6)`,
+    );
   const atHead = options.view.stateAt(options.controlHead);
   if (atHead === undefined)
     throw new LfcpError("MISSING_DEPENDENCY", "the Control Head is not on the validated chain");

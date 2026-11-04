@@ -1,6 +1,7 @@
 import { type PrincipalId, toHex } from "@openlfcp/core";
 import { parseDataUnit } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
+import { createDataUnit } from "../../src/data-unit.js";
 import { heldDeks } from "../../src/identity/context.js";
 import { revocationStatus } from "../../src/identity/proof.js";
 import { revokeDevice } from "../../src/identity/revocation.js";
@@ -79,5 +80,34 @@ describe("the revoked device writes nothing (review follow-up, IDENTITY-PROFILE-
       url: URL,
     });
     expect(refused.kind).toBe("revocation-proven");
+  });
+
+  test("13b.1: the low-level createDataUnit refuses when given the barrier", async () => {
+    const w = await world(1);
+    const X = w.resources[0] as Uint8Array;
+    const B = await pair(w, w.P, 3, "edit");
+    await revokeDevice({ ...w.P, device: id(3), reason: 1n });
+    await revocationStatus({ ...B, resource: X as never, url: URL });
+    const view = await loadControlChain(B.storage, X as never);
+    if (view?.kind !== "linear") throw new Error("no chain");
+    const dek = (await heldDeks(B.secrets, view)).get(String(view.state.epoch.epoch));
+    const codec = {
+      dataProfile: view.state.dataProfile,
+      encode: (v: Uint8Array) => v,
+      decode: (v: Uint8Array) => v,
+    };
+    await expect(
+      createDataUnit({
+        view,
+        controlHead: view.state.head,
+        actor: B.installation.signer,
+        dek: dek as never,
+        sequences: B.storage.actorSequences,
+        previousUnitId: null,
+        profile: codec,
+        value: new Uint8Array([1]),
+        writeBarrier: await writeBarrier(B.storage, X as never),
+      }),
+    ).rejects.toMatchObject({ code: "AUTHORIZATION_FAILED" });
   });
 });

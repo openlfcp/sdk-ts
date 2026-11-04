@@ -125,6 +125,7 @@ export { type CreatedSnapshot, type CreateSnapshotOptions, createSnapshot } from
 export {
   adoptStoredDeks,
   type CommitOperationOptions,
+  checkWriteBarrier,
   commitOperation,
   createQueuedDataUnit,
   dataUnitRow,
