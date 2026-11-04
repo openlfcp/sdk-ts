@@ -213,11 +213,17 @@ export class IdentityAdmission {
 
       // AI2 on the causal history: the objects a scalar replaces are those its
       // operation names as predecessors (SOP §11.4 R6), made in the history or
-      // earlier in this change, selected by the engine or not.
+      // earlier in this change, selected by the engine or not. Two levels
+      // only, unlike AI5: an entry map, and a list or map held in a field of
+      // an entry map. Deeper values, and a list in place of an entry map, are
+      // §4's to judge.
       if (TABLES.has(top) && key !== undefined && op.action === "set")
         for (const pred of op.pred) {
           const type = info(pred)?.type;
-          if (type === "list" || (type === "map" && path.length <= 2))
+          if (
+            (path.length === 1 && type === "map") ||
+            (path.length === 2 && parent.type === "map" && (type === "list" || type === "map"))
+          )
             found.add("CONTAINER_REPLACED");
         }
       // AI5: devices[k].missing_keys and everything under it, in every entry

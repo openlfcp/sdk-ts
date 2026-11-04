@@ -1,9 +1,10 @@
 import * as A from "@automerge/automerge";
 import { describe, expect, it } from "vitest";
 import { checkChange } from "../src/admission/index.js";
-import { IdentityReplica } from "../src/identity/index.js";
+import { IdentityReplica, type IdentityUnit, type IdentityWriter } from "../src/identity/index.js";
 import { principalRef } from "../src/values.js";
 import {
+  actor,
   type Doc,
   device,
   edit,
@@ -88,6 +89,130 @@ describe("identity admission / ID-05 (§3 AI0–AI5)", () => {
         options,
       ).result.refused[0]?.diagnostic,
     ).toBe("CONTAINER_REPLACED");
+  });
+
+  describe("AI2 has two levels: an entry map, and a list or map in a field of one", () => {
+    const own = principalRef(personal);
+    // A change without edit()'s kind fill-in, which would write into a list entry.
+    const raw = (doc: A.Doc<Doc>, fn: (d: Doc) => void, writer: IdentityWriter) =>
+      A.change(A.clone(doc, { actor: actor(writer) }), { time: 0 }, fn);
+    const root2 = { ...rootWriter, actorSeq: 2 };
+    const root3 = { ...rootWriter, actorSeq: 3 };
+    const personal2 = { ...personalWriter, actorSeq: 2 };
+    /** devices[own] with a hint list and an unknown field holding a list, both by their device. */
+    const base = () => {
+      const first = initial();
+      const entry = raw(
+        first,
+        (d) => {
+          d.devices[own] = { label: S("phone") };
+          d.devices[own].kind = U(0);
+        },
+        root2,
+      );
+      const lists = raw(
+        entry,
+        (d) => {
+          d.devices[own].missing_keys = { [resourceRef]: [] };
+          d.devices[own].missing_keys[resourceRef][0] = U(1);
+          d.devices[own].future = { [resourceRef]: [] };
+          d.devices[own].future[resourceRef][0] = S("kept");
+        },
+        personalWriter,
+      );
+      return {
+        lists,
+        units: [unit(first), unit(entry, root2), unit(lists, personalWriter)],
+      };
+    };
+    const receive = (units: readonly IdentityUnit[]) => IdentityReplica.fromChanges(units, options);
+
+    it("the device replaces its own missing_keys[X] list with a scalar: admitted, the entry invalid by §4", () => {
+      const b = base();
+      const scalar = raw(
+        b.lists,
+        (d) => {
+          d.devices[own].missing_keys[resourceRef] = true;
+        },
+        personal2,
+      );
+      const r = receive([...b.units, unit(scalar, personal2)]);
+      expect(r.result.refused).toEqual([]);
+      expect(r.replica.devices()[own]).toBeUndefined();
+      expect(r.replica.validate().problems.map((p) => p.pointer)).toContain(
+        `/devices/${own}/missing_keys/${resourceRef}`,
+      );
+    });
+
+    it("a list in an unknown field of the entry replaced with a scalar: admitted and preserved", () => {
+      const b = base();
+      const scalar = raw(
+        b.lists,
+        (d) => {
+          d.devices[own].future[resourceRef] = S("scalar");
+        },
+        root3,
+      );
+      const r = receive([...b.units, unit(scalar, root3)]);
+      expect(r.result.refused).toEqual([]);
+      expect(r.replica.devices()[own]?.label).toBe("phone");
+      expect(r.replica.validate().problems).toEqual([]);
+    });
+
+    it("a list in place of an entry map replaced with a scalar: admitted, the entry invalid by §4", () => {
+      const first = initial();
+      const list = raw(
+        first,
+        (d) => {
+          d.devices[own] = [];
+        },
+        root2,
+      );
+      const scalar = raw(
+        list,
+        (d) => {
+          d.devices[own] = true;
+        },
+        root3,
+      );
+      const r = receive([unit(first), unit(list, root2), unit(scalar, root3)]);
+      expect(r.result.refused).toEqual([]);
+      expect(r.replica.devices()[own]).toBeUndefined();
+    });
+
+    it("another writer replacing the missing_keys[X] list is AI5's UNAUTHORIZED_WRITER, not AI2", () => {
+      const b = base();
+      const scalar = raw(
+        b.lists,
+        (d) => {
+          d.devices[own].missing_keys[resourceRef] = true;
+        },
+        root3,
+      );
+      expect(receive([...b.units, unit(scalar, root3)]).result.refused[0]?.diagnostic).toBe(
+        "UNAUTHORIZED_WRITER",
+      );
+    });
+
+    it("the two levels stay CONTAINER_REPLACED: an entry map, a list or map in its field", () => {
+      const b = base();
+      for (const fn of [
+        (d: Doc) => {
+          d.devices[own] = S("scalar");
+        },
+        (d: Doc) => {
+          d.devices[own].future = S("scalar");
+        },
+        (d: Doc) => {
+          d.devices[own].missing_keys = S("scalar");
+        },
+      ]) {
+        const bad = raw(b.lists, fn, personal2);
+        expect(receive([...b.units, unit(bad, personal2)]).result.refused[0]?.diagnostic).toBe(
+          "CONTAINER_REPLACED",
+        );
+      }
+    });
   });
 
   describe("AI5: devices[k].missing_keys is written only by k", () => {
