@@ -1,12 +1,15 @@
 import {
+  actorSequence,
   bytesEqual,
   type ControlRecordId,
   controlRecordId,
   type DataEpoch,
+  type DataUnitId,
   dataEpoch,
   fromHex,
   hash32,
   LfcpError,
+  type PrincipalId,
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
@@ -31,6 +34,7 @@ import {
   receiveDataUnit,
   receiveKeyPackage,
   type Signer,
+  sealDataUnit,
   sealKeyPackage,
   validateControlChain,
   verifyKeyPackage,
@@ -45,6 +49,7 @@ import {
 import {
   type IdentityAuthor,
   type IdentityDocumentPort,
+  type IdentityIntent,
   identityPlaintextCodec,
   identityWriterClass,
 } from "./document.js";
@@ -462,13 +467,10 @@ export async function loadIdentityDocument(options: {
   readonly chain: LinearChain;
   readonly deks: ReadonlyMap<string, ResourceDEK>;
   readonly doc: IdentityDocumentPort;
-}): Promise<Map<string, { seq: bigint; unitId: Uint8Array }>> {
+}): Promise<IdentityDocumentLoad> {
   const { chain, doc } = options;
   const R = chain.state.resourceId;
-  const root =
-    chain.records[0]?.body.type === "GENESIS"
-      ? chain.records[0].body.owner.principalId
-      : chain.state.owner.principalId;
+  const root = genesisOwner(chain);
   const opened = await options.channel.open(R);
   if (opened.kind === "nack")
     throw new IdentityUnavailable(`RESOURCE_OPEN was refused: ${opened.code}`);
@@ -490,7 +492,21 @@ export async function loadIdentityDocument(options: {
     return a.parsed.payload.actorSeq < b.parsed.payload.actorSeq ? -1 : 1;
   });
   const seen = new InMemorySeenUnits();
-  const latest = new Map<string, { seq: bigint; unitId: Uint8Array }>();
+  const latest = new Map<string, { seq: bigint; unitId: DataUnitId }>();
+  const requestWriters = new Map<string, Set<string>>();
+  const pending: { plaintext: Uint8Array; author: IdentityAuthor }[] = [];
+  const apply = (plaintext: Uint8Array, author: IdentityAuthor): boolean => {
+    const before = new Map([...doc.requests()].map(([k, v]) => [k, stable(v)]));
+    const ok = doc.receive(plaintext, author);
+    if (ok)
+      for (const [k, v] of doc.requests())
+        if (before.get(k) !== stable(v)) {
+          const set = requestWriters.get(k) ?? new Set<string>();
+          set.add(toHex(author.signer));
+          requestWriters.set(k, set);
+        }
+    return ok;
+  };
   for (const { bytes, parsed } of units) {
     const r = await receiveDataUnit(chain, bytes, {
       seen,
@@ -504,10 +520,90 @@ export async function loadIdentityDocument(options: {
       actorSeq: r.seq,
       writerClass: identityWriterClass(at, root, r.actor),
     };
-    doc.receive(r.value, author);
+    if (!apply(r.value, author)) pending.push({ plaintext: r.value, author });
     latest.set(toHex(r.actor), { seq: r.seq, unitId: r.unitId });
   }
-  return latest;
+  // Changes of other actors that depend on a change applied later (SOP §14.1).
+  for (let progress = true; progress && pending.length > 0; ) {
+    progress = false;
+    for (let i = 0; i < pending.length; ) {
+      const p = pending[i] as (typeof pending)[number];
+      if (apply(p.plaintext, p.author)) {
+        pending.splice(i, 1);
+        progress = true;
+      } else i++;
+    }
+  }
+  return { latest, requestWriters };
+}
+
+/** What loadIdentityDocument learned besides the document. */
+export interface IdentityDocumentLoad {
+  /** Each actor's latest accepted unit (by Principal hex): the next unit's previous (W §26.2). */
+  readonly latest: ReadonlyMap<string, { readonly seq: bigint; readonly unitId: DataUnitId }>;
+  /** Every signer (hex) whose change created or changed each request entry (§5.3 step 4). */
+  readonly requestWriters: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+const stable = (v: unknown) => JSON.stringify(v, (_, x) => (typeof x === "bigint" ? `${x}n` : x));
+
+/** The Genesis owner of a chain: the root of an Identity Resource (§2.3). */
+export function genesisOwner(chain: LinearChain): PrincipalId {
+  const g = chain.records[0];
+  return g?.body.type === "GENESIS" ? g.body.owner.principalId : chain.state.owner.principalId;
+}
+
+/**
+ * A new unit of `signer` in the Identity Resource carrying `intents` as
+ * one change: the next actor sequence from the storage's reservation
+ * (durable, never reused), the current epoch's DEK, the signer's latest
+ * accepted unit as previous. The change is applied to `doc`.
+ */
+export async function sealIdentityUnit(options: {
+  readonly storage: IdentityStorage;
+  readonly chain: LinearChain;
+  readonly deks: ReadonlyMap<string, ResourceDEK>;
+  readonly signer: Signer;
+  readonly doc: IdentityDocumentPort;
+  readonly latest: IdentityDocumentLoad["latest"];
+  readonly intents: readonly IdentityIntent[];
+  /** The sequence to use instead of a reservation (a pairing device shared by installations, §5.3). */
+  readonly seq?: bigint;
+}): Promise<Uint8Array> {
+  const { chain, signer } = options;
+  const R = chain.state.resourceId;
+  const epoch = chain.state.epoch.epoch;
+  const dek = options.deks.get(String(epoch));
+  if (dek === undefined)
+    throw new LfcpError("KEY_PACKAGE_OPEN_FAILED", `the DEK of epoch ${epoch} is not held`);
+  const me = signer.descriptor.principalId;
+  const previous = options.latest.get(toHex(me));
+  let seq = options.seq;
+  if (seq === undefined) {
+    seq = await options.storage.actorSequences.reserveNext(R, me);
+    while (previous !== undefined && seq <= previous.seq)
+      seq = await options.storage.actorSequences.reserveNext(R, me);
+  }
+  const plaintext = options.doc.write(
+    {
+      signer: me,
+      actorSeq: seq,
+      writerClass: identityWriterClass(chain.state, genesisOwner(chain), me),
+    },
+    options.intents,
+  );
+  return sealDataUnit(
+    {
+      resourceId: R,
+      dataEpoch: epoch,
+      actorSeq: actorSequence(seq),
+      prevDataUnitId: previous?.unitId ?? null,
+      controlHead: chain.state.head,
+    },
+    plaintext,
+    dek,
+    signer,
+  ).bytes;
 }
 
 /**
