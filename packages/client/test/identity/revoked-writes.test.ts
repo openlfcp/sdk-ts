@@ -5,6 +5,7 @@ import { heldDeks } from "../../src/identity/context.js";
 import { revocationStatus } from "../../src/identity/proof.js";
 import { revokeDevice } from "../../src/identity/revocation.js";
 import { createQueuedDataUnit, loadControlChain, writeBarrier } from "../../src/storage.js";
+import { MemoryCoordinator } from "./memory-coordinator.js";
 import { party, URL } from "./support.js";
 import { type Node, pair, world } from "./world.js";
 
@@ -47,5 +48,36 @@ describe("the revoked device writes nothing (review follow-up, IDENTITY-PROFILE-
         value: new Uint8Array([1]),
       }),
     ).rejects.toMatchObject({ code: "AUTHORIZATION_FAILED" });
+  });
+
+  test("13b.1: an older prefix from another coordinator does not lift a proven revocation", async () => {
+    const w = await world(1);
+    const X = w.resources[0] as Uint8Array;
+    const B = await pair(w, w.P, 3, "edit");
+    const before = w.server.chain(X as never).records.map((r) => r.signed.bytes);
+    await revokeDevice({ ...w.P, device: id(3), reason: 1n });
+    expect((await revocationStatus({ ...B, resource: X as never, url: URL })).kind).toBe(
+      "revocation-proven",
+    );
+    // A stale or dishonest coordinator shows the chain from before the revocation.
+    const stale = new MemoryCoordinator();
+    stale.seed(before);
+    const again = await revocationStatus({
+      ...B,
+      network: stale.network(),
+      resource: X as never,
+      url: URL,
+    });
+    expect(again.kind).toBe("revocation-proven");
+    expect((await writeBarrier(B.storage, X as never))?.state).toBe("revocation-proven");
+    // A plain refusal does not downgrade the proof either.
+    const refusing = new MemoryCoordinator();
+    const refused = await revocationStatus({
+      ...B,
+      network: refusing.network(),
+      resource: X as never,
+      url: URL,
+    });
+    expect(refused.kind).toBe("revocation-proven");
   });
 });

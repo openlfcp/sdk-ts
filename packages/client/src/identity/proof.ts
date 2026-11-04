@@ -1,6 +1,13 @@
-import { bytesEqual, type ControlRecordId, type ResourceId, toHex } from "@openlfcp/core";
+import {
+  bytesEqual,
+  type ControlRecordId,
+  controlRecordId,
+  fromHex,
+  type ResourceId,
+  toHex,
+} from "@openlfcp/core";
 import { ABILITY, hasAbility, revokedReaderPrefix, validateControlChain } from "@openlfcp/wire";
-import { setWriteBarrier } from "../storage.js";
+import { setWriteBarrier, writeBarrier } from "../storage.js";
 import type { FlowOptions } from "./devices.js";
 import { ChannelPool, IdentityRefused, IdentityUnavailable } from "./network.js";
 
@@ -32,8 +39,10 @@ export type RevocationStatus =
       /** The revoking DEVICE_REVOKE. */
       readonly record: ControlRecordId;
       readonly reason: bigint;
-      /** The verified prefix, through the revoking record. */
+      /** The verified prefix, through the revoking record; empty when recalled. */
       readonly prefix: readonly Uint8Array[];
+      /** The proof was established earlier and is kept (§8.6, N5): a revocation is permanent. */
+      readonly recalled?: true;
     }
   | { readonly kind: "unreachable"; readonly reason: string };
 
@@ -41,6 +50,17 @@ export async function revocationStatus(
   o: FlowOptions & { readonly resource: ResourceId; readonly url: string },
 ): Promise<RevocationStatus> {
   const status = await observe(o);
+  const known = await writeBarrier(o.storage, o.resource);
+  // A proven revocation is permanent (N5): no later observation lifts or
+  // downgrades it, whatever an older prefix or a refusal shows (§8.6).
+  if (known?.state === "revocation-proven" && status.kind !== "revocation-proven")
+    return {
+      kind: "revocation-proven",
+      record: controlRecordId(fromHex(known.record ?? "")),
+      reason: BigInt(known.reason ?? "0"),
+      prefix: [],
+      recalled: true,
+    };
   // §8.6: in both states the device creates no Data Unit for the Resource; the
   // barrier is durable, so a restart on an old chain cannot write either.
   if (status.kind === "access-refused")
@@ -51,7 +71,9 @@ export async function revocationStatus(
       record: toHex(status.record),
       reason: String(status.reason),
     });
-  else if (status.kind === "active") await setWriteBarrier(o.storage, o.resource, null);
+  // Evidence of activity lifts only an access refusal.
+  else if (status.kind === "active" && known !== undefined)
+    await setWriteBarrier(o.storage, o.resource, null);
   return status;
 }
 
