@@ -91,6 +91,18 @@ export interface IdentityDocumentPort {
   devices(): ReadonlyMap<string, DeviceEntryValue>;
   /** The valid pairing requests, by PrincipalRef. */
   requests(): ReadonlyMap<string, PairingRequestValue>;
+  /**
+   * The admitted changes that created, wrote into or deleted `table[key]`,
+   * in causal order, with the signer of each (IdentityReplica.origins).
+   * Taken from the changes themselves, never inferred from the merged
+   * state: §5.3 step 4 accepts a request only when every change that
+   * wrote it was signed by the session's pairing device, and the approval
+   * journals these change hashes.
+   */
+  origins(
+    table: "roster" | "devices" | "requests",
+    key: string,
+  ): readonly { readonly hash: string; readonly signer: PrincipalId }[];
 }
 
 /** A passthrough Data Unit codec: the port produces and consumes the plaintext. */
