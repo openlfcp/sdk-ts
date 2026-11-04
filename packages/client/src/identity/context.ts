@@ -20,6 +20,7 @@ import {
 import { dekSecretRef, type LfcpStorage, type SecretStore } from "@openlfcp/storage";
 import {
   ABILITY,
+  type DataUnitPayload,
   hasAbility,
   InMemorySeenUnits,
   type PrincipalDescriptor,
@@ -457,14 +458,17 @@ export async function loadIdentityDocument(options: {
     for (const [start, end] of h.ranges ?? []) out.push({ actor: h.principalId, start, end });
     return out;
   });
-  const units = (await options.channel.dataUnits(R, ranges))
-    .map((bytes) => ({ bytes, parsed: parseDataUnit(bytes) }))
-    .sort((a, b) => {
-      const x = toHex(a.parsed.payload.actor);
-      const y = toHex(b.parsed.payload.actor);
-      if (x !== y) return x < y ? -1 : 1;
-      return a.parsed.payload.actorSeq < b.parsed.payload.actorSeq ? -1 : 1;
-    });
+  const units = withoutEquivocations(
+    (await options.channel.dataUnits(R, ranges)).map((bytes) => ({
+      bytes,
+      parsed: parseDataUnit(bytes),
+    })),
+  ).sort((a, b) => {
+    const x = toHex(a.parsed.payload.actor);
+    const y = toHex(b.parsed.payload.actor);
+    if (x !== y) return x < y ? -1 : 1;
+    return a.parsed.payload.actorSeq < b.parsed.payload.actorSeq ? -1 : 1;
+  });
   const seen = new InMemorySeenUnits();
   const latest = new Map<string, { seq: bigint; unitId: Uint8Array }>();
   for (const { bytes, parsed } of units) {
@@ -484,6 +488,26 @@ export async function loadIdentityDocument(options: {
     latest.set(toHex(r.actor), { seq: r.seq, unitId: r.unitId });
   }
   return latest;
+}
+
+/**
+ * W §26.2: two different units at one (actor, sequence) are equivocation,
+ * and both are excluded (their dependants then wait for a dependency that
+ * never comes: the actor's later units for its hash chain, other changes
+ * for the document's). Deciding before anything is applied keeps the
+ * result independent of the delivery order.
+ */
+export function withoutEquivocations<
+  T extends { readonly bytes: Uint8Array; readonly parsed: { readonly payload: DataUnitPayload } },
+>(units: readonly T[]): T[] {
+  const key = (u: T) => `${toHex(u.parsed.payload.actor)}:${u.parsed.payload.actorSeq}`;
+  const ids = new Map<string, Set<string>>();
+  for (const u of units) {
+    const set = ids.get(key(u)) ?? new Set<string>();
+    set.add(toHex(sha256(u.bytes)));
+    ids.set(key(u), set);
+  }
+  return units.filter((u) => (ids.get(key(u))?.size ?? 0) <= 1);
 }
 
 /**

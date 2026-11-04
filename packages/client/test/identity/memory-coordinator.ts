@@ -74,6 +74,13 @@ export class MemoryCoordinator {
     return c.state.resourceId;
   }
 
+  /** Stores a unit as a server that accepted it would, equivocation included (no checks). */
+  inject(resource: ResourceId, bytes: Uint8Array): void {
+    const h = this.hosted.get(toHex(resource));
+    if (h === undefined) throw new Error("not hosted");
+    h.units.set(`${toHex(bytes)}`, bytes);
+  }
+
   packagesOf(resource: ResourceId) {
     return (this.hosted.get(toHex(resource))?.packages ?? []).map(
       (b) => parseKeyPackage(b).payload,
