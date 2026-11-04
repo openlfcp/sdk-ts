@@ -62,6 +62,32 @@ is `mvp-0.4-baseline.2` (LFCP-04-409b, below).
   name it `PAIRING_LINK_REJECTED`; the SDK's parsers throw the client-local
   `INVALID_INVITATION`.
 
+### Identity document writes: no silent success (LFCP-04-410c)
+
+A unit of the Identity Resource's document that the coordinator refuses
+is no longer dropped while the flow answers success (review of sdk-ts#16,
+P2). Each flow rebuilds a unit refused as `STALE_DATA_EPOCH` on the
+current state (W §19.1), reports any other refusal and keeps its operation
+open, and the resumed operation writes the unit again (`runUnitPhase`
+`rebuildRefused`). The Control Records already committed stand.
+
+- `approvePairing` / `resumeApproval`: `document-incomplete` (with the
+  device, chain, registrations, rotation and the code) when the device
+  entry and the request removal of §5.3 step 6 are refused; the operation
+  stays open.
+- `cancelPairing` with `reject`: `document-incomplete` when the request
+  deletion is refused; `J` is cancelled, the session stays open, and the
+  same call writes the deletion again.
+- `reconcileDevices`: a `document` result (`DocumentWrite`: `none`,
+  `committed-own`, `refused`) for the entries of §7.1 step 4, built on the
+  current state of `I`; a refusal leaves the operation open.
+- `revokeDevice`: a `document` result for the `revoked` flag of §8.2,
+  `unreachable` included. The display write no longer drops every error:
+  only `IdentityUnavailable` is caught, and the revocation goes on to the
+  roster; any other error is thrown.
+- `loadIdentityDocument`: `unapplied` names the units the wire accepted
+  whose change the document did not take (refused or held).
+
 ### Added
 
 - `@openlfcp/wire`: Device Certificates and certificate chains
