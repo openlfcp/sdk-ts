@@ -33,5 +33,6 @@ export function replicaPort(
     roster: () => map(replica.validate().roster),
     devices: () => map(replica.validate().devices) as never,
     requests: () => map(replica.validate().requests),
+    origins: (table, key) => replica.origins(table, key),
   };
 }

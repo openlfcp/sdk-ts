@@ -490,20 +490,9 @@ export async function loadIdentityDocument(options: {
   });
   const seen = new InMemorySeenUnits();
   const latest = new Map<string, { seq: bigint; unitId: DataUnitId }>();
-  const requestWriters = new Map<string, Set<string>>();
   const pending: { plaintext: Uint8Array; author: IdentityAuthor }[] = [];
-  const apply = (plaintext: Uint8Array, author: IdentityAuthor): boolean => {
-    const before = new Map([...doc.requests()].map(([k, v]) => [k, stable(v)]));
-    const ok = doc.receive(plaintext, author);
-    if (ok)
-      for (const [k, v] of doc.requests())
-        if (before.get(k) !== stable(v)) {
-          const set = requestWriters.get(k) ?? new Set<string>();
-          set.add(toHex(author.signer));
-          requestWriters.set(k, set);
-        }
-    return ok;
-  };
+  const apply = (plaintext: Uint8Array, author: IdentityAuthor): boolean =>
+    doc.receive(plaintext, author);
   for (const { bytes, parsed } of units) {
     const r = await receiveDataUnit(chain, bytes, {
       seen,
@@ -531,18 +520,14 @@ export async function loadIdentityDocument(options: {
       } else i++;
     }
   }
-  return { latest, requestWriters };
+  return { latest };
 }
 
 /** What loadIdentityDocument learned besides the document. */
 export interface IdentityDocumentLoad {
   /** Each actor's latest accepted unit (by Principal hex): the next unit's previous (W §26.2). */
   readonly latest: ReadonlyMap<string, { readonly seq: bigint; readonly unitId: DataUnitId }>;
-  /** Every signer (hex) whose change created or changed each request entry (§5.3 step 4). */
-  readonly requestWriters: ReadonlyMap<string, ReadonlySet<string>>;
 }
-
-const stable = (v: unknown) => JSON.stringify(v, (_, x) => (typeof x === "bigint" ? `${x}n` : x));
 
 /** The Genesis owner of a chain: the root of an Identity Resource (§2.3). */
 export function genesisOwner(chain: LinearChain): PrincipalId {

@@ -359,12 +359,18 @@ export interface PairingReview {
     readonly offered: boolean;
     readonly reason?: string;
   }[];
-  /** The confirmed tuple: when the entry changes, the confirmation is asked again. */
+  /**
+   * The hashes of the changes that wrote the request, in causal order: the
+   * request change hash §5.3 step 4 journals with the approval.
+   */
+  readonly requestChanges: readonly string[];
+  /** The confirmed tuple: when the entry or any change to it differs, the confirmation is asked again. */
   readonly tuple: string;
 }
 
-const tupleOf = (key: string, entry: PairingRequestValue) =>
+const tupleOf = (key: string, entry: PairingRequestValue, changes: readonly string[]) =>
   JSON.stringify([
+    changes,
     key,
     entry.descriptor,
     entry.pairing,
@@ -429,7 +435,7 @@ function reviewOf(
   o: IdentityFlowOptions,
   session: string,
   chain: LinearChain,
-  load: IdentityDocumentLoad,
+  doc: IdentityDocumentPort,
   R: PrincipalId,
   J: PrincipalId,
   I: ResourceId,
@@ -441,8 +447,9 @@ function reviewOf(
   if (entry.pairing !== principalRefOf(J)) return undefined;
   const j = activeDevice(chain.state, J);
   if (j === undefined || j.kind !== DEVICE_KIND.PAIRING || !bytesEqual(j.root, R)) return undefined;
-  const writers = load.requestWriters.get(key);
-  if (writers === undefined || [...writers].some((w) => w !== toHex(J))) return undefined;
+  const origins = doc.origins("requests", key);
+  if (origins.length === 0 || origins.some((w) => !bytesEqual(w.signer, J))) return undefined;
+  const requestChanges = Object.freeze(origins.map((w) => w.hash));
   const device = principalOfRef(key);
   if (device === undefined) return undefined;
   let descriptor: ReturnType<typeof decodePrincipalDescriptor>;
@@ -467,7 +474,8 @@ function reviewOf(
     requestedScope: Object.freeze(requestedScope),
     fingerprint: deviceFingerprint(device),
     presets: Object.freeze(presetsFor(chain, o, R, J, descriptor, entry.kind, requestedScope)),
-    tuple: tupleOf(key, entry),
+    requestChanges,
+    tuple: tupleOf(key, entry, requestChanges),
   });
 }
 
@@ -482,7 +490,7 @@ export async function pairingRequests(
     const { chain, doc, load } = await openIdentity(o, channel, I);
     const out: PairingReview[] = [];
     for (const [key, entry] of doc.requests()) {
-      const r = reviewOf(o, o.session, chain, load, R, J, I, key, entry);
+      const r = reviewOf(o, o.session, chain, doc, R, J, I, key, entry);
       if (r !== undefined) out.push(r);
     }
     return Object.freeze(out);
@@ -540,7 +548,7 @@ export async function approvePairing(
       const review =
         entry === undefined
           ? undefined
-          : reviewOf(o, o.review.session, chain, load, R, J, I, o.review.requestKey, entry);
+          : reviewOf(o, o.review.session, chain, doc, R, J, I, o.review.requestKey, entry);
       if (review === undefined || review.tuple !== o.review.tuple)
         return { kind: "reconfirm", review };
       const preset = MASK_PRESETS[o.preset];
@@ -573,6 +581,7 @@ export async function approvePairing(
           root: toHex(R),
           pairingDevice: toHex(J),
           requestKey: review.requestKey,
+          requestChanges: [...review.requestChanges],
           fingerprint: review.fingerprint,
           label: review.label,
           ...(review.platform === undefined ? {} : { platform: review.platform }),

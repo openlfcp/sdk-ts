@@ -1,4 +1,5 @@
-import { toHex } from "@openlfcp/core";
+import { type PrincipalId, toHex } from "@openlfcp/core";
+import { sha256 } from "@openlfcp/crypto";
 import type {
   DeviceEntryValue,
   IdentityAuthor,
@@ -26,6 +27,7 @@ export class FakeIdentityDocument implements IdentityDocumentPort {
   readonly #requests = new Map<string, PairingRequestValue>();
   readonly #requestOwner = new Map<string, string>();
   #initialized = false;
+  readonly #origins = new Map<string, { hash: string; signer: PrincipalId }[]>();
   readonly applied: { author: IdentityAuthor; intents: IdentityIntent[] }[] = [];
 
   write(author: IdentityAuthor, intents: readonly IdentityIntent[]): Uint8Array {
@@ -50,7 +52,14 @@ export class FakeIdentityDocument implements IdentityDocumentPort {
         if (owner !== undefined && owner !== toHex(author.signer)) return false;
       }
     }
+    const hash = toHex(sha256(plaintext));
     for (const i of intents) {
+      if ("key" in i) {
+        const k = `${i.intent.split(".")[0] === "device" ? "devices" : i.intent.split(".")[0] === "request" ? "requests" : "roster"}:${i.key}`;
+        const list = this.#origins.get(k) ?? [];
+        if (!list.some((o) => o.hash === hash)) list.push({ hash, signer: author.signer });
+        this.#origins.set(k, list);
+      }
       if (i.intent === "identity.initialize") this.#initialized = true;
       else if (i.intent === "roster.put") this.#roster.set(i.key, i.entry);
       else if (i.intent === "device.put")
@@ -77,5 +86,8 @@ export class FakeIdentityDocument implements IdentityDocumentPort {
   }
   requests(): ReadonlyMap<string, PairingRequestValue> {
     return this.#requests;
+  }
+  origins(table: "roster" | "devices" | "requests", key: string) {
+    return this.#origins.get(`${table}:${key}`) ?? [];
   }
 }
