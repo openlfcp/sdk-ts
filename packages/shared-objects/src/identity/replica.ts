@@ -303,9 +303,11 @@ export class IdentityReplica {
   }
 
   /**
-   * The admitted changes that created, wrote into or deleted `table[key]`
-   * (nested lists and maps included), in admission (causal) order, each
-   * with the signer of the unit that carried it. This is the provenance a
+   * The admitted changes that created or wrote into the value `table[key]`
+   * holds now (every value of a conflict, nested lists and maps included),
+   * in admission (causal) order, each with the signer of the unit that
+   * carried it. Changes to an earlier value since deleted or replaced are
+   * not its provenance. This is the provenance a
    * managing device checks before it shows a pairing request
    * (IDENTITY-PROFILE-01 §5.3 step 4: written only by the session's
    * pairing device) and the change hashes it journals with an approval.
@@ -314,17 +316,30 @@ export class IdentityReplica {
     table: "roster" | "devices" | "requests",
     key: string,
   ): readonly { readonly hash: string; readonly signer: PrincipalId }[] {
-    const containers = new Set<string>();
-    const entry = new Set<string>();
+    // The values `table[key]` holds now: one, or several under a conflict. Each
+    // is named by the op that set it (for a map, its object ID). The history of
+    // earlier values deleted or overwritten since is not their provenance.
+    const container = (this.#doc as Record<string, unknown>)[table];
+    const current = new Set<string>();
+    if (container !== null && typeof container === "object" && Object.hasOwn(container, key)) {
+      const conflicts = A.getConflicts(container as A.Doc<unknown>, key);
+      if (conflicts !== undefined) for (const id of Object.keys(conflicts)) current.add(id);
+      else {
+        const value = (container as Record<string, unknown>)[key];
+        const id = value !== null && typeof value === "object" ? A.getObjectId(value) : null;
+        if (id !== null && id !== undefined) current.add(id);
+      }
+    }
+    const entry = new Set<string>(current);
     const out: { hash: string; signer: PrincipalId }[] = [];
+    if (current.size === 0) return Object.freeze(out);
     for (const [hash, unit] of this.#accepted) {
       const change = A.decodeChange(unit.bytes);
       let touched = false;
       change.ops.forEach((op, i) => {
         const id = `${change.startOp + i}@${change.actor}`;
         const makes = op.action === "makeMap" || op.action === "makeList";
-        if (op.obj === "_root" && op.key === table && op.action === "makeMap") containers.add(id);
-        else if ((containers.has(op.obj) && op.key === key) || entry.has(op.obj)) {
+        if (current.has(id) || entry.has(op.obj)) {
           touched = true;
           if (makes) entry.add(id);
         }

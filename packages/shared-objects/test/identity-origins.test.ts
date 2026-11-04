@@ -4,6 +4,8 @@ import { principalRef } from "../src/values.js";
 import {
   device,
   options,
+  other,
+  otherWriter,
   pairing,
   pairingWriter,
   rootWriter,
@@ -53,5 +55,22 @@ describe("identity entry origins (IDENTITY-PROFILE-01 §5.3 step 4)", () => {
     );
     expect(other.origins("requests", device.key).map((o) => o.hash)).toEqual([a.hash, c.hash]);
     expect(other.origins("roster", device.key)).toEqual([]);
+  });
+
+  it("names only the current entry's changes, not those of a deleted predecessor", () => {
+    const r = IdentityReplica.empty(options);
+    r.write(rootWriter, { intent: "identity.initialize" });
+    r.write(pairingWriter, { intent: "request.put", key: device.key, entry: entry(device, "one") });
+    // The managing device rejects it: the root deletes the request (§5.3 step 4).
+    r.write({ ...rootWriter, actorSeq: 2 }, { intent: "request.delete", key: device.key });
+    // A new session's pairing device writes a new request under the same key.
+    const again = r.write(otherWriter, {
+      intent: "request.put",
+      key: device.key,
+      entry: { ...entry(device, "again"), pairing: principalRef(other) },
+    });
+    expect(r.origins("requests", device.key)).toEqual([{ hash: again.hash, signer: other }]);
+    r.write({ ...rootWriter, actorSeq: 3 }, { intent: "request.delete", key: device.key });
+    expect(r.origins("requests", device.key)).toEqual([]);
   });
 });

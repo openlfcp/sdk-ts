@@ -10,6 +10,7 @@ import { principalRefOf } from "../../src/identity/document.js";
 import { OperationJournal } from "../../src/identity/journal.js";
 import {
   approvePairing,
+  cancelPairing,
   createPairingSession,
   pairingRequests,
 } from "../../src/identity/pairing.js";
@@ -97,5 +98,25 @@ describe("the request a managing device reviews (IDENTITY-PROFILE-01 §5.3 step 
     });
     expect((await channel.putDataUnit(w.I, bytes)).kind).toBe("ack");
     expect(await pairingRequests({ ...w.P, session: s.session })).toEqual([]);
+  });
+
+  test("after a rejected request, the same device's request in a new session is shown (11b.2)", async () => {
+    const w = await world(0);
+    const first = await createPairingSession(w.P);
+    if (first.kind !== "created") throw new Error(first.kind);
+    const B = node(w.server, party(3));
+    await requestPairing({ ...B, link: first.link, label: "phone", kind: 0 });
+    const key = principalRefOf(party(3).signer.descriptor.principalId);
+    expect((await cancelPairing({ ...w.P, session: first.session, reject: key })).kind).toBe(
+      "cancelled",
+    );
+    const second = await createPairingSession(w.P);
+    if (second.kind !== "created") throw new Error(second.kind);
+    expect((await requestPairing({ ...B, link: second.link, label: "phone", kind: 0 })).kind).toBe(
+      "requested",
+    );
+    const reviews = await pairingRequests({ ...w.P, session: second.session });
+    expect(reviews.map((r) => r.label)).toEqual(["phone"]);
+    expect(reviews[0]?.requestChanges.length).toBe(1);
   });
 });

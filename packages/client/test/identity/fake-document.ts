@@ -27,17 +27,25 @@ export class FakeIdentityDocument implements IdentityDocumentPort {
   readonly #requests = new Map<string, PairingRequestValue>();
   readonly #requestOwner = new Map<string, string>();
   #initialized = false;
+  readonly #applied = new Set<string>();
   readonly #origins = new Map<string, { hash: string; signer: PrincipalId }[]>();
   readonly applied: { author: IdentityAuthor; intents: IdentityIntent[] }[] = [];
 
   write(author: IdentityAuthor, intents: readonly IdentityIntent[]): Uint8Array {
-    const plaintext = enc.encode(json({ intents }));
+    // The change depends on every change applied so far, like an Automerge change on its heads.
+    const plaintext = enc.encode(json({ intents, deps: [...this.#applied] }));
     if (!this.receive(plaintext, author)) throw new Error("the document refused the change");
     return plaintext;
   }
 
   receive(plaintext: Uint8Array, author: IdentityAuthor): boolean {
-    const { intents } = JSON.parse(dec.decode(plaintext)) as { intents: IdentityIntent[] };
+    const { intents, deps = [] } = JSON.parse(dec.decode(plaintext)) as {
+      intents: IdentityIntent[];
+      deps?: string[];
+    };
+    // Held until its dependencies are applied (SOP §14.1); a duplicate is admitted once.
+    if (this.#applied.has(toHex(sha256(plaintext)))) return true;
+    if (deps.some((d) => !this.#applied.has(d))) return false;
     const me = principalRefOf(author.signer);
     for (const i of intents) {
       if (i.intent === "identity.initialize") {
@@ -56,9 +64,13 @@ export class FakeIdentityDocument implements IdentityDocumentPort {
     for (const i of intents) {
       if ("key" in i) {
         const k = `${i.intent.split(".")[0] === "device" ? "devices" : i.intent.split(".")[0] === "request" ? "requests" : "roster"}:${i.key}`;
-        const list = this.#origins.get(k) ?? [];
-        if (!list.some((o) => o.hash === hash)) list.push({ hash, signer: author.signer });
-        this.#origins.set(k, list);
+        // As IdentityReplica.origins: a deleted value's changes are not the next value's.
+        if (i.intent.endsWith(".delete")) this.#origins.delete(k);
+        else {
+          const list = this.#origins.get(k) ?? [];
+          if (!list.some((o) => o.hash === hash)) list.push({ hash, signer: author.signer });
+          this.#origins.set(k, list);
+        }
       }
       if (i.intent === "identity.initialize") this.#initialized = true;
       else if (i.intent === "roster.put") this.#roster.set(i.key, i.entry);
@@ -69,9 +81,13 @@ export class FakeIdentityDocument implements IdentityDocumentPort {
         this.#requests.set(i.key, i.entry);
       } else if (i.intent === "roster.delete") this.#roster.delete(i.key);
       else if (i.intent === "device.delete") this.#devices.delete(i.key);
-      else if (i.intent === "request.delete") this.#requests.delete(i.key);
+      else if (i.intent === "request.delete") {
+        this.#requests.delete(i.key);
+        this.#requestOwner.delete(i.key);
+      }
     }
     this.applied.push({ author, intents });
+    this.#applied.add(hash);
     return true;
   }
 
