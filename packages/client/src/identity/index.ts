@@ -7,6 +7,7 @@ export {
   type DeviceAcceptResult,
   type DeviceCreateResult,
   type DeviceResourceResult,
+  type IncompleteDeviceResource,
   selfRegistrationRecord,
 } from "./accept.js";
 export {

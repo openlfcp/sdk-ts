@@ -144,17 +144,23 @@ async function keyAndList(
     }
   // §7.2 step 4, §7.3: the roster entry, so the human's other installations reach X.
   const iChannel = await pool.get(me, iUrl);
-  const chainI = await syncChain(o.storage, iChannel, I.state.resourceId);
-  const doc = o.document(I.state.resourceId, genesisOwner(chainI));
-  const deksI = await fetchDeks(o.storage, o.secrets, iChannel, chainI, o.installation);
-  const load = await loadIdentityDocument({ channel: iChannel, chain: chainI, deks: deksI, doc });
-  let roster = doc.roster().has(resourceRef(X));
+  const openI = async () => {
+    const chainI = await syncChain(o.storage, iChannel, I.state.resourceId);
+    const doc = o.document(I.state.resourceId, genesisOwner(chainI));
+    const deksI = await fetchDeks(o.storage, o.secrets, iChannel, chainI, o.installation);
+    const load = await loadIdentityDocument({ channel: iChannel, chain: chainI, deks: deksI, doc });
+    return { chainI, doc, deksI, load };
+  };
+  let roster = (await openI()).doc.roster().has(resourceRef(X));
   if (!roster) {
     const r = await runUnitPhase(iChannel, journal, operation, {
       id: "roster",
       resource: I.state.resourceId,
-      build: () =>
-        sealIdentityUnit({
+      // A unit refused after a rotation of I is written again in the new epoch (W §19.1).
+      rebuildOn: ["STALE_DATA_EPOCH"],
+      build: async () => {
+        const { chainI, doc, deksI, load } = await openI();
+        return sealIdentityUnit({
           storage: o.storage,
           chain: chainI,
           deks: deksI,
@@ -162,7 +168,8 @@ async function keyAndList(
           doc,
           latest: load.latest,
           intents: [{ intent: "roster.put", key: resourceRef(X), entry }],
-        }),
+        });
+      },
     });
     roster = r.state === "committed-own";
   }
@@ -208,7 +215,19 @@ export const selfRegistrationRecord = (
     device,
   ).bytes;
 
+/**
+ * The Resource is joined or created and keyed, but its roster entry could
+ * not be written: the operation stays open; resume it with `operation`
+ * (§7.2 step 4, §7.3).
+ */
+export interface IncompleteDeviceResource extends DeviceResourceResult {
+  readonly kind: "incomplete";
+  readonly operation: string;
+  readonly resource: ResourceId;
+}
+
 export type DeviceAcceptResult =
+  | IncompleteDeviceResource
   | ({
       readonly kind: "claimed";
       readonly operation: string;
@@ -352,6 +371,8 @@ export async function acceptInvitationAsDevice(
       coordinator: chainX.state.route.coordinatorUrl,
       ...(o.name === undefined ? {} : { name: o.name }),
     });
+    // The roster entry is the point of §7.2: without it the operation stays open.
+    if (!rest.roster) return { kind: "incomplete", operation: op, resource: X, ...rest };
     await journal.setStatus(op, "done");
     return { kind: "claimed", operation: op, resource: X, grantId, ...rest };
   } catch (e) {
@@ -381,6 +402,7 @@ function verifyInvitationSecretOn(
 }
 
 export type DeviceCreateResult =
+  | IncompleteDeviceResource
   | ({
       readonly kind: "created";
       readonly operation: string;
@@ -488,6 +510,7 @@ export async function createResourceAsDevice(
       ...(op.intent.name === undefined ? {} : { name: op.intent.name as string }),
     });
     const chain = await syncChain(o.storage, await pool.get(me, url), X);
+    if (!rest.roster) return { kind: "incomplete", operation: op.id, resource: X, ...rest };
     await journal.setStatus(op.id, "done");
     return { kind: "created", operation: op.id, resource: X, chain, ...rest };
   } catch (e) {
