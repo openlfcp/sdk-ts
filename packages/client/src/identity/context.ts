@@ -173,6 +173,13 @@ export interface ControlPhaseSpec {
   classify(chain: LinearChain, isOwn: (recordIdHex: string) => boolean): PhaseState;
   /** The signed record on the chain's head (§9.3: rebuilt on a new head, never re-sent as it was). */
   build(chain: LinearChain): Promise<Uint8Array> | Uint8Array;
+  /**
+   * False for a phase whose record depends on more than the head, such as a
+   * KEY_EPOCH and its frontier (§9.3): a pending record is rebuilt on every
+   * attempt, even on the head it was built on. An accepted one is still
+   * recognised by its journaled record ID.
+   */
+  readonly resend?: boolean;
 }
 
 export interface PhaseOutcome {
@@ -226,7 +233,8 @@ export async function runControlPhase(
       throw new IdentityUnavailable(`the head kept moving while proposing ${spec.id}`);
     const head = toHex(chain.state.head);
     let bytes: Uint8Array;
-    if (before?.bytes !== undefined && before.expectedHead === head) bytes = fromHex(before.bytes);
+    if (spec.resend !== false && before?.bytes !== undefined && before.expectedHead === head)
+      bytes = fromHex(before.bytes);
     else {
       bytes = await spec.build(chain);
       const id = toHex(validateRecordId(bytes));

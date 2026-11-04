@@ -6,9 +6,11 @@ import {
   fromHex,
   type PrincipalId,
   type ResourceId,
+  resourceId,
   toHex,
 } from "@openlfcp/core";
 import { generateResourceDEK } from "@openlfcp/crypto";
+import type { LfcpStorage } from "@openlfcp/storage";
 import {
   ABILITY,
   actsFor,
@@ -17,6 +19,7 @@ import {
   checkDataUnit,
   type HaveVector,
   hasAbility,
+  hasSequence,
   InMemorySeenUnits,
   isExposingRevocation,
   KEY_EPOCH_REASON,
@@ -24,6 +27,8 @@ import {
   parseDataUnit,
   rotateEpoch,
 } from "@openlfcp/wire";
+import { resourceSyncState } from "../outbound.js";
+import { loadControlChain } from "../storage.js";
 import {
   deliverKeys,
   heldDeks,
@@ -31,6 +36,7 @@ import {
   readersAt,
   runControlPhase,
   storeDek,
+  withoutEquivocations,
 } from "./context.js";
 import type { FlowOptions } from "./devices.js";
 import {
@@ -41,7 +47,7 @@ import {
   phaseOf,
   putPendingDek,
 } from "./journal.js";
-import type { IdentityChannel } from "./network.js";
+import { type ChannelPool, type IdentityChannel, IdentityUnavailable } from "./network.js";
 import { keyEpochAfter, type LinearChain, type PhaseState, recordSeq } from "./phases.js";
 
 /**
@@ -119,27 +125,49 @@ export function exposingRevocationsSince(chain: LinearChain): readonly ExposingR
 export async function verifiedFrontier(
   channel: IdentityChannel,
   chain: LinearChain,
+  local: HaveVector = [],
 ): Promise<HaveVector> {
   const R = chain.state.resourceId;
   const opened = await channel.open(R);
-  if (opened.kind === "nack") return [];
+  if (opened.kind === "nack") return local;
   const ranges = opened.haves.flatMap((h) => {
     const out = h.contiguous > 0n ? [{ actor: h.principalId, start: 1n, end: h.contiguous }] : [];
     for (const [start, end] of h.ranges ?? []) out.push({ actor: h.principalId, start, end });
     return out;
   });
-  const units = (await channel.dataUnits(R, ranges))
-    .map((bytes) => ({ bytes, p: parseDataUnit(bytes).payload }))
-    .sort((a, b) => {
-      const x = toHex(a.p.actor);
-      const y = toHex(b.p.actor);
-      return x !== y ? (x < y ? -1 : 1) : a.p.actorSeq < b.p.actorSeq ? -1 : 1;
-    });
+  // Both units of an equivocation are excluded (W §26.2), whatever came first.
+  const units = withoutEquivocations(
+    chain,
+    (await channel.dataUnits(R, ranges)).map((bytes) => ({ bytes, parsed: parseDataUnit(bytes) })),
+  ).sort((a, b) => {
+    const x = toHex(a.parsed.payload.actor);
+    const y = toHex(b.parsed.payload.actor);
+    return x !== y
+      ? x < y
+        ? -1
+        : 1
+      : a.parsed.payload.actorSeq < b.parsed.payload.actorSeq
+        ? -1
+        : 1;
+  });
   const seen = new InMemorySeenUnits();
-  let frontier: HaveVector = [];
-  for (const { bytes, p } of units) {
+  const accepted = new Map<string, Set<string>>();
+  let frontier: HaveVector = local;
+  for (const { bytes, parsed } of units) {
+    const p = parsed.payload;
     const check = await checkDataUnit(chain, bytes, seen);
-    if (check.kind === "valid") frontier = addSequence(frontier, p.actor, p.actorSeq);
+    if (check.kind !== "valid") continue;
+    // The actor's hash chain (W §26.2): a unit is accepted when it names an
+    // accepted unit of its actor, or none before the actor's first.
+    const mine = accepted.get(toHex(p.actor)) ?? new Set<string>();
+    const links =
+      p.prevDataUnitId === null
+        ? mine.size === 0 && !local.some((h) => bytesEqual(h.principalId, p.actor))
+        : mine.has(toHex(p.prevDataUnitId)) || hasSequence(local, p.actor, p.actorSeq - 1n);
+    if (!links) continue;
+    mine.add(toHex(check.unitId));
+    accepted.set(toHex(p.actor), mine);
+    frontier = addSequence(frontier, p.actor, p.actorSeq);
   }
   return frontier;
 }
@@ -190,26 +218,33 @@ export async function rotateAfter(
   const me = o.installation.signer;
   const R = o.resource;
   const id = `rotate:${toHex(R)}`;
+  // The epoch of this operation's own accepted KEY_EPOCH, found by its record ID.
+  let ownEpoch: DataEpoch | undefined;
   const outcome = await runControlPhase(o.storage, o.channel, journal, o.operation, {
     id,
     kind: "rotate",
     resource: R,
     facts: { revokedAt: String(o.revokedAt) },
+    // §9.3: rebuilt with the current accepted set on every attempt, even on the same head.
+    resend: false,
     classify: (chain, isOwn): PhaseState => {
-      const own = chain.records.some(
+      const own = chain.records.find(
         (r) =>
           r.body.type === "KEY_EPOCH" &&
           r.payload.controlSeq > o.revokedAt &&
           isOwn(toHex(r.signed.id)),
       );
-      if (own) return "committed-own";
+      if (own?.body.type === "KEY_EPOCH") {
+        ownEpoch = own.body.epoch;
+        return "committed-own";
+      }
       if (keyEpochAfter(chain, o.revokedAt)) return "complete";
       return rotatorTest(chain.state, me.descriptor.principalId).rotator
         ? "pending"
         : "awaiting-rotation";
     },
     build: async (chain) => {
-      const frontier = await verifiedFrontier(o.channel, chain);
+      const frontier = await verifiedFrontier(o.channel, chain, await localHave(o, chain));
       const dek = (await getPendingDek(o.secrets, R, o.operation)) ?? generateResourceDEK();
       // The DEK before the record that commits to it (§9.1).
       await putPendingDek(o.secrets, R, o.operation, dek);
@@ -224,24 +259,31 @@ export async function rotateAfter(
     return { resource: R, status: "refused", code: outcome.code ?? "refused" };
   if (outcome.state === "awaiting-rotation") return { resource: R, status: "awaiting-rotation" };
   const chain = outcome.chain;
-  const epoch = chain.state.epoch.epoch;
+  if (outcome.state === "committed-own" && ownEpoch === undefined)
+    // The ACK of this installation's own record (runControlPhase extended the chain with it).
+    ownEpoch = chain.state.epoch.epoch;
   if (outcome.state === "committed-own") {
+    // The pending DEK is the key of this operation's own epoch, not of the current one:
+    // another rotator may have closed it since (§9.2, §9.3).
     const dek = await getPendingDek(o.secrets, R, o.operation);
-    if (dek !== undefined) {
-      await storeDek(o.storage, o.secrets, chain, epoch, dek);
+    if (dek !== undefined && ownEpoch !== undefined) {
+      await storeDek(o.storage, o.secrets, chain, ownEpoch, dek);
       await o.secrets.delete(pendingDekRef(R, o.operation));
     }
   }
+  const epoch = ownEpoch ?? chain.state.epoch.epoch;
   const deks = await heldDeks(o.secrets, chain);
   if (!deks.has(String(epoch))) return { resource: R, status: "awaiting-key-holder", epoch };
-  // The new epoch's DEK to every reader of the head (§8.2); a takeover seals only what it holds (§9.6).
+  // Every epoch held from the rotated one on, to every reader of the head (§8.2); a takeover
+  // seals only what it holds (§9.6).
+  const send = new Map([...deks].filter(([e]) => BigInt(e) >= epoch));
   const keys = await deliverKeys({
     channel: o.channel,
     ledger: new PackageLedger(o.storage),
     chain,
     sender: me,
     recipients: readersAt(chain.state),
-    deks: new Map([[String(epoch), deks.get(String(epoch)) as never]]),
+    deks: send,
   });
   const phase = phaseOf(await journal.load(o.operation), id);
   return {
@@ -250,6 +292,60 @@ export async function rotateAfter(
     epoch,
     keys,
   };
+}
+
+/**
+ * The accepted set this installation holds locally for the Resource (its
+ * stored accepted units and verified Snapshots, when the storage keeps them),
+ * merged into the verified frontier (§8.3).
+ */
+async function localHave(o: FlowOptions, chain: LinearChain): Promise<HaveVector> {
+  const s = o.storage as Partial<LfcpStorage>;
+  if (
+    s.dataUnits === undefined ||
+    s.outbound === undefined ||
+    s.syncState === undefined ||
+    s.snapshots === undefined
+  )
+    return [];
+  return (await resourceSyncState(s as LfcpStorage, chain.state.resourceId)).have;
+}
+
+/**
+ * Resumes every rotation a journaled operation started and did not adopt:
+ * a KEY_EPOCH whose ACK was lost leaves its DEK in the operation's pending
+ * slot, whatever operation (revocation, reconciliation, pairing) started
+ * it (§9.1, §9.2). Run before planning new work on a Resource.
+ */
+export async function resumeRotations(
+  o: FlowOptions & { readonly pool: ChannelPool },
+): Promise<readonly RotationOutcome[]> {
+  const journal = new OperationJournal(o.storage);
+  const out: RotationOutcome[] = [];
+  for (const op of await journal.list())
+    for (const phase of op.phases) {
+      if (phase.kind !== "rotate" || phase.facts?.revokedAt === undefined) continue;
+      const R = resourceId(fromHex(phase.resource));
+      if ((await getPendingDek(o.secrets, R, op.id)) === undefined) continue;
+      const stored = await loadControlChain(o.storage, R);
+      if (stored?.kind !== "linear") continue;
+      try {
+        const channel = await o.pool.get(o.installation.signer, stored.state.route.coordinatorUrl);
+        out.push(
+          await rotateAfter({
+            ...o,
+            channel,
+            operation: op.id,
+            resource: R,
+            revokedAt: BigInt(phase.facts.revokedAt),
+          }),
+        );
+      } catch (e) {
+        if (!(e instanceof IdentityUnavailable)) throw e;
+        out.push({ resource: R, status: "unreachable" });
+      }
+    }
+  return Object.freeze(out);
 }
 
 /** The control sequence of a record ID (hex) on a chain. */
