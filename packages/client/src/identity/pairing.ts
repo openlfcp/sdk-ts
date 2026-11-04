@@ -29,6 +29,7 @@ import {
   encodeInviteSecret,
   InMemorySeenUnits,
   invitationPrincipal,
+  parseDataUnit,
   parseDeviceCertificate,
   receiveDataUnit,
   type Signer,
@@ -257,9 +258,13 @@ async function missingMaterial(
     if (!deks.has(String(e.epoch))) missing.push(`the DEK of epoch ${e.epoch}`);
   // The carrier of the initial change (§2.2), verified, and retrievable for B.
   const R = genesisOwner(chain);
-  const [unit] = await channel.dataUnits(chain.state.resourceId, [
-    { actor: R, start: 1n, end: 1n },
-  ]);
+  // Exactly the root's unit at actor sequence 1, whatever else DATA_GET returns.
+  const unit = (
+    await channel.dataUnits(chain.state.resourceId, [{ actor: R, start: 1n, end: 1n }])
+  ).find((u) => {
+    const p = parseDataUnit(u).payload;
+    return bytesEqual(p.actor, R) && p.actorSeq === 1n && p.prevDataUnitId === null;
+  });
   const opened =
     unit === undefined
       ? undefined
@@ -321,6 +326,15 @@ async function finishSession(
     throw new IdentityUnavailable(
       `the packages to the pairing device were not all accepted: ${delivery.skipped.map((s) => s.reason).join("; ")}`,
     );
+  // §5.3 step 1, again right before the link is shown: J must hold every
+  // epoch of I and the root's unit 1 must be retrievable; a resumed session
+  // may meet a newer epoch or a coordinator that lost the unit.
+  const now = await syncChain(o.storage, channel, I);
+  const missing = await missingMaterial(o, channel, now);
+  for (const e of now.state.epochs.values())
+    if (!(await new PackageLedger(o.storage).has(I, e.epoch, J)))
+      missing.push(`the package of epoch ${e.epoch} to the pairing device`);
+  if (missing.length > 0) return { kind: "missing-material", missing };
   const bytes = await o.secrets.get(pairingSecretRef(J));
   if (bytes === undefined) throw new Error("the pairing device's secret is not in the SecretStore");
   let secret: InvitationSecret;
