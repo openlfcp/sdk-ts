@@ -26,6 +26,7 @@ import {
   invitationPrincipal,
   type PairingLink,
   pairingDeviceSigner,
+  parseDataUnit,
   parseDeviceCertificate,
   parsePairingUri,
   revocationOf,
@@ -271,7 +272,13 @@ async function sendRequest(
   const unit = await runUnitPhase(channel, journal, operation, {
     id: "request",
     resource: I,
+    // A request refused as stale (I rotated before it arrived) is written again
+    // in the current epoch (W §19.1); its refused bytes stay in the phase.
+    rebuildOn: ["STALE_DATA_EPOCH"],
     build: async () => {
+      // Never the sequence of a unit already signed for this request (W §26.2).
+      const signed = phaseOf(await journal.load(operation), "request")?.bytes;
+      const used = signed === undefined ? 0n : parseDataUnit(fromHex(signed)).payload.actorSeq;
       const chain = await syncChain(o.storage, channel, I);
       const deks = await fetchDeks(o.storage, o.secrets, channel, chain, pairing);
       const doc = o.document(I, R);
@@ -285,7 +292,7 @@ async function sendRequest(
         doc,
         latest: load.latest,
         // J may be used by another installation: the next sequence after the one it sees (§5.3).
-        seq: (previous?.seq ?? 0n) + 1n,
+        seq: ((previous?.seq ?? 0n) > used ? (previous?.seq ?? 0n) : used) + 1n,
         intents: [
           {
             intent: "request.put",
@@ -407,18 +414,8 @@ export async function completePairing(
   const kind = op.intent.kind as 0 | 1;
   const pool = new ChannelPool(o.network);
   try {
-    // A request that never reached the coordinator is sent first, from the journal (§9.1).
-    if (op.intent.result === undefined && phaseOf(op, "request")?.state !== "committed-own") {
-      try {
-        const sent = await sendRequest(o, pool, o.operation);
-        if (sent !== "committed-own" && sent.code !== "PAIRING_SECRET_GONE")
-          return { kind: "unknown", reason: `the request was refused: ${sent.code}` };
-      } catch (e) {
-        // J no longer reads: the session ended; its result is read below.
-        if (!(e instanceof IdentityRefused)) throw e;
-      }
-    }
-    // Step 8: the session's result, from J's view of I (W §41 after its revocation).
+    // Step 8: the session's state first, from J's view of I (W §41 after its
+    // revocation): a closed session's result is never hidden by a failed send.
     if (op.intent.result === undefined) {
       const bytes = await o.secrets.get(pairingSecretRef(Jid));
       if (bytes === undefined) return { kind: "unknown", reason: "the pairing secret is gone" };
@@ -441,7 +438,16 @@ export async function completePairing(
         throw e;
       }
       const r = revocationOf(chain.state, R, Jid);
-      if (r === undefined) return { kind: "waiting" };
+      if (r === undefined) {
+        // J is active: a request that never reached the coordinator is sent now,
+        // from the journal, or written again in the current epoch (§9.1).
+        if (phaseOf(op, "request")?.state !== "committed-own") {
+          const sent = await sendRequest(o, pool, o.operation);
+          if (sent !== "committed-own")
+            return { kind: "unknown", reason: `the request was refused: ${sent.code}` };
+        }
+        return { kind: "waiting" };
+      }
       if (r.reason === 3n && r.approval !== null)
         op = await journal.updateIntent(o.operation, {
           result: "approved",

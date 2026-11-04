@@ -22,7 +22,7 @@ import { IdentityRefused, IdentityUnavailable } from "../../src/identity/network
 import type { LinearChain } from "../../src/identity/phases.js";
 
 /** What a fault does to one upload: lose the request, or commit it and lose the answer. */
-export type Fault = "drop-request" | "drop-answer";
+export type Fault = "drop-request" | "drop-answer" | { readonly nack: string };
 
 export interface UploadEvent {
   readonly op: "host" | "control" | "key-package" | "data-unit";
@@ -123,6 +123,7 @@ export class MemoryCoordinator {
     this.uploads.push(e);
     const f = this.fault(e);
     if (f === "drop-request") throw new IdentityUnavailable("the request was lost");
+    if (typeof f === "object") return { kind: "nack", code: f.nack };
     const answer = await apply();
     if (f === "drop-answer") throw new IdentityUnavailable("the answer was lost");
     return answer;

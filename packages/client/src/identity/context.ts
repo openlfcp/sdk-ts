@@ -638,28 +638,47 @@ export async function runUnitPhase(
     readonly id: string;
     readonly resource: ResourceId;
     readonly build: () => Promise<Uint8Array>;
+    /**
+     * Refusals after which the phase's intent is written again as a new unit
+     * on the current state, e.g. STALE_DATA_EPOCH after a rotation (W §19.1);
+     * the refused bytes are kept in the phase as stale, never sent again.
+     */
+    readonly rebuildOn?: readonly string[];
   },
 ): Promise<{ readonly state: "committed-own" | "refused"; readonly code?: string }> {
-  const before = phaseOf(await journal.load(operation), spec.id);
-  if (before?.state === "committed-own") return { state: "committed-own" };
-  let bytes: Uint8Array;
-  if (before?.bytes !== undefined) bytes = fromHex(before.bytes);
-  else {
-    bytes = await spec.build();
-    await journal.putPhase(operation, {
-      id: spec.id,
-      kind: "unit",
-      resource: toHex(spec.resource),
-      state: "pending",
-      bytes: toHex(bytes),
-    });
+  for (let attempt = 0; ; attempt++) {
+    const before = phaseOf(await journal.load(operation), spec.id);
+    if (before?.state === "committed-own") return { state: "committed-own" };
+    const retry =
+      before?.state === "refused" &&
+      before.code !== undefined &&
+      (spec.rebuildOn ?? []).includes(before.code);
+    if (retry && attempt > 3) return { state: "refused", code: before?.code ?? "refused" };
+    let bytes: Uint8Array;
+    if (before?.bytes !== undefined && !retry) bytes = fromHex(before.bytes);
+    else {
+      bytes = await spec.build();
+      await journal.putPhase(operation, {
+        id: spec.id,
+        kind: "unit",
+        resource: toHex(spec.resource),
+        state: "pending",
+        bytes: toHex(bytes),
+        ...(before?.bytes !== undefined && retry
+          ? { facts: { ...before.facts, [`stale${attempt}`]: before.bytes } }
+          : before?.facts === undefined
+            ? {}
+            : { facts: before.facts }),
+      });
+    }
+    const answer = await channel.putDataUnit(spec.resource, bytes);
+    const phase = phaseOf(await journal.load(operation), spec.id) as JournalPhase;
+    if (answer.kind === "ack") {
+      await journal.putPhase(operation, { ...phase, state: "committed-own" });
+      return { state: "committed-own" };
+    }
+    await journal.putPhase(operation, { ...phase, state: "refused", code: answer.code });
+    if (!(spec.rebuildOn ?? []).includes(answer.code))
+      return { state: "refused", code: answer.code };
   }
-  const answer = await channel.putDataUnit(spec.resource, bytes);
-  const phase = phaseOf(await journal.load(operation), spec.id) as JournalPhase;
-  if (answer.kind === "ack") {
-    await journal.putPhase(operation, { ...phase, state: "committed-own" });
-    return { state: "committed-own" };
-  }
-  await journal.putPhase(operation, { ...phase, state: "refused", code: answer.code });
-  return { state: "refused", code: answer.code };
 }
