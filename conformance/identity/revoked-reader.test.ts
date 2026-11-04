@@ -1,5 +1,5 @@
 // W §41 revoked-reader prefix against the session_read vectors of
-// LFCP-IDENTITY-TEST-VECTORS-01 (spec#3).
+// LFCP-IDENTITY-TEST-VECTORS-01.
 import { toHex } from "@openlfcp/core";
 import { revokedReaderPrefix } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";

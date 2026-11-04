@@ -1,5 +1,5 @@
 // W §17.5 Exposure against every accepted DEVICE_REVOKE of
-// LFCP-IDENTITY-TEST-VECTORS-01 that states it (spec#3).
+// LFCP-IDENTITY-TEST-VECTORS-01 that states it.
 import { exposedReaders, isExposingRevocation } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
 import { chainOf, contextOf, recordOf, wire } from "./corpus.js";

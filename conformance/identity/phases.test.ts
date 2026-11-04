@@ -1,5 +1,5 @@
 // §9.2 phase classification against every phase_input of
-// IDENTITY-FLOW-FIXTURES-01 (spec#3): the same chain and intent give the
+// IDENTITY-FLOW-FIXTURES-01: the same chain and intent give the
 // same phase state on every installation.
 
 import {

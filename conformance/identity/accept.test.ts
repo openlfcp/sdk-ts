@@ -1,5 +1,5 @@
-// The invitation accepted by a device against IDENTITY-FLOW-FIXTURES-01 F07
-// (spec#3): the claim names the root and the device's self-registration
+// The invitation accepted by a device against IDENTITY-FLOW-FIXTURES-01 F07:
+// the claim names the root and the device's self-registration
 // are the fixtures' exact records.
 
 import { claimForRootRecord, selfRegistrationRecord } from "@openlfcp/client";

@@ -1,5 +1,5 @@
-// The pairing approval against IDENTITY-FLOW-FIXTURES-01 F08, F10 and F13
-// (spec#3): the records the phases build from the journaled payload are
+// The pairing approval against IDENTITY-FLOW-FIXTURES-01 F08, F10 and F13:
+// the records the phases build from the journaled payload are
 // the fixtures' exact bytes, and the feasibility check of §5.3 step 4
 // agrees with the validators on the 32-device limit and chain depth.
 

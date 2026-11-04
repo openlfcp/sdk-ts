@@ -1,5 +1,6 @@
-// Typed access to the spec#3 identity corpora (wire identity vectors, flow
-// fixtures) for the identity flow tests (LFCP-04-410).
+// Typed access to the identity corpora (wire identity vectors, flow
+// fixtures) at the baseline pinned in spec.lock, for the identity flow tests
+// (LFCP-04-410).
 import { fromHex, type PrincipalId, principalId } from "@openlfcp/core";
 import {
   type AgreementKeyPair,
@@ -17,7 +18,7 @@ import {
   type Signer,
   validateControlChain,
 } from "@openlfcp/wire";
-import { FLOW_FIXTURES, readIdentityJson, WIRE_IDENTITY } from "./spec3.mjs";
+import { openSpec } from "../spec.mjs";
 
 export type Linear = Extract<ChainResult, { kind: "linear" }>;
 interface Hex {
@@ -76,8 +77,12 @@ export interface FlowCase {
   readonly expected: { readonly steps: readonly any[] };
 }
 
-export const wire = readIdentityJson(WIRE_IDENTITY) as WireCorpus;
-export const flows = (readIdentityJson(FLOW_FIXTURES) as { cases: readonly FlowCase[] }).cases;
+export const WIRE_IDENTITY = "test-vectors/lfcp-wire-01/LFCP-IDENTITY-TEST-VECTORS-01.json";
+export const FLOW_FIXTURES = "test-vectors/identity-01/IDENTITY-FLOW-FIXTURES-01.json";
+
+const spec = openSpec();
+export const wire = spec.readJson(WIRE_IDENTITY) as WireCorpus;
+export const flows = (spec.readJson(FLOW_FIXTURES) as { cases: readonly FlowCase[] }).cases;
 
 const byId = new Map(wire.cases.map((c) => [c.id, c]));
 export function wireCase(id: string): WireCase {

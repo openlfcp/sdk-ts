@@ -1,5 +1,5 @@
 // Revocation, rotation and reconciliation against IDENTITY-FLOW-FIXTURES-01
-// F05, F12, F13, F14 and F15 (spec#3).
+// F05, F12, F13, F14 and F15.
 
 import {
   classifyPackage,

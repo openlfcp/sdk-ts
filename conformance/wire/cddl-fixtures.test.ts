@@ -20,6 +20,7 @@ import {
 } from "@openlfcp/core";
 import {
   authTranscript,
+  CONTROL_TYPE,
   canonicalFrontierFromCbor,
   controlBodyFromCbor,
   dataUnitAad,
@@ -33,11 +34,13 @@ import {
   decodeMessage,
   decodePrincipalDescriptor,
   decodeSnapshotPayload,
+  deviceCertificatePayloadFromCbor,
   keyPackageHpkeAad,
   keyPackageHpkeInfo,
   ownerTransferAcceptPayloadFromCbor,
   ownerTransferOfferPayloadFromCbor,
   parseDataUnit,
+  parseDeviceCertificate,
   parseKeyPackage,
   parseOwnerTransferAccept,
   parseOwnerTransferOffer,
@@ -180,6 +183,13 @@ const RULES: Readonly<Record<string, (bytes: Uint8Array) => unknown>> = {
   "typed-lfcp-message": decodeMessage,
   // §18.2: the bearer invitation secret.
   "invite-secret": decodeInviteSecret,
+  // §7.3: the Device Certificate, its payload, and the bodies of §17.4 and §17.5.
+  "device-certificate-payload": (b) => deviceCertificatePayloadFromCbor(decodeDeterministic(b)),
+  "device-certificate": parseDeviceCertificate,
+  "device-grant-body": (b) =>
+    controlBodyFromCbor(CONTROL_TYPE.DEVICE_GRANT, decodeDeterministic(b)),
+  "device-revoke-body": (b) =>
+    controlBodyFromCbor(CONTROL_TYPE.DEVICE_REVOKE, decodeDeterministic(b)),
 };
 const PENDING: Readonly<Record<string, string>> = cddlPending.rules;
 
