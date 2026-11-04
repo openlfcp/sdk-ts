@@ -7,6 +7,7 @@ import {
   parseControlRecord,
   parseDataUnit,
   parseKeyPackage,
+  revokedReaderPrefix,
   type Signer,
   serverAcceptsDataPut,
   validateControlChain,
@@ -110,7 +111,7 @@ export class MemoryCoordinator {
     const p = signer.descriptor.principalId;
     if (hasAbility(c.state, p, ABILITY.DATA_READ) || hasAbility(c.state, p, ABILITY.INVITE_CLAIM))
       return c;
-    return revokedReaderPrefix(c, p) === undefined ? undefined : "prefix";
+    return revokedReaderPrefix(c, p as never) === undefined ? undefined : "prefix";
   }
 
   async #upload(
@@ -177,7 +178,7 @@ export class MemoryCoordinator {
         if (access === undefined) return { kind: "nack", code: "AUTHORIZATION_FAILED" };
         if (access === "prefix") {
           const c = validateControlChain(h.records) as LinearChain;
-          const at = revokedReaderPrefix(c, signer.descriptor.principalId) as number;
+          const at = revokedReaderPrefix(c, signer.descriptor.principalId)?.index as number;
           const rec = c.records[at];
           return {
             kind: "opened",
@@ -211,7 +212,7 @@ export class MemoryCoordinator {
         }
         if (access === "prefix") {
           const c = validateControlChain(h.records) as LinearChain;
-          const at = revokedReaderPrefix(c, signer.descriptor.principalId) as number;
+          const at = revokedReaderPrefix(c, signer.descriptor.principalId)?.index as number;
           return h.records.slice(Number(start), at + 1);
         }
         return h.records.slice(Number(start));
@@ -295,24 +296,4 @@ export class MemoryCoordinator {
     h.units.set(key, bytes);
     return { kind: "ack" };
   }
-}
-
-/**
- * W §41 "Control read for a revoked reader": the index of the first
- * DEVICE_REVOKE of `p` by its root, when `p` is registered and held
- * data/read at the head just before it.
- */
-export function revokedReaderPrefix(chain: LinearChain, p: Uint8Array): number | undefined {
-  const d = chain.state.devices.get(toHex(p));
-  if (d === undefined || !d.registered) return undefined;
-  for (let i = 1; i < chain.records.length; i++) {
-    const r = chain.records[i];
-    if (r?.body.type !== "DEVICE_REVOKE") continue;
-    if (!bytesEqual(r.body.device, p) || !bytesEqual(r.body.root, d.root)) continue;
-    const before = chain.stateAt(chain.records[i - 1]?.signed.id as Uint8Array);
-    return before !== undefined && hasAbility(before, p as never, ABILITY.DATA_READ)
-      ? i
-      : undefined;
-  }
-  return undefined;
 }
