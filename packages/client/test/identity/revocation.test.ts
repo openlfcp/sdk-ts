@@ -1,14 +1,19 @@
 import { bytesEqual, type PrincipalId, toHex } from "@openlfcp/core";
 import { parseControlRecord, parseKeyPackage } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
-import { heldDeks } from "../../src/identity/context.js";
+import {
+  heldDeks,
+  loadIdentityDocument,
+  sealIdentityUnit,
+  syncChain,
+} from "../../src/identity/context.js";
 import { principalRefOf } from "../../src/identity/document.js";
 import { OperationJournal } from "../../src/identity/journal.js";
 import { reconcileDevices } from "../../src/identity/reconcile.js";
 import { previewRevocation, revokeDevice } from "../../src/identity/revocation.js";
 import type { MemoryCoordinator } from "./memory-coordinator.js";
-import { party } from "./support.js";
-import { addToRoster, hostResource, pair, world } from "./world.js";
+import { party, URL } from "./support.js";
+import { addToRoster, hostResource, type Node, pair, world } from "./world.js";
 
 const id = (n: number) => party(n).signer.descriptor.principalId as PrincipalId;
 const types = (server: MemoryCoordinator, R: Uint8Array): string[] =>
@@ -21,6 +26,16 @@ const epochPackages = (server: MemoryCoordinator, R: Uint8Array, epoch: bigint) 
     .sort();
 const currentEpoch = (server: MemoryCoordinator, R: Uint8Array) =>
   server.chain(R as never).state.epoch.epoch;
+
+/** `who`'s Identity Resource document, as `who` loads it from the coordinator. */
+async function openI(who: Node, I: Uint8Array) {
+  const channel = await who.network.connect(who.installation.signer, URL);
+  const chain = await syncChain(who.storage, channel, I as never);
+  const doc = who.document(I as never, chain.state.owner.principalId);
+  const deks = await heldDeks(who.secrets, chain);
+  const load = await loadIdentityDocument({ channel, chain, deks, doc });
+  return { channel, chain, doc, deks, load };
+}
 
 describe("revoking a device (IDENTITY-PROFILE-01 §8)", { timeout: 60_000 }, () => {
   test("a managing device: its descendant is suspended, I and X rotate, neither receives the new DEK", async () => {
@@ -64,6 +79,31 @@ describe("revoking a device (IDENTITY-PROFILE-01 §8)", { timeout: 60_000 }, () 
       "complete",
     ]);
     expect(types(w.server, w.I).length).toBe(n + 0);
+  });
+
+  test("the display flag of a device with its own missing_keys hint: the hint stays the device's (AI5)", async () => {
+    const w = await world(1);
+    const A = await pair(w, w.P, 2, "full");
+    const key = principalRefOf(id(2));
+    const a = await openI(A, w.I);
+    const own = a.doc.devices().get(key);
+    if (own === undefined) throw new Error("no device entry");
+    const hint = { [toHex(w.I)]: [0] };
+    const bytes = await sealIdentityUnit({
+      storage: A.storage,
+      chain: a.chain,
+      deks: a.deks,
+      signer: A.installation.signer,
+      doc: a.doc,
+      latest: a.load.latest,
+      intents: [{ intent: "device.put", key, entry: { ...own, missing_keys: hint } }],
+    });
+    expect((await a.channel.putDataUnit(w.I, bytes)).kind).toBe("ack");
+    const r = await revokeDevice({ ...w.P, device: id(2), reason: 0n });
+    if (r.kind !== "revoked") throw new Error(r.kind);
+    const p = await openI(w.P, w.I);
+    // The revoker writes the flag only: the document refuses another device's hint (AI5).
+    expect(p.doc.devices().get(key)).toMatchObject({ revoked: true, missing_keys: hint });
   });
 
   test("a revoker whose chain passes through the target is refused (§8.1)", async () => {

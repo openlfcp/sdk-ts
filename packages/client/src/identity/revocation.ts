@@ -458,6 +458,8 @@ async function markRevoked(
   const key = principalRefOf(device);
   const entry = doc.devices().get(key);
   if (entry === undefined || entry.revoked === true) return;
+  // The device's missing_keys hint is written only by the device (§3 AI5).
+  const { missing_keys: _hint, ...display } = entry;
   try {
     await runUnitPhase(channel, journal, operation, {
       id: "display",
@@ -470,7 +472,7 @@ async function markRevoked(
           signer: o.installation.signer,
           doc,
           latest: load.latest,
-          intents: [{ intent: "device.put", key, entry: { ...entry, revoked: true } }],
+          intents: [{ intent: "device.put", key, entry: { ...display, revoked: true } }],
         }),
     });
   } catch (e) {

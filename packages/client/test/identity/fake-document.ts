@@ -18,8 +18,9 @@ const json = (v: unknown) => JSON.stringify(v, (_, x) => (typeof x === "bigint" 
  * A stand-in for IdentityReplica in client tests (the client package
  * never binds to Automerge): each change is the JSON of its intents. It
  * keeps the rules the flows rely on: the initial change only from the root
- * at actor sequence 1 (AI0), and a pairing or other writer only creating
- * or writing its own request (AI4).
+ * at actor sequence 1 (AI0), a pairing or other writer only creating or
+ * writing its own request (AI4), and a device's `missing_keys` written only
+ * by that device (AI5).
  */
 export class FakeIdentityDocument implements IdentityDocumentPort {
   readonly #roster = new Map<string, RosterEntryValue>();
@@ -54,6 +55,8 @@ export class FakeIdentityDocument implements IdentityDocumentPort {
         continue;
       }
       if (!this.#initialized) return false;
+      if (i.intent === "device.put" && i.entry.missing_keys !== undefined && i.key !== me)
+        return false;
       if (author.writerClass === "pairing" || author.writerClass === "other") {
         if (i.intent !== "request.put" || i.entry.pairing !== me) return false;
         const owner = this.#requestOwner.get(i.key);
