@@ -103,4 +103,35 @@ describe("loadIdentityDocument and equivocation (W §26.2)", () => {
       principalRefOf(OWNER.signer.descriptor.principalId),
     ]);
   });
+
+  test("a copy with an invalid signature is not equivocation and excludes nothing", async () => {
+    const server = new MemoryCoordinator();
+    const local = device();
+    const r = await createIdentityResource({
+      installation: OWNER,
+      ...local,
+      network: server.network(),
+      url: URL,
+      label: "laptop",
+      roster: [],
+      document: () => new FakeIdentityDocument(),
+      now: () => 0,
+    });
+    if (r.kind !== "created") throw new Error(r.kind);
+    const unit1 = [...(server.hosted.get(toHex(r.identity))?.units.values() ?? [])].find(
+      (b) => parseDataUnit(b).payload.actorSeq === 1n,
+    ) as Uint8Array;
+    const forged = Uint8Array.from(unit1);
+    forged[forged.length - 1] = (forged[forged.length - 1] as number) ^ 1;
+    server.inject(r.identity, forged);
+    const channel = await server.network().connect(OWNER.signer, URL);
+    const doc = new FakeIdentityDocument();
+    await loadIdentityDocument({
+      channel,
+      chain: r.chain,
+      deks: await heldDeks(local.secrets, r.chain),
+      doc,
+    });
+    expect(doc.initialized()).toBe(true);
+  });
 });

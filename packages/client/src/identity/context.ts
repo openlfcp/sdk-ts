@@ -24,6 +24,7 @@ import {
   type DataUnitPayload,
   hasAbility,
   InMemorySeenUnits,
+  type Parsed,
   type PrincipalDescriptor,
   parseDataUnit,
   parseKeyPackage,
@@ -33,6 +34,7 @@ import {
   sealKeyPackage,
   validateControlChain,
   verifyKeyPackage,
+  verifySignedObject,
 } from "@openlfcp/wire";
 import {
   adoptStoredDeks,
@@ -476,6 +478,7 @@ export async function loadIdentityDocument(options: {
     return out;
   });
   const units = withoutEquivocations(
+    chain,
     (await options.channel.dataUnits(R, ranges)).map((bytes) => ({
       bytes,
       parsed: parseDataUnit(bytes),
@@ -508,23 +511,36 @@ export async function loadIdentityDocument(options: {
 }
 
 /**
- * W §26.2: two different units at one (actor, sequence) are equivocation,
- * and both are excluded (their dependants then wait for a dependency that
- * never comes: the actor's later units for its hash chain, other changes
- * for the document's). Deciding before anything is applied keeps the
- * result independent of the delivery order.
+ * W §26.2: two different units at one (resource, actor, sequence), each
+ * with a valid signature by its actor, are equivocation, and both are
+ * excluded (their dependants then wait for a dependency that never comes:
+ * the actor's later units for its hash chain, other changes for the
+ * document's). Only units of `chain`'s Resource whose signature verifies
+ * take part: an unsigned or forged copy proves nothing and is dropped
+ * without excluding the signed unit. Authorization and decryption are not
+ * conditions here. Deciding before anything is applied keeps the result
+ * independent of the delivery order.
  */
 export function withoutEquivocations<
-  T extends { readonly bytes: Uint8Array; readonly parsed: { readonly payload: DataUnitPayload } },
->(units: readonly T[]): T[] {
+  T extends {
+    readonly bytes: Uint8Array;
+    readonly parsed: Parsed<DataUnitPayload>;
+  },
+>(chain: LinearChain, units: readonly T[]): T[] {
+  const signed = units.filter((u) => {
+    const p = u.parsed.payload;
+    if (!bytesEqual(p.resourceId, chain.state.resourceId)) return false;
+    const actor = chain.state.principals.get(toHex(p.actor));
+    return actor !== undefined && verifySignedObject(u.parsed.signed, actor).valid;
+  });
   const key = (u: T) => `${toHex(u.parsed.payload.actor)}:${u.parsed.payload.actorSeq}`;
   const ids = new Map<string, Set<string>>();
-  for (const u of units) {
+  for (const u of signed) {
     const set = ids.get(key(u)) ?? new Set<string>();
     set.add(toHex(sha256(u.bytes)));
     ids.set(key(u), set);
   }
-  return units.filter((u) => (ids.get(key(u))?.size ?? 0) <= 1);
+  return signed.filter((u) => (ids.get(key(u))?.size ?? 0) <= 1);
 }
 
 /**
