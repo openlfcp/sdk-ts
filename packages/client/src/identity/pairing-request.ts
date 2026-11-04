@@ -93,9 +93,14 @@ export type RequestPairingResult =
       /** §5.2: show it; the human compares it with A's screen. */
       readonly fingerprint: string;
     }
-  /** The link does not parse, or its secret is not its device's (§5.2). */
+  /**
+   * The link is rejected (§5.2): it does not parse, or its secret is not its
+   * device's. Like `not-a-session`, a client-local outcome with no wire code
+   * (W §62; the corpora name it PAIRING_LINK_REJECTED): nothing more is sent
+   * as `J` and no request is written.
+   */
   | { readonly kind: "invalid-link"; readonly reason: string }
-  /** `I` is not an Identity Resource, or `J` is not an active pairing device of its owner (§5.2). */
+  /** The link is rejected (§5.2): `I` is not an Identity Resource, or `J` is not an active pairing device of its owner. */
   | { readonly kind: "not-a-session"; readonly reason: string }
   /** No DEK of `I` or no root unit 1: the document cannot be verified (§5.3 step 2). */
   | { readonly kind: "missing-material"; readonly missing: readonly string[] }
