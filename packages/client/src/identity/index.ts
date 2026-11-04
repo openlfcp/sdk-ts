@@ -73,6 +73,36 @@ export {
   type OpenAnswer,
 } from "./network.js";
 export {
+  type ApprovalResult,
+  approvedGrantRecord,
+  approvePairing,
+  type CancelResult,
+  cancelPairing,
+  cancelRecord,
+  consumeRecord,
+  createPairingSession,
+  type IdentityFlowOptions,
+  identityTarget,
+  openPairingSessions,
+  PairingLinkText,
+  type PairingReview,
+  type PairingSessionResult,
+  pairingRequests,
+  resumeApproval,
+  resumePairingSession,
+} from "./pairing.js";
+export {
+  type CandidateEvidence,
+  type CandidateResult,
+  type CandidateStatus,
+  candidateEvidence,
+  completePairing,
+  type PairingOutcome,
+  type RequestPairingOptions,
+  type RequestPairingResult,
+  requestPairing,
+} from "./pairing-request.js";
+export {
   certificateInScope,
   classifyCancel,
   classifyConsume,

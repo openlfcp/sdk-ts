@@ -50,6 +50,8 @@ export class MemoryCoordinator {
   readonly hosted = new Map<string, Hosted>();
   extensions: readonly string[] = ["identity-01"];
   offline = false;
+  /** Resources (hex) whose coordinator does not answer. */
+  readonly down = new Set<string>();
   fault: (e: UploadEvent) => Fault | undefined = () => undefined;
   readonly uploads: UploadEvent[] = [];
 
@@ -112,10 +114,12 @@ export class MemoryCoordinator {
   }
 
   async #upload(
+    target: ResourceId | undefined,
     e: UploadEvent,
     apply: () => IdentityAnswer | Promise<IdentityAnswer>,
   ): Promise<IdentityAnswer> {
-    if (this.offline) throw new IdentityUnavailable("offline");
+    if (this.offline || (target !== undefined && this.down.has(toHex(target))))
+      throw new IdentityUnavailable("offline");
     this.uploads.push(e);
     const f = this.fault(e);
     if (f === "drop-request") throw new IdentityUnavailable("the request was lost");
@@ -128,12 +132,16 @@ export class MemoryCoordinator {
     const self = this;
     const hosted = (r: ResourceId) => this.hosted.get(toHex(r));
     const nack = (code: string): IdentityAnswer => ({ kind: "nack", code });
+    const reach = (r: ResourceId) => {
+      if (this.offline || this.down.has(toHex(r))) throw new IdentityUnavailable("unreachable");
+    };
     return {
       get extensions() {
         return self.extensions;
       },
       host: (genesis) =>
         this.#upload(
+          undefined,
           {
             op: "host",
             resource: parseControlRecord(genesis).payload.resourceId,
@@ -160,6 +168,7 @@ export class MemoryCoordinator {
           },
         ),
       open: async (r): Promise<OpenAnswer> => {
+        reach(r);
         if (this.offline) throw new IdentityUnavailable("offline");
         const h = hosted(r);
         if (h === undefined) return { kind: "nack", code: "RESOURCE_NOT_HOSTED" };
@@ -191,6 +200,7 @@ export class MemoryCoordinator {
         };
       },
       control: async (r, start) => {
+        reach(r);
         if (this.offline) throw new IdentityUnavailable("offline");
         const h = hosted(r);
         if (h === undefined) throw new IdentityUnavailable("not hosted");
@@ -206,7 +216,7 @@ export class MemoryCoordinator {
         return h.records.slice(Number(start));
       },
       putControl: (r, expectedHead, record) =>
-        this.#upload({ op: "control", resource: r, bytes: record, signer }, () => {
+        this.#upload(r, { op: "control", resource: r, bytes: record, signer }, () => {
           const h = hosted(r);
           if (h === undefined) return nack("RESOURCE_NOT_HOSTED");
           if (h.records.some((x) => bytesEqual(x, record))) return { kind: "ack" };
@@ -220,6 +230,7 @@ export class MemoryCoordinator {
           return { kind: "ack" };
         }),
       keyPackages: async (r, recipient, epochs) => {
+        reach(r);
         if (this.offline) throw new IdentityUnavailable("offline");
         const h = hosted(r);
         if (h === undefined) return [];
@@ -233,7 +244,7 @@ export class MemoryCoordinator {
         });
       },
       putKeyPackage: (r, bytes) =>
-        this.#upload({ op: "key-package", resource: r, bytes, signer }, () => {
+        this.#upload(r, { op: "key-package", resource: r, bytes, signer }, () => {
           const h = hosted(r);
           if (h === undefined) return nack("RESOURCE_NOT_HOSTED");
           const c = validateControlChain(h.records) as LinearChain;
@@ -243,6 +254,7 @@ export class MemoryCoordinator {
           return { kind: "ack" };
         }),
       dataUnits: async (r, ranges) => {
+        reach(r);
         if (this.offline) throw new IdentityUnavailable("offline");
         const h = hosted(r);
         if (h === undefined) return [];
@@ -258,7 +270,7 @@ export class MemoryCoordinator {
         });
       },
       putDataUnit: (r, bytes) =>
-        this.#upload({ op: "data-unit", resource: r, bytes, signer }, () =>
+        this.#upload(r, { op: "data-unit", resource: r, bytes, signer }, () =>
           this.#putUnit(hosted(r), bytes),
         ),
       close: () => undefined,
