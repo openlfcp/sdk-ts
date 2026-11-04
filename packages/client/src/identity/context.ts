@@ -5,6 +5,7 @@ import {
   type DataEpoch,
   dataEpoch,
   fromHex,
+  hash32,
   LfcpError,
   type ResourceId,
   toHex,
@@ -404,25 +405,41 @@ export async function deliverKeys(options: {
         complete++;
         continue;
       }
-      const sealed = await sealKeyPackage({
-        resourceId: R,
-        epoch,
-        controlHead: chain.state.head,
-        recipient,
-        dek: options.deks.get(e) as ResourceDEK,
-        signer: sender,
-      });
-      const check = verifyKeyPackage(chain, parseKeyPackage(sealed.bytes));
-      if (check.kind !== "authorized") {
-        skipped.push({ recipient: hex, reason: check.message });
-        break;
+      // §9.1: a package sent before is sent again as the same bytes, while it is still authorized.
+      let bytes = await ledger.pending(R, epoch, rid);
+      if (
+        bytes !== undefined &&
+        verifyKeyPackage(chain, parseKeyPackage(bytes)).kind !== "authorized"
+      )
+        bytes = undefined;
+      if (bytes === undefined) {
+        const sealed = await sealKeyPackage({
+          resourceId: R,
+          epoch,
+          controlHead: chain.state.head,
+          recipient,
+          dek: options.deks.get(e) as ResourceDEK,
+          signer: sender,
+        });
+        const check = verifyKeyPackage(chain, parseKeyPackage(sealed.bytes));
+        if (check.kind !== "authorized") {
+          skipped.push({ recipient: hex, reason: check.message });
+          break;
+        }
+        bytes = sealed.bytes;
+        await ledger.putPending(R, epoch, rid, bytes);
       }
-      const answer = await options.channel.putKeyPackage(R, sealed.bytes);
+      const answer = await options.channel.putKeyPackage(R, bytes);
       if (answer.kind !== "ack") {
         skipped.push({ recipient: hex, reason: answer.code });
         continue;
       }
-      await ledger.record({ resource: R, epoch, recipient: rid, packageId: sealed.packageId });
+      await ledger.record({
+        resource: R,
+        epoch,
+        recipient: rid,
+        packageId: hash32(parseKeyPackage(bytes).signed.id),
+      });
       sent.push({ epoch, recipient: hex });
     }
   }

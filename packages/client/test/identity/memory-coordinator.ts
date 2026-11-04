@@ -239,7 +239,7 @@ export class MemoryCoordinator {
           const c = validateControlChain(h.records) as LinearChain;
           const check = verifyKeyPackage(c, parseKeyPackage(bytes));
           if (check.kind !== "authorized") return nack("AUTHORIZATION_FAILED");
-          h.packages.push(bytes);
+          if (!h.packages.some((p) => bytesEqual(p, bytes))) h.packages.push(bytes);
           return { kind: "ack" };
         }),
       dataUnits: async (r, ranges) => {

@@ -219,6 +219,9 @@ export interface LedgerEntry {
   readonly packageId: Hash32;
 }
 
+const pendingKey = (resource: ResourceId, epoch: DataEpoch, recipient: PrincipalId) =>
+  `identity-package-pending:${toHex(resource)}:${epoch}:${toHex(recipient)}`;
+
 const ledgerKey = (resource: ResourceId, epoch: DataEpoch, recipient: PrincipalId) =>
   `${LEDGER_PREFIX}${toHex(resource)}:${epoch}:${toHex(recipient)}`;
 
@@ -235,6 +238,7 @@ export class PackageLedger {
     this.#storage = storage;
   }
 
+  /** Records an acknowledged package and drops its pending bytes, in one commit. */
   async record(entry: LedgerEntry): Promise<void> {
     const result = await this.#storage.commit([
       {
@@ -242,8 +246,36 @@ export class PackageLedger {
         key: ledgerKey(entry.resource, entry.epoch, entry.recipient),
         value: toHex(entry.packageId),
       },
+      {
+        op: "put-local-mark",
+        key: pendingKey(entry.resource, entry.epoch, entry.recipient),
+        value: null,
+      },
     ]);
     if (!result.ok) throw new Error(`the package ledger was not stored: ${result.reason}`);
+  }
+
+  /** The exact bytes of a package sent but not yet acknowledged (§9.1). */
+  async pending(
+    resource: ResourceId,
+    epoch: DataEpoch,
+    recipient: PrincipalId,
+  ): Promise<Uint8Array | undefined> {
+    const v = await this.#storage.localMarks.get(pendingKey(resource, epoch, recipient));
+    return v === undefined ? undefined : fromHex(v);
+  }
+
+  /** Persists a package's exact bytes before it is sent. */
+  async putPending(
+    resource: ResourceId,
+    epoch: DataEpoch,
+    recipient: PrincipalId,
+    bytes: Uint8Array,
+  ): Promise<void> {
+    const result = await this.#storage.commit([
+      { op: "put-local-mark", key: pendingKey(resource, epoch, recipient), value: toHex(bytes) },
+    ]);
+    if (!result.ok) throw new Error(`the pending package was not stored: ${result.reason}`);
   }
 
   async has(resource: ResourceId, epoch: DataEpoch, recipient: PrincipalId): Promise<boolean> {
