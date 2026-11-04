@@ -3,7 +3,9 @@ import {
   type ControlRecordId,
   controlRecordId,
   type DataEpoch,
+  fromHex,
   type PrincipalId,
+  principalId,
   toHex,
 } from "@openlfcp/core";
 import type { ControlState } from "./chain.js";
@@ -189,6 +191,29 @@ export function hasAbility(state: ControlState, principal: PrincipalId, ability:
   if (ownerAction(state, principal)) return true;
   return d.mask.includes(ability) && direct(state, d.root, ability);
 }
+
+/**
+ * W §17.5 Exposure: the Principals registered at `before` (the state a
+ * DEVICE_REVOKE is accepted on) that hold `data/read` there and not at
+ * `after` (the state after it): the revoked device itself or any device
+ * its revocation suspends through the cascade. The record is exposing
+ * exactly when this is non-empty. Computed from the Resource's own chain
+ * alone; it is what the rotation policy of IDENTITY-PROFILE-01 §8 reacts to.
+ */
+export function exposedReaders(before: ControlState, after: ControlState): readonly PrincipalId[] {
+  const out: PrincipalId[] = [];
+  for (const [hex, d] of before.devices) {
+    if (!d.registered) continue;
+    const p = principalId(fromHex(hex));
+    if (hasAbility(before, p, ABILITY.DATA_READ) && !hasAbility(after, p, ABILITY.DATA_READ))
+      out.push(p);
+  }
+  return Object.freeze(out);
+}
+
+/** Whether the revocation that took `before` to `after` is exposing (W §17.5). */
+export const isExposingRevocation = (before: ControlState, after: ControlState): boolean =>
+  exposedReaders(before, after).length > 0;
 
 /** Every standard ability `principal` holds at the head of `state`, ascending. */
 export function abilitiesOf(state: ControlState, principal: PrincipalId): readonly bigint[] {
