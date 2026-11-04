@@ -856,6 +856,17 @@ export async function resumeApproval(
 
 export type CancelResult =
   | { readonly kind: "cancelled"; readonly rotation: RotationOutcome }
+  /**
+   * Cancelled in the chain, but the coordinator refused the unit that
+   * deletes the rejected request (§5.3 step 4) with `code`: the request
+   * entry stays. The session stays open; cancelPairing with the same
+   * `reject` writes the unit again.
+   */
+  | {
+      readonly kind: "document-incomplete";
+      readonly rotation: RotationOutcome;
+      readonly code: string;
+    }
   /** The session was consumed by an approval: not cancelled (§9.2 Cancel: superseded). */
   | { readonly kind: "consumed" }
   | { readonly kind: "refused"; readonly code: string }
@@ -878,11 +889,14 @@ export async function cancelPairing(
     pool,
     async (): Promise<CancelResult> => {
       const channel = await pool.get(me, url);
+      let rejected: Awaited<ReturnType<typeof runUnitPhase>> | undefined;
       if (o.reject !== undefined) {
         const key = o.reject;
-        await runUnitPhase(channel, journal, o.session, {
+        rejected = await runUnitPhase(channel, journal, o.session, {
           id: `reject:${key}`,
           resource: I,
+          rebuildOn: ["STALE_DATA_EPOCH"],
+          rebuildRefused: true,
           build: async () => {
             const { chain, doc, load } = await openIdentity(o, channel, I);
             return sealIdentityUnit({
@@ -906,10 +920,12 @@ export async function cancelPairing(
       });
       if (cancel.state === "superseded") return { kind: "consumed" };
       if (cancel.state === "refused") return { kind: "refused", code: cancel.code ?? "refused" };
-      await journal.setStatus(o.session, "abandoned");
       await o.secrets.delete(pairingSecretRef(J));
       // A cancelled J was a reader of I: the rotation policy applies (§5.3 step 9, §8.4).
       const rotation = await rotateIfExposed({ ...o, channel, operation: o.session, resource: I });
+      if (rejected?.state === "refused")
+        return { kind: "document-incomplete", rotation, code: rejected.code ?? "refused" };
+      await journal.setStatus(o.session, "abandoned");
       return { kind: "cancelled", rotation };
     },
     (reason) => ({ kind: "unavailable", reason }),

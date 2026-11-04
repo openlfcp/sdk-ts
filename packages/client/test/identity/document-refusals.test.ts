@@ -10,6 +10,7 @@ import { principalRefOf } from "../../src/identity/document.js";
 import { OperationJournal } from "../../src/identity/journal.js";
 import {
   approvePairing,
+  cancelPairing,
   createPairingSession,
   pairingRequests,
   resumeApproval,
@@ -96,5 +97,36 @@ describe("pairing approval: the document unit of §5.3 step 6", { timeout: 60_00
     const doc = await documentOf(w.P, w.I);
     expect(doc.devices().get(key)?.label).toBe("device 2");
     expect(doc.requests().has(key)).toBe(false);
+  });
+});
+
+describe("pairing rejection: the unit that deletes the request (§5.3 step 4)", {
+  timeout: 60_000,
+}, () => {
+  test("refused as stale: written again, the session cancelled", async () => {
+    const w = await world(0);
+    const { session, key } = await reviewed(w);
+    nackUnits(w.server, id(1), w.I, "STALE_DATA_EPOCH", 1);
+    const c = await cancelPairing({ ...w.P, session, reject: key });
+    w.server.fault = () => undefined;
+    expect(c.kind).toBe("cancelled");
+    expect((await documentOf(w.P, w.I)).requests().has(key)).toBe(false);
+    expect((await new OperationJournal(w.P.storage).load(session)).status).toBe("abandoned");
+  });
+
+  test("refused otherwise: document-incomplete, the session open; cancelled again, the request goes", async () => {
+    const w = await world(0);
+    const { session, key } = await reviewed(w);
+    nackUnits(w.server, id(1), w.I, "AUTHORIZATION_FAILED");
+    const c = await cancelPairing({ ...w.P, session, reject: key });
+    w.server.fault = () => undefined;
+    if (c.kind !== "document-incomplete") throw new Error(`cancel: ${c.kind}`);
+    expect(c.code).toBe("AUTHORIZATION_FAILED");
+    expect((await new OperationJournal(w.P.storage).load(session)).status).toBe("open");
+    expect((await documentOf(w.P, w.I)).requests().has(key)).toBe(true);
+
+    expect((await cancelPairing({ ...w.P, session, reject: key })).kind).toBe("cancelled");
+    expect((await documentOf(w.P, w.I)).requests().has(key)).toBe(false);
+    expect((await new OperationJournal(w.P.storage).load(session)).status).toBe("abandoned");
   });
 });
