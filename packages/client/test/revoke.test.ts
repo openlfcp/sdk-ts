@@ -200,4 +200,39 @@ describe("planRevocation (LFCP-02-060)", () => {
     expect(plan.records).toHaveLength(1);
     expect(plan.rotation).toBeNull();
   });
+
+  it("a revoker that is not the rotator revokes and leaves the epoch awaiting rotation (IDENTITY-PROFILE-01 §8.1)", async () => {
+    const GRANT = ABILITY.CAPABILITY_GRANT;
+    const REVOKE = ABILITY.CAPABILITY_REVOKE;
+    for (const extra of [[], [ABILITY.KEY_ROTATE]]) {
+      const c = chain();
+      // BOB may grant and revoke, and, in the second run, rotate but not distribute.
+      const bob = c.grant(BOB, [READ, GRANT, REVOKE, ...extra], OWNER, { delegable: [READ] });
+      c.grant(CAROL, [READ]);
+      c.grant(DAVE, [READ], BOB, { parentGrantId: bob });
+      const plan = await planRevocation({
+        view: c.view(),
+        revoker: BOB.signer,
+        subject: pid(DAVE),
+        frontier: [],
+      });
+      expect(plan.records).toHaveLength(1);
+      expect(plan.rotation).toBeNull();
+      expect(plan.awaitingRotation).toBe(true);
+      expect(plan.keyPackages).toEqual([]);
+    }
+  });
+
+  it("the owner is the rotator: no epoch awaits rotation", async () => {
+    const c = chain();
+    c.grant(BOB, [READ]);
+    const plan = await planRevocation({
+      view: c.view(),
+      revoker: OWNER.signer,
+      subject: pid(BOB),
+      frontier: [],
+    });
+    expect(plan.awaitingRotation).toBe(false);
+    expect(plan.rotation?.epoch).toBe(1n);
+  });
 });

@@ -144,6 +144,8 @@ export type RevokeAccessResult =
       readonly recipients: readonly PrincipalId[];
       /** Grants this revoker may not revoke: the member keeps access through them. */
       readonly remainingPaths: readonly RemainingPath[];
+      /** The member lost read access but this client is not the rotator (IDENTITY-PROFILE-01 §8.1). */
+      readonly awaitingRotation: boolean;
     }
   | {
       readonly kind: "refused";
@@ -2072,6 +2074,7 @@ export class SyncClient {
       epoch: plan.rotation?.epoch ?? null,
       recipients: plan.recipients,
       remainingPaths: plan.remainingPaths,
+      awaitingRotation: plan.awaitingRotation,
     });
   }
 

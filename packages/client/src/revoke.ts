@@ -24,6 +24,8 @@ import {
   validateControlChain,
   verifyKeyPackage,
 } from "@openlfcp/wire";
+import { readersAt } from "./identity/context.js";
+import { rotatorTest } from "./identity/rotation.js";
 
 /**
  * Removing a member's access (LFCP-02-060, LFCP-WIRE-01 §17.3, §19, §25):
@@ -60,6 +62,14 @@ export interface RevocationPlan {
   /** The readers who receive them. */
   readonly recipients: readonly PrincipalId[];
   readonly remainingPaths: readonly RemainingPath[];
+  /**
+   * The member lost read access but the revoker is not the rotator of
+   * IDENTITY-PROFILE-01 §8.1 on the post-state (it lacks key/rotate, or it
+   * cannot seal to every reader: no key/distribute and a reader of another
+   * root): no Key Epoch is planned and the Resource awaits rotation by its
+   * owner or an owner-acting device.
+   */
+  readonly awaitingRotation: boolean;
 }
 
 export type RevocationRefusal =
@@ -155,7 +165,12 @@ export async function planRevocation(options: {
   const keyPackages: Uint8Array[] = [];
   const recipients: PrincipalId[] = [];
   const stillReads = hasAbility(running.state, subject, ABILITY.DATA_READ);
-  if (options.rotate !== false && !stillReads) {
+  // §8.1: rotate only as the rotator of the post-state; else the Resource awaits rotation.
+  const awaitingRotation =
+    options.rotate !== false &&
+    !stillReads &&
+    !rotatorTest(running.state, revoker.descriptor.principalId).rotator;
+  if (options.rotate !== false && !stillReads && !awaitingRotation) {
     const r = rotateEpoch(running.state, revoker, {
       reason: KEY_EPOCH_REASON.MEMBER_REVOKED,
       finalFrontier: options.frontier,
@@ -169,15 +184,11 @@ export async function planRevocation(options: {
     running = next;
     records.push({ recordId: controlRecordId(r.recordId), bytes: r.bytes });
     rotation = Object.freeze({ epoch: r.epoch, dek: r.dek });
-    // Every remaining reader but the revoker, who keeps the DEK it made.
-    const readers: PrincipalDescriptor[] = [
-      running.state.owner,
-      ...[...running.state.principals.values()],
-    ].filter(
-      (d, i, all) =>
-        all.findIndex((x) => bytesEqual(x.principalId, d.principalId)) === i &&
-        !bytesEqual(d.principalId, revoker.descriptor.principalId) &&
-        hasAbility(running.state, d.principalId, ABILITY.DATA_READ),
+    // Every Principal with holds(P, 1) at the new head (W §19, §25.2): members,
+    // the owner and every active device, revoked and suspended devices
+    // excluded; but the revoker, who keeps the DEK it made.
+    const readers: PrincipalDescriptor[] = readersAt(running.state).filter(
+      (d) => !bytesEqual(d.principalId, revoker.descriptor.principalId),
     );
     for (const recipient of readers) {
       const sealed = await sealKeyPackage({
@@ -206,5 +217,6 @@ export async function planRevocation(options: {
     keyPackages: Object.freeze(keyPackages),
     recipients: Object.freeze(recipients),
     remainingPaths: Object.freeze(remainingPaths),
+    awaitingRotation,
   });
 }
