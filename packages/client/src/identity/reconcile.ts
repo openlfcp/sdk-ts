@@ -23,7 +23,6 @@ import {
   deliverKeys,
   fetchDeks,
   genesisOwner,
-  heldDeks,
   IdentityConflict,
   type KeyDelivery,
   loadIdentityDocument,
@@ -220,7 +219,7 @@ export async function reconcileDevices(
         targets: [{ resource: target.resource, status: "not-authorized", steps: [] }],
       };
     const doc = o.document(target.resource, R);
-    const deksI = await heldDeks(o.secrets, I);
+    const deksI = await fetchDeks(o.storage, o.secrets, channel, I, o.installation);
     const load = await loadIdentityDocument({ channel, chain: I, deks: deksI, doc });
     const hints = (resource: ResourceId) => {
       const ref = resourceRef(resource);

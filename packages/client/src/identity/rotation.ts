@@ -31,7 +31,7 @@ import { snapshotFrontier } from "../outbound.js";
 import { loadControlChain } from "../storage.js";
 import {
   deliverKeys,
-  heldDeks,
+  fetchDeks,
   type KeyDelivery,
   readersAt,
   runControlPhase,
@@ -310,7 +310,7 @@ export async function rotateAfter(
     }
   }
   const epoch = ownEpoch ?? chain.state.epoch.epoch;
-  const deks = await heldDeks(o.secrets, chain);
+  const deks = await fetchDeks(o.storage, o.secrets, o.channel, chain, o.installation);
   if (!deks.has(String(epoch))) return { resource: R, status: "awaiting-key-holder", epoch };
   // Every epoch held from the rotated one on, to every reader of the head (§8.2); a takeover
   // seals only what it holds (§9.6).

@@ -16,8 +16,8 @@ import {
   validateControlChain,
 } from "@openlfcp/wire";
 import {
+  fetchDeks,
   genesisOwner,
-  heldDeks,
   IdentityConflict,
   loadIdentityDocument,
   runControlPhase,
@@ -149,7 +149,12 @@ async function rosterTargets(
   chain: LinearChain,
 ): Promise<{ resource: ResourceId; url: string }[]> {
   const doc = o.document(chain.state.resourceId, genesisOwner(chain));
-  await loadIdentityDocument({ channel, chain, deks: await heldDeks(o.secrets, chain), doc });
+  await loadIdentityDocument({
+    channel,
+    chain,
+    deks: await fetchDeks(o.storage, o.secrets, channel, chain, o.installation),
+    doc,
+  });
   return [...doc.roster()]
     .filter(([, e]) => e.archived !== true)
     .map(([ref, e]) => ({ resource: resourceId(fromBase64url(ref)), url: e.coordinator }))
@@ -448,7 +453,7 @@ async function markRevoked(
 ): Promise<void> {
   const chain = await syncChain(o.storage, channel, I);
   const doc = o.document(I, genesisOwner(chain));
-  const deks = await heldDeks(o.secrets, chain);
+  const deks = await fetchDeks(o.storage, o.secrets, channel, chain, o.installation);
   const load = await loadIdentityDocument({ channel, chain, deks, doc });
   const key = principalRefOf(device);
   const entry = doc.devices().get(key);

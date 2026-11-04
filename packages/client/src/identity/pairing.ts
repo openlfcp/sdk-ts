@@ -37,8 +37,8 @@ import {
 } from "@openlfcp/wire";
 import {
   deliverKeys,
+  fetchDeks,
   genesisOwner,
-  heldDeks,
   IdentityConflict,
   type IdentityDocumentLoad,
   loadIdentityDocument,
@@ -236,7 +236,7 @@ async function missingMaterial(
   chain: LinearChain,
 ): Promise<string[]> {
   const missing: string[] = [];
-  const deks = await heldDeks(o.secrets, chain);
+  const deks = await fetchDeks(o.storage, o.secrets, channel, chain, o.installation);
   for (const e of chain.state.epochs.values())
     if (!deks.has(String(e.epoch))) missing.push(`the DEK of epoch ${e.epoch}`);
   // The carrier of the initial change (§2.2), verified, and retrievable for B.
@@ -296,7 +296,7 @@ async function finishSession(
     return { kind: "refused", code: grant.code ?? grant.state };
   }
   // Every epoch of I to J (same root, W §25.2), before the link is shown.
-  const deks = await heldDeks(o.secrets, grant.chain);
+  const deks = await fetchDeks(o.storage, o.secrets, channel, grant.chain, o.installation);
   const delivery = await deliverKeys({
     channel,
     ledger: new PackageLedger(o.storage),
@@ -398,7 +398,7 @@ async function openIdentity(
   const load = await loadIdentityDocument({
     channel,
     chain,
-    deks: await heldDeks(o.secrets, chain),
+    deks: await fetchDeks(o.storage, o.secrets, channel, chain, o.installation),
     doc,
   });
   return { chain, doc, load };
@@ -776,7 +776,7 @@ export async function resumeApproval(
           return sealIdentityUnit({
             storage: o.storage,
             chain,
-            deks: await heldDeks(o.secrets, chain),
+            deks: await fetchDeks(o.storage, o.secrets, channel, chain, o.installation),
             signer: me,
             doc,
             latest: load.latest,
@@ -797,7 +797,7 @@ export async function resumeApproval(
           chain,
           sender: me,
           recipients: [leaf.device],
-          deks: await heldDeks(o.secrets, chain),
+          deks: await fetchDeks(o.storage, o.secrets, channel, chain, o.installation),
         });
 
       // Step 9: J, consumed, was a reader of I: the rotation policy of §8.4 applies to I.
@@ -866,7 +866,7 @@ export async function cancelPairing(
             return sealIdentityUnit({
               storage: o.storage,
               chain,
-              deks: await heldDeks(o.secrets, chain),
+              deks: await fetchDeks(o.storage, o.secrets, channel, chain, o.installation),
               signer: me,
               doc,
               latest: load.latest,
