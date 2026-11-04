@@ -1,4 +1,5 @@
 /** Identity flows (IDENTITY-PROFILE-01 §§5–9, LFCP-04-410). */
+
 export {
   deliverKeys,
   extendChain,
@@ -114,6 +115,7 @@ export {
   type RegisterPhase,
   recordSeq,
 } from "./phases.js";
+export { type RevocationStatus, revocationStatus } from "./proof.js";
 export {
   planReconciliation,
   type ReconcileStep,
