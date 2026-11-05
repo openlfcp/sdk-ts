@@ -360,6 +360,8 @@ export type CandidateStatus =
 export interface CandidateResult {
   readonly resource: ResourceId;
   readonly status: CandidateStatus;
+  /** The roster name persisted with the candidate (§5.3 step 3), for display; absent for I. */
+  readonly name?: string;
 }
 
 export type PairingOutcome =
@@ -507,9 +509,10 @@ export async function completePairing(
     const candidates = (op.intent.candidates as Candidate[]).map((c) => ({
       resource: resourceId(fromHex(c.resource)),
       url: c.url,
+      ...(c.name === undefined ? {} : { name: c.name }),
     }));
     // A personal B is registered in I itself; a service B only in its candidates.
-    const places =
+    const places: { resource: ResourceId; url: string; name?: string }[] =
       kind === 0 ? [{ resource: I, url: op.intent.url as string }, ...candidates] : candidates;
 
     let certificate: CertificateChain | null =
@@ -585,11 +588,12 @@ export async function completePairing(
           ? "ready"
           : "waiting-for-keys";
       };
+      const named = p.name === undefined ? {} : { name: p.name };
       try {
-        out.push({ resource: p.resource, status: await status() });
+        out.push({ resource: p.resource, status: await status(), ...named });
       } catch (e) {
         if (e instanceof IdentityUnavailable || e instanceof IdentityRefused)
-          out.push({ resource: p.resource, status: "unreachable" });
+          out.push({ resource: p.resource, status: "unreachable", ...named });
         else throw e;
       }
     }

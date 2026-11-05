@@ -300,6 +300,13 @@ describe("pairing a service installation (§5.3 step 8, §6)", { timeout: 60_000
     expect(review?.requestedScope.map((r) => toHex(r))).toEqual([
       toHex(named[1]?.resource as never),
     ]);
+    if (review === undefined) throw new Error("none");
+    const approved = await approvePairing({ ...P, review, preset: "service" });
+    if (approved.kind !== "approved") throw new Error(approved.kind);
+    // The outcome names each candidate as the roster did.
+    const done = await completePairing({ ...S, operation: req.operation });
+    if (done.kind !== "approved") throw new Error(done.kind);
+    expect(done.candidates.map((c) => [c.name, c.status])).toEqual([["Tasks", "ready"]]);
   });
 
   test("a service scope trimmed to nothing is not approvable", async () => {
