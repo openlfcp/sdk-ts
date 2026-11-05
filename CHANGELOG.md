@@ -4,6 +4,38 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.3.1 — unreleased
+
+A patch of 0.3.0: one fix and one additive API, both found by the plugin's
+end-to-end device scenarios (LFCP-04-414, decision I17). Dated when tagged.
+
+### Fixed
+
+- The final frontier of a key rotation (`rotateAfter`, `verifiedFrontier`)
+  counted units that no recipient can merge: they were checked for
+  signature, authorization and the actor chain, but not for decryption or
+  the Data Profile. A unit that fails AEAD (for example junk signed with an
+  actor's key and accepted by the server) became the actor's latest unit,
+  and the honest units after it fell beyond the cutoff and were quarantined
+  (`STALE_DATA_EPOCH`) after a device removal. A unit now counts only when
+  it decrypts under its epoch's DEK and, when the application passes its
+  codec in the new `FlowOptions.dataProfiles`, the Data Profile accepts it
+  (LFCP-WIRE-01 §26.3 rules 6 and 7, §19; IDENTITY-PROFILE-01 §8.3); units
+  this installation recorded as refused stay out. `verifiedFrontier` takes
+  this as an optional fourth argument (`FrontierData`); without it the 0.3.0
+  checks apply.
+
+### Added
+
+- `addToRoster`: adds a Resource to the roster of the Identity Resource as a
+  journaled operation, so a Resource created or joined after `I` was filled
+  (for example a section created after pairing) reaches the human's other
+  devices (IDENTITY-PROFILE-01 §2.1, §6). Idempotent (`present` when the
+  roster already lists it), written again after a stale refusal,
+  `document-incomplete` and resumable after another refusal, `needs-writer`
+  on a device that cannot write `I`. `writeRosterEntry` is the durable phase
+  `acceptInvitationAsDevice` and `createResourceAsDevice` share.
+
 ## 0.3.0 — unreleased
 
 The first release of the 0.3 line, published under the npm dist-tag `latest`:
