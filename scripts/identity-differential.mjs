@@ -131,6 +131,63 @@ function declaredNa(report, step) {
   return out;
 }
 
+/** The conflict-view entry for `field` whose `<key>_conflict_set` side is `setSide`, if any. */
+function conflictEntry(schema, corpus, setSide, id, step, field) {
+  return schema.find(
+    (e) =>
+      e.corpus === corpus &&
+      e.conflict_set === setSide &&
+      idMatches(e.case, id) &&
+      (e.step === undefined ? step === null : e.step === "*" ? step !== null : e.step === step) &&
+      fieldMatches(e.field, field),
+  );
+}
+
+/**
+ * A conflicted field or entry (IDENTITY-PROFILE-01 §4 rule 2) that one side
+ * reports as `<key>_conflict_set`, every concurrent value, and the other as
+ * `<key>`, one value: documented only by a conflict-view entry of the
+ * schema, and then only when that one value is one of the concurrent ones
+ * (a reader MAY show any of them, not any value). Both keys leave `keys`.
+ */
+function conflictView(ts, rs, k, field, keys, ctx) {
+  const setKey = `${k}_conflict_set`;
+  for (const [setSide, sets, values] of [
+    ["sdk-ts", ts, rs],
+    ["sdk-rs", rs, ts],
+  ]) {
+    if (!(setKey in sets) || setKey in values || !(k in values) || k in sets) continue;
+    const at = [...field, k];
+    const entry = conflictEntry(ctx.schema, ctx.corpus, setSide, ctx.id, ctx.step, at);
+    if (entry === undefined) continue;
+    ctx.out.schemaUsed.add(entry);
+    keys.delete(k);
+    keys.delete(setKey);
+    const set = sets[setKey];
+    const value = values[k];
+    const where = label(ctx.id, ctx.step, at);
+    if (Array.isArray(set) && set.some((v) => stable(v) === stable(value)))
+      ctx.out.oneSided.push({
+        id: ctx.id,
+        step: ctx.step,
+        field: at,
+        side: setSide,
+        label: where,
+        entry: entry.why,
+      });
+    else
+      ctx.out.diffs.push({
+        id: ctx.id,
+        step: ctx.step,
+        field: at,
+        label: where,
+        kind: "value outside the conflict set",
+        ts: setSide === "sdk-ts" ? { [setKey]: set } : { [k]: value },
+        rs: setSide === "sdk-rs" ? { [setKey]: set } : { [k]: value },
+      });
+  }
+}
+
 /**
  * Compares two reported values at a location. `ctx` holds the corpus, the
  * case ID and step, the schema list, the fields each side declares N/A
@@ -154,8 +211,9 @@ export function compareValues(ts, rs, field, ctx) {
     return;
   }
   if (isObject(ts) && isObject(rs)) {
-    for (const k of [...new Set([...Object.keys(ts), ...Object.keys(rs)])].sort())
-      compareValues(ts[k], rs[k], [...field, k], ctx);
+    const keys = new Set([...Object.keys(ts), ...Object.keys(rs)]);
+    for (const k of [...keys]) conflictView(ts, rs, k, field, keys, ctx);
+    for (const k of [...keys].sort()) compareValues(ts[k], rs[k], [...field, k], ctx);
     return;
   }
   // A frontier entry without extra ranges is its contiguous count (W §28.1).
@@ -500,6 +558,34 @@ function selfTest() {
     fail("stale schema entry");
   if (labels(run(base(), extra, schema)) !== "a.post_state.devices.DEV_A.issuers")
     fail("a schema entry of the other side");
+
+  // A conflict view (§4 rule 2): one value must be one of the other side's concurrent values.
+  const cv = (name) => ({ outcome: "accept", accepted_ids: [], post_state: name });
+  const conflictSchema = [
+    {
+      corpus: "identity-wire.json",
+      case: "r",
+      field: "post_state.name",
+      conflict_set: "sdk-ts",
+      why: "c",
+    },
+  ];
+  const tsSet = { r: cv({ name_conflict_set: ["X (laptop)", "X (root)"] }) };
+  const member = run(tsSet, { r: cv({ name: "X (root)" }) }, conflictSchema);
+  if (member.diffs.length !== 0 || member.oneSided.length !== 1)
+    fail(`conflict member ${stable(member)}`);
+  const outside = run(tsSet, { r: cv({ name: "NOT_A_CONCURRENT_VALUE" }) }, conflictSchema);
+  if (
+    outside.diffs.map((d) => `${d.label}:${d.kind}`).join() !==
+    "r.post_state.name:value outside the conflict set"
+  )
+    fail(`a value outside the conflict set ${stable(outside.diffs)}`);
+  // Without the entry, the two views are two one-sided fields.
+  if (run(tsSet, { r: cv({ name: "X (root)" }) }).diffs.length !== 2)
+    fail("a conflict view without its entry");
+  // The entry names its set side: the reverse pair is not covered.
+  if (run({ r: cv({ name: "X (root)" }) }, tsSet, conflictSchema).diffs.length !== 2)
+    fail("a conflict view of the other side");
 
   // A field a side declares N/A for a step may be absent on that side.
   const naField = clone(base());
