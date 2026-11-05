@@ -29,6 +29,12 @@ const deadline = Date.now() + waitMs;
 const npm = (args, cwd) =>
   execFileSync("npm", args, { cwd, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// npm's stderr, without "npm warn" lines: setup-node's .npmrc makes npm warn
+// about always-auth first, which hid the real error in the retry log.
+const npmErrorLines = (e) =>
+  String(e.stderr ?? e.message)
+    .split("\n")
+    .filter((l) => l.trim() !== "" && !l.startsWith("npm warn"));
 
 /** Problems with the registry metadata of every package; empty when all is right. */
 function metadataProblems() {
@@ -43,7 +49,7 @@ function metadataProblems() {
       if (info["dist-tags"]?.[tag] !== version)
         problems.push(`${pkg}: ${tag} is ${info["dist-tags"]?.[tag]}, not ${version}`);
     } catch (e) {
-      problems.push(`${pkg}@${version}: ${String(e.stderr ?? e.message).split("\n")[0]}`);
+      problems.push(`${pkg}@${version}: ${npmErrorLines(e)[0] ?? "npm view failed"}`);
     }
   }
   return problems;
@@ -77,12 +83,7 @@ function installProblems() {
     );
     return [];
   } catch (e) {
-    return [
-      `install or import: ${String(e.stderr ?? e.message)
-        .split("\n")
-        .slice(0, 5)
-        .join(" | ")}`,
-    ];
+    return [`install or import: ${npmErrorLines(e).slice(0, 5).join(" | ")}`];
   } finally {
     rmSync(app, { recursive: true, force: true });
   }
