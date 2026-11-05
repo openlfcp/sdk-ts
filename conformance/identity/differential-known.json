@@ -1,0 +1,4 @@
+{
+  "about": "Divergences between the sdk-ts and sdk-rs identity outcome exports (scripts/identity-differential.mjs), each with the side the specification text supports (`right`) and why. Corpus verdicts are never changed here. An entry that matches no divergence fails the run.",
+  "divergences": []
+}

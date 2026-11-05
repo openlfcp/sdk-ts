@@ -181,11 +181,27 @@ change held at a taken sequence number (§14.1) among the held, not the refused.
 (ADR 0011): LFCP-WIRE-01 §7.1 to §7.3 and the device records, IDENTITY-PROFILE-01
 and its three corpora, with the clarifications of decisions I8 and I9 (admission
 rule AI5, the epoch number of a `KEY_EPOCH` in §62 class 2). The identity corpora
-are read from the pinned tag like the others: `conformance/identity/profile.test.ts`
-runs IDENTITY-PROFILE-TEST-VECTORS-01 as a suite, `wire-identity.test.ts` every
-Control Record case of LFCP-IDENTITY-TEST-VECTORS-01 and `READY_identity_01`, and
-the other `conformance/identity` tests the flow fixtures and the wire cases the
-flows use.
+are read from the pinned tag like the others, each as a suite:
+`conformance/identity/wire.test.ts` runs all 387 cases of
+LFCP-IDENTITY-TEST-VECTORS-01, `profile.test.ts` the 191 of
+IDENTITY-PROFILE-TEST-VECTORS-01, and `flows.test.ts` the 22 fixtures of
+IDENTITY-FLOW-FIXTURES-01 step by step (a step sdk-ts cannot express on the
+fixture's bytes is reported as not applicable, with its reason, never as a
+pass). The other `conformance/identity` tests check the flows against the
+client's own operations.
+
+Each identity suite also exports what sdk-ts decided for every case, in the
+`lfcp-identity-outcomes/1` format sdk-rs exports too (outcome, diagnostic,
+accepted IDs, post-state, flow steps), when `LFCP_IDENTITY_REPORT_DIR` is set.
+`scripts/identity-differential.mjs` compares the two exports without either SDK
+reading the other's code; every divergence must be explained, with the side the
+text supports, in `conformance/identity/differential-known.json`:
+
+```sh
+LFCP_IDENTITY_REPORT_DIR=/path/ts pnpm exec vitest run conformance/identity/
+# in an sdk-rs checkout: LFCP_IDENTITY_REPORT_DIR=/path/rs cargo test --all-features
+node scripts/identity-differential.mjs --ts /path/ts --rs /path/rs --out differential.md
+```
 
 ```sh
 pnpm build
