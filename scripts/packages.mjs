@@ -6,8 +6,9 @@ export const PUBLISH_ORDER = [
   "crypto",
   "storage",
   "wire",
-  "storage-node",
   "storage-idb",
   "shared-objects",
   "client",
+  // After client: it hosts the headless `lfcp-node pair` (LFCP-04-412).
+  "storage-node",
 ];

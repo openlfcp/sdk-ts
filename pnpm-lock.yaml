@@ -129,12 +129,24 @@ importers:
 
   packages/storage-node:
     dependencies:
+      '@openlfcp/client':
+        specifier: workspace:^
+        version: link:../client
       '@openlfcp/core':
         specifier: workspace:^
         version: link:../core
+      '@openlfcp/crypto':
+        specifier: workspace:^
+        version: link:../crypto
+      '@openlfcp/shared-objects':
+        specifier: workspace:^
+        version: link:../shared-objects
       '@openlfcp/storage':
         specifier: workspace:^
         version: link:../storage
+      '@openlfcp/wire':
+        specifier: workspace:^
+        version: link:../wire
       better-sqlite3:
         specifier: 13.0.3
         version: 13.0.3

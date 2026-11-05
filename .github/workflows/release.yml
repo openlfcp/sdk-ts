@@ -84,7 +84,7 @@ jobs:
       - name: Pack each package (workspace ranges become ^version)
         run: |
           mkdir -p "$RUNNER_TEMP/tarballs"
-          for p in core crypto storage wire storage-node storage-idb shared-objects client; do
+          for p in core crypto storage wire storage-idb shared-objects client storage-node; do
             (cd "packages/$p" && pnpm pack --pack-destination "$RUNNER_TEMP/tarballs")
           done
           ls -l "$RUNNER_TEMP/tarballs"
@@ -98,7 +98,7 @@ jobs:
           DIST_TAG: ${{ steps.version.outputs.dist-tag }}
         run: |
           echo "::notice::version $VERSION would be published under the dist-tag $DIST_TAG"
-          for p in core crypto storage wire storage-node storage-idb shared-objects client; do
+          for p in core crypto storage wire storage-idb shared-objects client storage-node; do
             if npm view "@openlfcp/$p@$VERSION" version >/dev/null 2>&1; then
               echo "::notice::@openlfcp/$p@$VERSION is already published: dry run skipped"
               continue
@@ -140,7 +140,7 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
           DIST_TAG: ${{ needs.build.outputs.dist-tag }}
         run: |
-          for p in core crypto storage wire storage-node storage-idb shared-objects client; do
+          for p in core crypto storage wire storage-idb shared-objects client storage-node; do
             if npm view "@openlfcp/$p@$VERSION" version >/dev/null 2>&1; then
               echo "@openlfcp/$p@$VERSION is already published: skipped"
               continue

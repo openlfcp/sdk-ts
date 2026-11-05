@@ -1,7 +1,7 @@
 {
   "name": "@openlfcp/storage-node",
   "version": "0.3.0",
-  "description": "Durable Node.js storage for LFCP clients: SQLite (better-sqlite3) and a file secret store. Node only.",
+  "description": "Durable Node.js storage for LFCP clients: SQLite (better-sqlite3) and a file secret store; the headless `lfcp-node pair` command. Node only.",
   "keywords": [
     "openlfcp",
     "lfcp",
@@ -32,6 +32,9 @@
       "import": "./dist/index.js"
     }
   },
+  "bin": {
+    "lfcp-node": "./dist/cli.js"
+  },
   "files": [
     "dist",
     "!dist/**/*.map",
@@ -42,8 +45,12 @@
     "tag": "latest"
   },
   "dependencies": {
+    "@openlfcp/client": "workspace:^",
     "@openlfcp/core": "workspace:^",
+    "@openlfcp/crypto": "workspace:^",
+    "@openlfcp/shared-objects": "workspace:^",
     "@openlfcp/storage": "workspace:^",
+    "@openlfcp/wire": "workspace:^",
     "better-sqlite3": "13.0.3"
   },
   "devDependencies": {

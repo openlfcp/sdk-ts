@@ -12,7 +12,19 @@
       "path": "../core"
     },
     {
+      "path": "../crypto"
+    },
+    {
+      "path": "../wire"
+    },
+    {
       "path": "../storage"
+    },
+    {
+      "path": "../shared-objects"
+    },
+    {
+      "path": "../client"
     }
   ]
 }

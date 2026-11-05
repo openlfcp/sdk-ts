@@ -35,7 +35,9 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
-// Allowed @openlfcp/* edges. Nothing may depend on client.
+// Allowed @openlfcp/* edges. No portable package depends on client; only
+// storage-node, the Node-only home of the headless commands (`lfcp-node
+// pair`, IDENTITY-PROFILE-01 §5.3, decision I6), sits above it.
 export const ALLOWED = {
   core: [],
   crypto: ["core"],
@@ -43,7 +45,7 @@ export const ALLOWED = {
   storage: ["core"],
   "shared-objects": ["core", "crypto"],
   client: ["core", "wire", "storage", "crypto"],
-  "storage-node": ["core", "storage"],
+  "storage-node": ["core", "storage", "crypto", "wire", "shared-objects", "client"],
   "storage-idb": ["core", "storage"],
 };
 // The only package allowed to use the @noble cryptography libraries and HPKE.
