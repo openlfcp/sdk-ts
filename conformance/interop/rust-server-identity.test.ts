@@ -15,34 +15,27 @@
 import {
   approvePairing,
   completePairing,
-  connectionNetwork,
   createIdentityResource,
   createPairingSession,
   fetchDeks,
-  type IdentityNetwork,
   IdentityRefused,
   pairingRequests,
   requestPairing,
   revocationStatus,
   revokeDevice,
-  storeDek,
   syncChain,
 } from "@openlfcp/client";
-import { bytesEqual, dataEpoch, generateResourceId, type ResourceId, toHex } from "@openlfcp/core";
-import { dekCommitment, generateResourceDEK } from "@openlfcp/crypto";
-import { InMemoryLfcpStorage, InMemorySecretStore } from "@openlfcp/storage";
+import { bytesEqual, dataEpoch, type ResourceId, toHex } from "@openlfcp/core";
 import {
   activeDevice,
   deviceFingerprint,
   revocationOf,
   sealKeyPackage,
-  signControlRecord,
   validateControlChain,
 } from "@openlfcp/wire";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { party } from "../../packages/client/test/identity/support.js";
-import { replicaPort } from "../identity/replica-port.js";
-import { sleep } from "./harness.js";
+import { chainOf, hostResource, installation, type Node } from "./identity-live.js";
 import { type RunningRustServer, startRustServer } from "./rust-server.mjs";
 
 let server: RunningRustServer | undefined;
@@ -57,54 +50,6 @@ beforeAll(async () => {
 afterAll(async () => {
   await server?.stop();
 });
-
-const network = (): IdentityNetwork =>
-  connectionNetwork({ now: () => Date.now(), timeout: () => sleep(20_000) });
-
-/** One installation: its Principal, its own storage and secrets, the real network. */
-function installation(n: number) {
-  return {
-    installation: party(n),
-    storage: new InMemoryLfcpStorage(),
-    secrets: new InMemorySecretStore(),
-    network: network(),
-    now: () => Date.now(),
-    document: replicaPort,
-  };
-}
-type Node = ReturnType<typeof installation>;
-
-/** A raw Resource owned and hosted by `owner`, its epoch-0 DEK in the owner's secrets. */
-async function hostResource(owner: Node, url: string) {
-  const R = generateResourceId();
-  const dek = generateResourceDEK();
-  const genesis = signControlRecord(
-    { resourceId: R, controlSeq: 0n, prevControlId: null },
-    {
-      type: "GENESIS",
-      dataProfile: "org.lfcp.test.raw.v1",
-      owner: owner.installation.signer.descriptor,
-      dekCommitment: dekCommitment(R, dataEpoch(0n), dek),
-      endpoints: [{ url, priority: 0n }],
-      coordinatorUrl: url,
-    },
-    owner.installation.signer,
-  );
-  const chain = validateControlChain([genesis.bytes]);
-  if (chain.kind !== "linear") throw new Error(chain.kind);
-  const channel = await owner.network.connect(owner.installation.signer, url);
-  try {
-    const hosted = await channel.host(genesis.bytes);
-    if (hosted.kind !== "ack") throw new Error(`RESOURCE_HOST: ${JSON.stringify(hosted)}`);
-  } finally {
-    channel.close();
-  }
-  await storeDek(owner.storage, owner.secrets, chain, dataEpoch(0n), dek);
-  return {
-    resource: R,
-    entry: { profile: "org.lfcp.test.raw.v1", endpoints: [url], coordinator: url, name: "X" },
-  };
-}
 
 /** Pairs `n` through `approver` with `preset`; returns the new installation and what both sides showed. */
 async function pair(approver: Node, n: number, preset: "full" | "edit") {
@@ -125,15 +70,6 @@ async function pair(approver: Node, n: number, preset: "full" | "edit") {
   if (approved.kind !== "approved") throw new Error(`approval: ${JSON.stringify(approved)}`);
   const done = await completePairing({ ...B, operation: request.operation });
   return { B, request, review, done };
-}
-
-async function chainOf(who: Node, url: string, resource: ResourceId) {
-  const channel = await who.network.connect(who.installation.signer, url);
-  try {
-    return await syncChain(who.storage, channel, resource);
-  } finally {
-    channel.close();
-  }
 }
 
 describe("identity flows against the Rust reference server", { timeout: 300_000 }, () => {
