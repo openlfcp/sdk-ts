@@ -20,8 +20,12 @@ end-to-end device scenarios (LFCP-04-414, decision I17). Dated when tagged.
   (`STALE_DATA_EPOCH`) after a device removal. A unit now counts only when
   it decrypts under its epoch's DEK and, when the application passes its
   codec in the new `FlowOptions.dataProfiles`, the Data Profile accepts it
-  (LFCP-WIRE-01 §26.3 rules 6 and 7, §19; IDENTITY-PROFILE-01 §8.3); units
-  this installation recorded as refused stay out. `verifiedFrontier` takes
+  (LFCP-WIRE-01 §26.3 rules 6 and 7, §19; IDENTITY-PROFILE-01 §8.3). Units
+  this installation proved bad (a failed AEAD, a profile decode refusal)
+  stay out; a unit it first refused for a missing or wrong DEK is verified
+  again; a unit it accepted on the wire, one its profile refused when
+  merging included, counts, as recipients link through it. Without a codec
+  the profile itself is not checked here. `verifiedFrontier` takes
   this as an optional fourth argument (`FrontierData`); without it the 0.3.0
   checks apply.
 
@@ -32,7 +36,9 @@ end-to-end device scenarios (LFCP-04-414, decision I17). Dated when tagged.
   (for example a section created after pairing) reaches the human's other
   devices (IDENTITY-PROFILE-01 §2.1, §6). Idempotent (`present` when the
   roster already lists it), written again after a stale refusal,
-  `document-incomplete` and resumable after another refusal, `needs-writer`
+  `document-incomplete` and resumable after another refusal (the resumed
+  write is rebuilt on the current document; an entry another device wrote
+  meanwhile is kept and reported `present`), `needs-writer`
   on a device that cannot write `I`. `writeRosterEntry` is the durable phase
   `acceptInvitationAsDevice` and `createResourceAsDevice` share.
 
