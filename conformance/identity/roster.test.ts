@@ -133,4 +133,42 @@ describe("addToRoster with IdentityReplica", { timeout: 120_000 }, () => {
       (await journal.load(first.operation)).phases.find((p) => p.id === "roster")?.bytes,
     ).not.toBe(refusedBytes);
   });
+
+  test("an entry another device adds before a stale rebuild is kept: present (review 21)", async () => {
+    const { server, P, A, I } = await setup();
+    const Y = await hostResource(server, P);
+    let intercepted = false;
+    // P's first roster unit is refused as stale; meanwhile A lists Y itself.
+    const network = {
+      connect: async (...args: Parameters<typeof P.network.connect>) => {
+        const ch = await P.network.connect(...args);
+        return {
+          ...ch,
+          putDataUnit: async (r: Parameters<typeof ch.putDataUnit>[0], bytes: Uint8Array) => {
+            if (!intercepted && toHex(r) === toHex(I)) {
+              intercepted = true;
+              const other = await addToRoster({
+                ...A,
+                resource: Y.resource,
+                entry: Y.entry,
+                name: "From A",
+              });
+              expect(other.kind).toBe("added");
+              return { kind: "nack" as const, code: "STALE_DATA_EPOCH" };
+            }
+            return ch.putDataUnit(r, bytes);
+          },
+        };
+      },
+    };
+    const result = await addToRoster({
+      ...P,
+      network,
+      resource: Y.resource,
+      entry: Y.entry,
+      name: "Obsolete",
+    });
+    expect(result.kind).toBe("present");
+    expect((await rosterOf(P, I))[resourceRef(Y.resource)]?.name).toBe("From A");
+  });
 });

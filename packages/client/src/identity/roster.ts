@@ -75,6 +75,9 @@ export async function writeRosterEntry(
     rebuildRefused: true,
     build: async () => {
       const { chain, doc, deks, load } = await openI();
+      // Another writer may have listed the Resource since the last check (a stale
+      // retry, a resume): its entry stands and the phase is complete (§9.2).
+      if (doc.roster().has(resourceRef(resource))) return null;
       return sealIdentityUnit({
         storage: o.storage,
         chain,
@@ -86,9 +89,9 @@ export async function writeRosterEntry(
       });
     },
   });
-  return r.state === "committed-own"
-    ? { state: "written" }
-    : { state: "refused", code: r.code ?? "refused" };
+  if (r.state === "committed-own") return { state: "written" };
+  if (r.state === "complete") return { state: "present" };
+  return { state: "refused", code: r.code ?? "refused" };
 }
 
 export interface AddToRosterOptions extends IdentityFlowOptions {
