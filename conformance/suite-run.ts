@@ -42,6 +42,7 @@ export async function defineSuiteRun(
     suite: `${suite.suite.id}/${suite.suite.version}`,
     total: summary.total,
     passed: summary.passed,
+    incomplete: summary.incomplete,
     failed: summary.failed,
     pending: summary.pending,
     partial: summary.partial,
@@ -49,16 +50,21 @@ export async function defineSuiteRun(
     not_applicable: cases.flatMap((c) =>
       Object.keys(c.notApplicable ?? {}).map((p) => `${c.id} ${p}`),
     ),
+    not_verified: cases.flatMap((c) => Object.keys(c.notVerified ?? {}).map((p) => `${c.id} ${p}`)),
   };
   log(`LFCP conformance: ${header}`);
   log(
-    `  ${summary.total} cases: ${summary.passed} passed, ${summary.partial} partial ` +
+    `  ${summary.total} cases: ${summary.passed} passed, ${summary.incomplete} incomplete ` +
+      `(checks pass, parts not verified), ${summary.partial} partial ` +
       `(checks pass, parts pending), ${summary.pending} pending, ${summary.failed} failed; ` +
       `${summary.checks.passed}/${summary.checks.total} checks pass`,
   );
-  for (const c of cases)
+  for (const c of cases) {
     for (const [part, why] of Object.entries(c.notApplicable ?? {}))
       log(`  not applicable: ${c.id} ${part}: ${why}`);
+    for (const [part, why] of Object.entries(c.notVerified ?? {}))
+      log(`  not verified: ${c.id} ${part}: ${why}`);
+  }
   log(`  summary: ${JSON.stringify(report)}`);
   log(`  written to ${writeSummary(summaryName, report)}`);
   const reported = Object.fromEntries(
@@ -79,7 +85,9 @@ export async function defineSuiteRun(
       } else if (c.status === "pending") {
         it.todo(`${c.id}: pending -> ${tasks}`);
       } else {
-        it(`${c.id}: ${c.checks.length} checks pass`, () => {
+        // An incomplete case says what it does not verify in its title: checks pass, it is not a full pass.
+        const unverified = Object.keys(c.notVerified ?? {});
+        it(`${c.id}: ${c.checks.length} checks pass${unverified.length === 0 ? "" : `; not verified: ${unverified.join(", ")}`}`, () => {
           expect(c.checks.every((x) => x.ok)).toBe(true);
         });
         if (c.status === "partial")

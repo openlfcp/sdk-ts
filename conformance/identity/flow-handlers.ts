@@ -26,6 +26,8 @@ import {
   classifyRevoke,
   classifyRotate,
   exposingRevocationsSince,
+  type IdentityChannel,
+  IdentityConflict,
   identityWriterClass,
   leafPayload,
   MASK_PRESETS,
@@ -34,11 +36,13 @@ import {
   recordSeq,
   rotatorTest,
   signChain,
+  syncChain,
   verifiedFrontier,
 } from "@openlfcp/client";
 import { bytesEqual, fromHex, hash32, toHex } from "@openlfcp/core";
 import { sha256 } from "@openlfcp/crypto";
 import { unframeChange } from "@openlfcp/shared-objects/admission";
+import { InMemoryLfcpStorage } from "@openlfcp/storage";
 import {
   activeDevice,
   type ControlRecord,
@@ -317,7 +321,17 @@ function phaseFacts(p: Json): Report {
 // client computations without a case
 
 type Special = (f: FlowCase, step: FlowStep, done: readonly Report[]) => Promise<Report> | Report;
+/** Not applicable by the text (another client generation, the server's duty, prose). */
 const na = (reason: string): Report => ({ outcome: "N/A", not_applicable: reason });
+/**
+ * Applicable to sdk-ts, but not run by this harness: the procedure needs a
+ * journal, a UI decision or a network the fixture does not give. Never a
+ * pass, and not N/A either (review of sdk-ts#19).
+ */
+const notVerified = (reason: string): Report => ({
+  outcome: "not verified",
+  not_verified: reason,
+});
 const stepOf = (f: FlowCase, n: number) => f.inputs.steps.find((s) => s.n === n) as FlowStep;
 const wireId = (s: FlowStep) => String(s.case).replace(/^wire:/, "");
 
@@ -382,27 +396,27 @@ const SPECIALS: Readonly<Record<string, Special>> = {
     return { outcome: "rotation test", rotator: t.rotator };
   },
   "F07_invitation_accepted_by_device#6": () =>
-    na(
+    notVerified(
       "IDENTITY-PROFILE-01 §7.2 step 3 writes the roster of DAVE's Identity Resource, for which the fixture supplies no chain, DEK or document; acceptInvitationAsDevice writes it in packages/client/test/identity/accept.test.ts.",
     ),
   "F09_pairing_service#4": () =>
-    na(
+    notVerified(
       "IDENTITY-PROFILE-01 §5.3 step 8 with every candidate offline needs B's persisted candidates and coordinators that do not answer; completePairing returns this state in packages/client/test/identity/pairing.test.ts, not on fixture bytes.",
     ),
   "F09_pairing_service#16": () =>
-    na(
+    notVerified(
       "IDENTITY-PROFILE-01 §5.3 step 8 / §9: resuming from persisted candidates after a restart needs B's journal and storage; covered by packages/client/test/identity/pairing.test.ts, not expressible on fixture bytes.",
     ),
   "F10_request_feasibility#3": () =>
-    na(
+    notVerified(
       "IDENTITY-PROFILE-01 §5.3 step 4: re-confirmation when the descriptor changes is a property of A's approval journal and UI (approvePairing compares the journaled tuple); the fixture gives no request change to replay.",
     ),
   "F10_request_feasibility#7": () =>
-    na(
+    notVerified(
       "IDENTITY-PROFILE-01 §5.3 step 4: a service scope trimmed to nothing is refused by approvePairing before any consume; the fixture gives no request or session to run it on.",
     ),
   "F10_request_feasibility#8": () =>
-    na(
+    notVerified(
       "IDENTITY-PROFILE-01 §5.3 step 5: the re-check after a head change happens inside approvePairing's phase loop; the fixture gives no head change to replay.",
     ),
   // §9.4: a DEK sealed at I8 to a reader of I8 that is not a reader of I9 is not used.
@@ -463,10 +477,29 @@ const SPECIALS: Readonly<Record<string, Special>> = {
       ? { outcome: "CONTROL_CONFLICT", competing: branches.sort() }
       : { outcome: r.kind === "linear" ? "accept" : r.wireCode };
   },
-  "F16_device_grant_fork#5": () =>
-    na(
-      "IDENTITY-PROFILE-01 §9.7: the client suspends approval, reconciliation and rotation on a conflicted chain (syncChain throws IdentityConflict, covered by packages/client/test/identity/*.test.ts); the fixture gives no operation to suspend.",
-    ),
+  // §9.7: on a forked chain every flow that reads it (approval, reconciliation, rotation all
+  // start with syncChain) is refused with IdentityConflict, and the fork stays blocking.
+  "F16_device_grant_fork#5": async (f) => {
+    const storage = new InMemoryLfcpStorage();
+    const forked = [
+      ...recordsAt(wireId(stepOf(f, 1))),
+      ...[2, 3].map((n) => recordOf(wireId(stepOf(f, n)))),
+    ];
+    const resource = chainAt(wireId(stepOf(f, 1))).state.resourceId;
+    const channel = { control: async () => forked } as unknown as IdentityChannel;
+    const refused = async () => {
+      try {
+        await syncChain(storage, channel, resource);
+        return false;
+      } catch (e) {
+        return e instanceof IdentityConflict;
+      }
+    };
+    // The first read finds the fork; a later one is refused from storage alone.
+    const first = await refused();
+    const again = await refused();
+    return { outcome: first && again ? "suspended" : "proceeds" };
+  },
   "F17_revoked_device#5": () =>
     na(
       "LFCP-WIRE-01 §69: the order of pushes and the end of a subscription are the server's; sdk-ts is a client and its identity flows open Resources without a subscription.",
@@ -929,6 +962,7 @@ const identityFlow: Handler = async (vector) => {
   const steps: Report[] = [];
   const checks: Check[] = [];
   const notApplicable: Report[] = [];
+  const notVerifiedSteps: Report[] = [];
   const accepted = new Set<string>();
   for (const step of f.inputs.steps) {
     const { report, ok } = await runStep(f, step, steps, accepted);
@@ -940,6 +974,10 @@ const identityFlow: Handler = async (vector) => {
     const name = `steps/${step.n}`;
     if (report.outcome === "N/A") {
       notApplicable.push({ step: step.n, reason: report.not_applicable });
+      continue;
+    }
+    if (report.outcome === "not verified") {
+      notVerifiedSteps.push({ step: step.n, reason: report.not_verified });
       continue;
     }
     if (!ok)
@@ -963,24 +1001,24 @@ const identityFlow: Handler = async (vector) => {
     checks.push(equalCheck(`final/${k}`, ef[k], stated(ef[k], final[k])));
   }
   if (Object.keys(ef).length === 0) checks.push(equalCheck("final", {}, {}));
-  // A final whose every field is N/A is a not-applicable part, never a pass.
-  const finalPending =
-    Object.keys(ef).length > 0 && Object.keys(ef).every((k) => Object.hasOwn(FINAL_NA, k));
   for (const s of steps) delete s.case_id;
+  // Every N/A and not-verified part, with its reason, in the runner's summary too (review of sdk-ts#19).
+  const part = (x: Report) =>
+    x.step === undefined
+      ? String(x.field).replace(/^final\./, "final/")
+      : `steps/${x.step}${x.field === undefined ? "" : `/${x.field}`}`;
+  const parts = (xs: readonly Report[]) =>
+    Object.fromEntries(xs.map((x) => [part(x), String(x.reason)]));
   return {
     checks,
-    ...(finalPending
-      ? {
-          notApplicable: {
-            final: Object.keys(ef)
-              .map((k) => FINAL_NA[k])
-              .join(" "),
-          },
-        }
-      : {}),
+    ...(notApplicable.length === 0 ? {} : { notApplicable: parts(notApplicable) }),
+    ...(notVerifiedSteps.length === 0 ? {} : { notVerified: parts(notVerifiedSteps) }),
     report: {
-      outcome: notApplicable.length === 0 ? "accept" : "N/A",
+      // A summary of the steps: the least complete of accept, N/A and not verified.
+      outcome:
+        notVerifiedSteps.length > 0 ? "not verified" : notApplicable.length > 0 ? "N/A" : "accept",
       not_applicable: notApplicable,
+      not_verified: notVerifiedSteps,
       post_state: final,
       steps,
     },

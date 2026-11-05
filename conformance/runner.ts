@@ -46,6 +46,13 @@ export interface HandlerResult {
    */
   readonly notApplicable?: Readonly<Record<string, string>>;
   /**
+   * Parts that apply to this implementation but that this harness does not
+   * run (it cannot drive the procedure on the corpus's bytes), each with
+   * its reason: covered, listed apart from not-applicable ones, never a pass.
+   * A case with such parts is "incomplete".
+   */
+  readonly notVerified?: Readonly<Record<string, string>>;
+  /**
    * What the implementation decided for the case, in the vocabulary of an
    * outcome export (lfcp-identity-outcomes/1 for the identity corpora):
    * computed by the SDK, never copied from `expected`.
@@ -82,7 +89,8 @@ export interface PendingFile {
   readonly cases: Readonly<Record<string, PendingEntry>>;
 }
 
-export type CaseStatus = "passed" | "partial" | "pending" | "failed";
+/** "incomplete": every check passes, and some applicable parts are not verified (notVerified). */
+export type CaseStatus = "passed" | "incomplete" | "partial" | "pending" | "failed";
 
 export interface CaseResult {
   readonly id: string;
@@ -98,6 +106,8 @@ export interface CaseResult {
   readonly report?: Readonly<Record<string, unknown>>;
   /** Parts not applicable to this implementation, with their reasons. */
   readonly notApplicable?: Readonly<Record<string, string>>;
+  /** Applicable parts this harness does not verify, with their reasons. */
+  readonly notVerified?: Readonly<Record<string, string>>;
 }
 
 export interface Summary {
@@ -107,6 +117,8 @@ export interface Summary {
   readonly total: number;
   /** Every part checked and passing. */
   readonly passed: number;
+  /** Every check passing, some applicable parts not verified. Not a pass. */
+  readonly incomplete: number;
   readonly failed: number;
   /** Whole case pending. */
   readonly pending: number;
@@ -221,6 +233,7 @@ export async function runSuite(
           ...result.checks.map((c) => c.name),
           ...handlerPending,
           ...Object.keys(result.notApplicable ?? {}),
+          ...Object.keys(result.notVerified ?? {}),
         ].map(fieldOf),
       );
       for (const part of requiredParts(vector)) {
@@ -235,7 +248,8 @@ export async function runSuite(
       }));
       let status: CaseStatus;
       if (failedCheck || problems.length > 0) status = "failed";
-      else if (pending.length === 0) status = "passed";
+      else if (pending.length === 0)
+        status = Object.keys(result.notVerified ?? {}).length > 0 ? "incomplete" : "passed";
       else status = result.checks.length === 0 ? "pending" : "partial";
       return {
         ...base,
@@ -245,6 +259,7 @@ export async function runSuite(
         problems,
         ...(result.report === undefined ? {} : { report: result.report }),
         ...(result.notApplicable === undefined ? {} : { notApplicable: result.notApplicable }),
+        ...(result.notVerified === undefined ? {} : { notVerified: result.notVerified }),
       };
     }),
   );
@@ -258,6 +273,7 @@ export async function runSuite(
       version: suite.suite.version,
       total: cases.length,
       passed: count("passed"),
+      incomplete: count("incomplete"),
       failed: count("failed"),
       pending: count("pending"),
       partial: count("partial"),
