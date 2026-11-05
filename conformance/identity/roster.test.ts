@@ -6,6 +6,7 @@ import {
   createIdentityResource,
   fetchDeks,
   loadIdentityDocument,
+  OperationJournal,
   reconcileDevices,
   resourceRef,
   syncChain,
@@ -104,5 +105,32 @@ describe("addToRoster with IdentityReplica", { timeout: 120_000 }, () => {
     expect((await addToRoster({ ...R3, resource: Y.resource, entry: Y.entry })).kind).toBe(
       "needs-writer",
     );
+  });
+
+  test("a resumed refused operation is written again on the actor's current history (review 21)", async () => {
+    const { server, P, I } = await setup();
+    const Y = await hostResource(server, P);
+    const Z = await hostResource(server, P);
+    server.fault = (e) =>
+      e.op === "data-unit" && toHex(e.resource) === toHex(I)
+        ? { nack: "QUOTA_EXCEEDED" }
+        : undefined;
+    const first = await addToRoster({ ...P, resource: Y.resource, entry: Y.entry });
+    if (first.kind !== "document-incomplete") throw new Error(first.kind);
+    const journal = new OperationJournal(P.storage);
+    const refusedBytes = (await journal.load(first.operation)).phases.find(
+      (p) => p.id === "roster",
+    )?.bytes;
+    server.fault = () => undefined;
+    // The same installation writes another entry meanwhile: its actor moves on.
+    expect((await addToRoster({ ...P, resource: Z.resource, entry: Z.entry })).kind).toBe("added");
+    const resumed = await addToRoster({ ...P, resource: Y.resource, operation: first.operation });
+    expect(resumed.kind).toBe("added");
+    const roster = await rosterOf(P, I);
+    expect(roster[resourceRef(Y.resource)]).toBeDefined();
+    expect(roster[resourceRef(Z.resource)]).toBeDefined();
+    expect(
+      (await journal.load(first.operation)).phases.find((p) => p.id === "roster")?.bytes,
+    ).not.toBe(refusedBytes);
   });
 });

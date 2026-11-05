@@ -68,6 +68,11 @@ export async function writeRosterEntry(
     resource: identity,
     // A unit refused after a rotation of I is written again in the new epoch (W §19.1).
     rebuildOn: ["STALE_DATA_EPOCH"],
+    // A resumed operation whose unit was refused writes the entry again on the
+    // current document, previous unit and actor sequence: the refused bytes may
+    // name a previous unit this actor has since moved past (W §26.2). Exact
+    // bytes are re-sent only after an unknown outcome (§9.1).
+    rebuildRefused: true,
     build: async () => {
       const { chain, doc, deks, load } = await openI();
       return sealIdentityUnit({
