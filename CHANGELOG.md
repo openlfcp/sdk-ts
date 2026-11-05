@@ -17,15 +17,24 @@ reference server, and headless pairing.
   Packages and the Key Package matrix, Snapshots, session reads and uploads
   (W §41) and the rotator test; the 191 of IDENTITY-PROFILE-TEST-VECTORS-01;
   and the 22 fixtures of IDENTITY-FLOW-FIXTURES-01 step by step. A step
-  sdk-ts cannot express on a fixture's bytes is reported as not applicable,
-  with its reason: a runner part of its own, never a pass and never a todo.
+  is not applicable by the text (another client generation, the server's
+  duty) is reported as such, and one that applies but that the harness cannot
+  drive on a fixture's bytes (a journal, a UI decision, a network) as not
+  verified, each with its reason: runner parts of their own, in the summary
+  (a case with not-verified parts is "incomplete"), never a pass and never a
+  todo.
 - With `LFCP_IDENTITY_REPORT_DIR` set, each identity suite exports what
   sdk-ts decided for every case in the `lfcp-identity-outcomes/1` format
   sdk-rs exports too. `scripts/identity-differential.mjs` compares the two
-  exports case by case and step by step; every divergence must be explained,
-  with the side the text supports, in
+  exports case by case and step by step: required fields on both sides,
+  state tables by membership, a field only one side reports only when
+  `conformance/identity/differential-schema.json` documents it. Every
+  divergence must be explained, with the side the text supports, in
   `conformance/identity/differential-known.json`. Against sdk-rs `750ac8f`:
-  no divergence.
+  one, F13 step 1 (sdk-rs reports a certificate signed before phase 1;
+  sdk-ts is right by §5.3 step 5).
+- The live identity tests are skipped, with the reason, without a server
+  (and fail with `LFCP_REQUIRE_LIVE=1`), never reported passed.
 - `server.lock` pins the reference server at `c12c3dd` (identity-01 at
   `mvp-0.4-baseline.2`, hosting by the Genesis owner, the Control read of a
   revoked reader). `rust-server-identity.test.ts` runs pairing, approval,
