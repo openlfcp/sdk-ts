@@ -13,8 +13,9 @@ import {
   resumePairingSession,
 } from "../../src/identity/pairing.js";
 import { completePairing, requestPairing } from "../../src/identity/pairing-request.js";
-import type { MemoryCoordinator } from "./memory-coordinator.js";
-import { party } from "./support.js";
+import { createIdentityResource } from "../../src/identity/resource.js";
+import { MemoryCoordinator } from "./memory-coordinator.js";
+import { party, URL } from "./support.js";
 import { hostResource, node, world } from "./world.js";
 
 const types = (server: MemoryCoordinator, R: Uint8Array): string[] =>
@@ -253,6 +254,52 @@ describe("pairing a service installation (§5.3 step 8, §6)", { timeout: 60_000
     const done = await completePairing({ ...S, operation: req.operation });
     if (done.kind !== "approved") throw new Error(done.kind);
     expect(done.candidates.map((c) => c.status)).toEqual(["ready", "not-granted"]);
+  });
+
+  test("a headless service names its sections by roster name (§5.3 headless)", async () => {
+    const server = new MemoryCoordinator();
+    const P = node(server, party(1));
+    const named = [];
+    for (const name of ["Notes", "Tasks", "Notes"]) {
+      const r = await hostResource(server, P);
+      named.push({ resource: r.resource, entry: { ...r.entry, name } });
+    }
+    const created = await createIdentityResource({
+      ...P,
+      url: URL,
+      label: "laptop",
+      roster: named,
+    });
+    if (created.kind !== "created") throw new Error(created.kind);
+    const s = await createPairingSession(P);
+    if (s.kind !== "created") throw new Error(s.kind);
+    const S = node(server, party(5));
+    // "Notes" names two roster Resources, "Mail" none: no request is written.
+    const ambiguous = await requestPairing({
+      ...S,
+      link: s.link,
+      label: "bridge",
+      kind: 1,
+      sections: ["Tasks", "Notes", "Mail"],
+    });
+    expect(ambiguous).toEqual({
+      kind: "unknown-sections",
+      unknown: ["Notes", "Mail"],
+      available: ["Notes", "Notes", "Tasks"],
+    });
+    expect(await pairingRequests({ ...P, session: s.session })).toEqual([]);
+    const req = await requestPairing({
+      ...S,
+      link: s.link,
+      label: "bridge",
+      kind: 1,
+      sections: ["Tasks"],
+    });
+    if (req.kind !== "requested") throw new Error(req.kind);
+    const [review] = await pairingRequests({ ...P, session: s.session });
+    expect(review?.requestedScope.map((r) => toHex(r))).toEqual([
+      toHex(named[1]?.resource as never),
+    ]);
   });
 
   test("a service scope trimmed to nothing is not approvable", async () => {

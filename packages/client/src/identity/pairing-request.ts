@@ -79,6 +79,13 @@ export interface RequestPairingOptions extends FlowOptions {
   readonly kind: 0 | 1;
   /** Service: the Resources its human chose from the roster. */
   readonly scope?: readonly ResourceId[];
+  /**
+   * Service, headless (§5.3 "Headless installation"): the Resources its
+   * human chose, by roster name, resolved on the roster read as `J` once
+   * the link is verified, and added to `scope`. A name that matches no
+   * roster entry, or several, writes no request (`unknown-sections`).
+   */
+  readonly sections?: readonly string[];
   readonly platform?: string;
   /** RFC 3339 UTC for `requested_at`. */
   readonly requestedAt?: string;
@@ -102,6 +109,16 @@ export type RequestPairingResult =
   | { readonly kind: "invalid-link"; readonly reason: string }
   /** The link is rejected (§5.2): `I` is not an Identity Resource, or `J` is not an active pairing device of its owner. */
   | { readonly kind: "not-a-session"; readonly reason: string }
+  /**
+   * A requested section name matches no roster entry, or several (§5.3
+   * headless): nothing is persisted or written. `available` lists the
+   * names of the roster Resources the device may request.
+   */
+  | {
+      readonly kind: "unknown-sections";
+      readonly unknown: readonly string[];
+      readonly available: readonly string[];
+    }
   /** No DEK of `I` or no root unit 1: the document cannot be verified (§5.3 step 2). */
   | { readonly kind: "missing-material"; readonly missing: readonly string[] }
   /** The coordinator refused the request unit (e.g. ACTOR_EQUIVOCATION: another installation used the link at once). */
@@ -171,8 +188,27 @@ export async function requestPairing(o: RequestPairingOptions): Promise<RequestP
       };
     // Step 3: the candidates B may be registered in, persisted before the request.
     const chosen = new Set((o.scope ?? []).map((r) => resourceRef(r)));
-    const candidates: Candidate[] = [...doc.roster()]
-      .filter(([ref, e]) => e.archived !== true && ref !== resourceRef(I))
+    const offered = [...doc.roster()].filter(
+      ([ref, e]) => e.archived !== true && ref !== resourceRef(I),
+    );
+    if (o.sections !== undefined) {
+      const unknown: string[] = [];
+      for (const name of o.sections) {
+        const hits = offered.filter(([, e]) => e.name === name);
+        if (hits.length === 1) chosen.add((hits[0] as (typeof hits)[number])[0]);
+        else unknown.push(name);
+      }
+      if (unknown.length > 0)
+        return {
+          kind: "unknown-sections",
+          unknown,
+          available: offered
+            .map(([, e]) => e.name)
+            .filter((n): n is string => n !== undefined)
+            .sort(),
+        };
+    }
+    const candidates: Candidate[] = offered
       .filter(([ref]) => o.kind === 0 || chosen.has(ref))
       .map(([ref, e]) => ({
         resource: toHex(fromBase64url(ref)),
