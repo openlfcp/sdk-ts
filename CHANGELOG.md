@@ -42,7 +42,7 @@ end-to-end device scenarios (LFCP-04-414, decision I17). Dated when tagged.
   on a device that cannot write `I`. `writeRosterEntry` is the durable phase
   `acceptInvitationAsDevice` and `createResourceAsDevice` share.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-11-05
 
 The first release of the 0.3 line, published under the npm dist-tag `latest`:
 MVP 0.4, multi-device identity (one person, several devices). It adds APIs and
