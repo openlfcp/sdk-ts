@@ -469,7 +469,7 @@ const SPECIALS: Readonly<Record<string, Special>> = {
     ),
   "F17_revoked_device#5": () =>
     na(
-      "LFCP-WIRE-01 §69: the order of pushes and the end of a subscription are the server's; sdk-ts is a client. Checked live against the reference server in conformance/interop/rust-server-identity.test.ts.",
+      "LFCP-WIRE-01 §69: the order of pushes and the end of a subscription are the server's; sdk-ts is a client and its identity flows open Resources without a subscription.",
     ),
   "F18_barrier#5": () =>
     na(
