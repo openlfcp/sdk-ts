@@ -28,4 +28,10 @@ export function openSpec(options?: {
 }): Spec;
 export function log(line: string): void;
 export function writeSummary(name: string, summary: unknown): string;
+/** Writes an lfcp-identity-outcomes/1 export under $LFCP_IDENTITY_REPORT_DIR; undefined when unset. */
+export function writeOutcomes(
+  name: string,
+  lock: SpecLock,
+  cases: Readonly<Record<string, unknown>>,
+): string | undefined;
 export function readRepoText(path: string): string;

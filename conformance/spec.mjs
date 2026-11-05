@@ -128,6 +128,32 @@ export function writeSummary(name, summary) {
   return `conformance/.results/${name}.json`;
 }
 
+/**
+ * Writes an lfcp-identity-outcomes/1 export (`cases`: outcome by case ID)
+ * as `name` under $LFCP_IDENTITY_REPORT_DIR (relative to the sdk-ts root);
+ * returns the path written, or undefined when the variable is not set.
+ */
+export function writeOutcomes(name, lock, cases) {
+  const target = process.env.LFCP_IDENTITY_REPORT_DIR;
+  if (target === undefined || target === "") return undefined;
+  const dir = resolve(ROOT, target);
+  mkdirSync(dir, { recursive: true });
+  const sorted = Object.fromEntries(
+    Object.keys(cases)
+      .sort()
+      .map((id) => [id, cases[id]]),
+  );
+  const body = {
+    format: "lfcp-identity-outcomes/1",
+    implementation: "sdk-ts",
+    spec: { repository: lock.repository, tag: lock.tag, commit: lock.commit },
+    cases: sorted,
+  };
+  const path = join(dir, name);
+  writeFileSync(path, `${JSON.stringify(body, null, 2)}\n`);
+  return path;
+}
+
 /** A text file of this repository (for source-level checks), by repository-relative path. */
 export function readRepoText(path) {
   return readFileSync(join(ROOT, path), "utf8");

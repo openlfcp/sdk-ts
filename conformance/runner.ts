@@ -39,6 +39,18 @@ export type Check =
 export interface HandlerResult {
   readonly checks: readonly Check[];
   readonly pending?: readonly string[];
+  /**
+   * Parts that do not apply to this implementation (a behaviour of another
+   * client generation, say), each with its reason: covered, listed in the
+   * summary, never a pass and never pending work.
+   */
+  readonly notApplicable?: Readonly<Record<string, string>>;
+  /**
+   * What the implementation decided for the case, in the vocabulary of an
+   * outcome export (lfcp-identity-outcomes/1 for the identity corpora):
+   * computed by the SDK, never copied from `expected`.
+   */
+  readonly report?: Readonly<Record<string, unknown>>;
 }
 
 export interface HandlerContext {
@@ -82,6 +94,10 @@ export interface CaseResult {
   readonly pending: readonly { readonly part: string; readonly task: string }[];
   /** Classification problems (unclassified, stale pending, uncovered field, handler error). */
   readonly problems: readonly string[];
+  /** The handler's report, when it gives one. */
+  readonly report?: Readonly<Record<string, unknown>>;
+  /** Parts not applicable to this implementation, with their reasons. */
+  readonly notApplicable?: Readonly<Record<string, string>>;
 }
 
 export interface Summary {
@@ -201,7 +217,11 @@ export async function runSuite(
           problems.push(`stale pending part "${part}": now handled, remove it from pending`);
       }
       const covered = new Set(
-        [...result.checks.map((c) => c.name), ...handlerPending].map(fieldOf),
+        [
+          ...result.checks.map((c) => c.name),
+          ...handlerPending,
+          ...Object.keys(result.notApplicable ?? {}),
+        ].map(fieldOf),
       );
       for (const part of requiredParts(vector)) {
         if (!covered.has(part))
@@ -217,7 +237,15 @@ export async function runSuite(
       if (failedCheck || problems.length > 0) status = "failed";
       else if (pending.length === 0) status = "passed";
       else status = result.checks.length === 0 ? "pending" : "partial";
-      return { ...base, status, checks: result.checks, pending, problems };
+      return {
+        ...base,
+        status,
+        checks: result.checks,
+        pending,
+        problems,
+        ...(result.report === undefined ? {} : { report: result.report }),
+        ...(result.notApplicable === undefined ? {} : { notApplicable: result.notApplicable }),
+      };
     }),
   );
 

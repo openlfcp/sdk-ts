@@ -11,13 +11,23 @@ import {
   runSuite,
   type VectorSuite,
 } from "./runner.js";
-import { log, openSpec, writeSummary } from "./spec.mjs";
+import { log, openSpec, writeOutcomes, writeSummary } from "./spec.mjs";
+
+/**
+ * An outcome export of the run (lfcp-identity-outcomes/1): every case's
+ * handler report, keyed by case ID, written to `file` under
+ * $LFCP_IDENTITY_REPORT_DIR when that is set. A case without a report fails.
+ */
+export interface OutcomeExport {
+  readonly file: string;
+}
 
 export async function defineSuiteRun(
   suitePath: string,
   summaryName: string,
   handlers: Readonly<Record<string, Handler>>,
   pending: PendingFile,
+  outcomes?: OutcomeExport,
 ): Promise<void> {
   const spec = openSpec();
   const suite = spec.readJson(suitePath) as VectorSuite;
@@ -36,6 +46,9 @@ export async function defineSuiteRun(
     pending: summary.pending,
     partial: summary.partial,
     checks: summary.checks,
+    not_applicable: cases.flatMap((c) =>
+      Object.keys(c.notApplicable ?? {}).map((p) => `${c.id} ${p}`),
+    ),
   };
   log(`LFCP conformance: ${header}`);
   log(
@@ -43,8 +56,18 @@ export async function defineSuiteRun(
       `(checks pass, parts pending), ${summary.pending} pending, ${summary.failed} failed; ` +
       `${summary.checks.passed}/${summary.checks.total} checks pass`,
   );
+  for (const c of cases)
+    for (const [part, why] of Object.entries(c.notApplicable ?? {}))
+      log(`  not applicable: ${c.id} ${part}: ${why}`);
   log(`  summary: ${JSON.stringify(report)}`);
   log(`  written to ${writeSummary(summaryName, report)}`);
+  const reported = Object.fromEntries(
+    cases.filter((c) => c.report !== undefined).map((c) => [c.id, c.report]),
+  );
+  if (outcomes !== undefined) {
+    const path = writeOutcomes(outcomes.file, spec.lock, reported);
+    if (path !== undefined) log(`  outcomes written to ${path}`);
+  }
 
   describe(header, () => {
     for (const c of cases) {
@@ -69,6 +92,11 @@ export async function defineSuiteRun(
     it("has no suite-level problems (pending entries match the suite)", () => {
       expect(summary.problems).toEqual([]);
     });
+
+    if (outcomes !== undefined)
+      it("reports an outcome for every case", () => {
+        expect(cases.filter((c) => c.report === undefined).map((c) => c.id)).toEqual([]);
+      });
 
     it("has no failed case", () => {
       expect(cases.filter((c) => c.status === "failed").map((c) => c.id)).toEqual([]);
