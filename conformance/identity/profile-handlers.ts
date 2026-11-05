@@ -139,6 +139,8 @@ function changeFactsCheck(name: string, c: VectorCase): Check {
 
 interface Delivery {
   readonly admitted: readonly string[];
+  /** The change hashes admitted, in admission order. */
+  readonly admittedHashes: readonly string[];
   readonly refused: Readonly<Record<string, string>>;
   readonly held: readonly string[];
   readonly pending: readonly string[];
@@ -158,6 +160,7 @@ function deliver(
   const byHash = new Map<string, string>();
   const replica = IdentityReplica.empty(optionsOf(context));
   const admitted: string[] = [];
+  const admittedHashes: string[] = [];
   const refused: Record<string, string> = {};
   const held: string[] = [];
   let last: IdentityReceiveResult | undefined;
@@ -166,7 +169,10 @@ function deliver(
     const c = changeCase(context, name);
     byHash.set(String((c.inputs as Json).change_hash), name);
     last = replica.receiveChanges([unitOf(c)]);
-    for (const h of last.admitted) admitted.push(byHash.get(h) ?? h);
+    for (const h of last.admitted) {
+      admitted.push(byHash.get(h) ?? h);
+      admittedHashes.push(h);
+    }
     for (const r of last.refused) {
       const n = r.hash === undefined ? name : (byHash.get(r.hash) ?? r.hash);
       if (r.held) held.push(n);
@@ -180,6 +186,7 @@ function deliver(
     .find((ch) => ch.deps.length === 0);
   return {
     admitted,
+    admittedHashes,
     refused,
     held,
     pending: [...pending].sort(),
@@ -224,6 +231,23 @@ function entriesOf(
 }
 
 // ---------------------------------------------------------------------------
+// reports (lfcp-identity-outcomes/1)
+
+type Report = Record<string, unknown>;
+const accepted = (ids: readonly string[], postState: unknown = null): Report => ({
+  outcome: "accept",
+  accepted_ids: [...ids],
+  post_state: postState,
+});
+const refusedReport = (code: string, diagnostic: string | null, detail?: string): Report => ({
+  outcome: code,
+  diagnostic,
+  ...(detail === undefined ? {} : { detail }),
+  accepted_ids: [],
+  post_state: null,
+});
+
+// ---------------------------------------------------------------------------
 // bytes
 
 const framing: Handler = (c) => {
@@ -234,7 +258,7 @@ const framing: Handler = (c) => {
   ];
   if ((c.inputs as Json).change_hash !== undefined && (c.inputs as Json).deps !== undefined)
     checks.push(changeFactsCheck("framed_cbor/change", c));
-  return { checks };
+  return { checks, report: accepted([checkChange(changeBytes(c)).hash]) };
 };
 
 /** The §18.2 secret of the inputs' keys, through the SDK's own decoder. */
@@ -281,6 +305,7 @@ const pairUri: Handler = (c) => {
         );
       }),
     ],
+    report: accepted([toHex(device)]),
   };
 };
 
@@ -296,11 +321,13 @@ const fingerprint: Handler = (c) => {
       ),
       equalCheck("fingerprint", c.expected.fingerprint, deviceFingerprint(id)),
     ],
+    report: accepted([], { fingerprint: deviceFingerprint(id) }),
   };
 };
 
 const approvalDigest: Handler = (c) => {
-  const digest = parseDeviceCertificate(hexOf(c.inputs, "cose_sign1")).payloadDigest;
+  const certificate = parseDeviceCertificate(hexOf(c.inputs, "cose_sign1"));
+  const digest = certificate.payloadDigest;
   const consuming = String(c.expected.consuming_record);
   return {
     checks: [
@@ -321,6 +348,7 @@ const approvalDigest: Handler = (c) => {
         fromHex(wireCase(consuming).inputs.record_id.hex),
       ),
     ],
+    report: accepted([toHex(certificate.id)], { payload_digest: toHex(digest) }),
   };
 };
 
@@ -332,12 +360,14 @@ const profileChange: Handler = (c, context) => {
   const i = c.inputs as Json;
   const history = ((c.context as Json)?.history ?? []) as { case: string }[];
   const replica = IdentityReplica.empty(optionsOf(context));
+  const admitted: string[] = [];
   const checks: Check[] = [
     writerClassCheck("outcome/writer_class", c, context),
     changeFactsCheck("outcome/change", c),
   ];
   for (const h of history) {
     const r = replica.receiveChanges([unitOf(changeCase(context, h.case))]);
+    admitted.push(...r.admitted);
     if (r.admitted.length === 0)
       return {
         checks: [
@@ -349,6 +379,12 @@ const profileChange: Handler = (c, context) => {
   const result = replica.receiveChanges([unitOf(c)]);
   const refusal = result.refused[0];
   const expected = c.expected as Json;
+  // accepted_ids: every change the replica admitted, its history included.
+  const report: Report = result.admitted.includes(i.change_hash)
+    ? accepted([...new Set([...admitted, ...result.admitted])].sort(), stateOf(replica))
+    : refusal === undefined
+      ? { outcome: "waiting", accepted_ids: [], post_state: null }
+      : refusedReport(refusal.code, refusal.diagnostic, refusal.message);
   if (expected.valid === true)
     checks.push(
       check(
@@ -366,7 +402,7 @@ const profileChange: Handler = (c, context) => {
       equalCheck("outcome/diagnostic", expected.error.diagnostic, refusal?.diagnostic ?? null),
     );
   }
-  return { checks };
+  return { checks, report };
 };
 
 /** §4 on the case's Snapshot: the entry, then its outcome. */
@@ -393,6 +429,15 @@ const profileEntry: Handler = (c, context) => {
       equalCheck("outcome/fingerprint", i.fingerprint, deviceFingerprint(parseRef(i.key))),
     );
   const expected = c.expected as Json;
+  const isConflicted = Object.hasOwn(view[i.container], conflicted);
+  const report: Report =
+    outcome === "valid"
+      ? accepted([], view[i.container][i.key] ?? null)
+      : refusedReport(
+          "PROFILE_INVALID",
+          outcome,
+          isConflicted ? "conflicted entry (§4 rule 2)" : undefined,
+        );
   if (expected.valid === true) checks.push(equalCheck("outcome", "valid", outcome));
   else {
     checks.push(
@@ -400,7 +445,7 @@ const profileEntry: Handler = (c, context) => {
     );
     checks.push(equalCheck("outcome/diagnostic", expected.error.diagnostic, outcome));
   }
-  return { checks };
+  return { checks, report };
 };
 
 /**
@@ -428,13 +473,27 @@ const pairUriRejected: Handler = (c) => {
         ? outcomeCheck("outcome", expected.error.code, code)
         : equalCheck("outcome", null, code),
     ],
+    report:
+      code === null
+        ? accepted([])
+        : refusedReport(code, null, code === "PAIRING_LINK_REJECTED" ? undefined : code),
   };
 };
 
 // ---------------------------------------------------------------------------
 // behavioral
 
-type Scenario = (c: VectorCase, context: HandlerContext) => Check[];
+/**
+ * A scenario's checks, and its report: `post` is the state it derived in
+ * the corpus's shape (from the first delivery order when there are several;
+ * the checks require every order to agree), `runs` every delivery it made.
+ */
+interface ScenarioResult {
+  readonly checks: Check[];
+  readonly post: Json;
+  readonly runs: readonly Delivery[];
+}
+type Scenario = (c: VectorCase, context: HandlerContext) => ScenarioResult;
 
 const namesOf = (refs: readonly { case: string }[]) =>
   refs.map((r) => r.case.replace(/^change\./, ""));
@@ -463,36 +522,37 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
     const i = c.inputs as Json;
     const e = c.expected as Json;
     const checks: Check[] = [];
+    const runs: Delivery[] = [];
+    const byOrder: Record<string, Json> = {};
     for (const [k, order] of Object.entries(i.orders as Record<string, Json>)) {
       const run = Array.isArray(order)
         ? deliver(context, order)
         : deliver(context, order.order, order.key_blocked_until_end);
-      checks.push(
-        equalCheck(`by_order/${k}`, e.by_order[k], {
-          initial_change: run.initial,
-          refused: run.refused,
-          held: run.held,
-          pending: run.pending,
-        }),
-      );
+      runs.push(run);
+      byOrder[k] = {
+        initial_change: run.initial,
+        refused: run.refused,
+        held: run.held,
+        pending: run.pending,
+      };
+      checks.push(equalCheck(`by_order/${k}`, e.by_order[k], byOrder[k]));
     }
     const snap = fromSnapshot(context, i.snapshot.b64url, [i.snapshot.carries]);
-    checks.push(
-      equalCheck("snapshot", e.snapshot, {
-        initial_change:
-          snap instanceof Error
-            ? null
-            : nameOfChange(
-                context,
-                snap
-                  .changes()
-                  .map(checkChange)
-                  .find((x) => x.deps.length === 0)?.hash ?? "",
-              ),
-        used: !(snap instanceof Error),
-      }),
-    );
-    return checks;
+    const snapshot = {
+      initial_change:
+        snap instanceof Error
+          ? null
+          : nameOfChange(
+              context,
+              snap
+                .changes()
+                .map(checkChange)
+                .find((x) => x.deps.length === 0)?.hash ?? "",
+            ),
+      used: !(snap instanceof Error),
+    };
+    checks.push(equalCheck("snapshot", e.snapshot, snapshot));
+    return { checks, post: { by_order: byOrder, snapshot }, runs };
   },
 
   identity_doc_initial_without_unit_1: (c, context) => {
@@ -500,8 +560,9 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
     const unit1 = i.root_unit_1.case.replace(/^change\./, "");
     const snap = fromSnapshot(context, i.snapshot.b64url, [unit1]);
     const run = deliver(context, [unit1]);
-    return [
-      equalCheck("snapshot_used", c.expected.snapshot_used, !(snap instanceof Error)),
+    const post = { snapshot_used: !(snap instanceof Error), initial_change: run.initial };
+    const checks = [
+      equalCheck("snapshot_used", c.expected.snapshot_used, post.snapshot_used),
       check(
         "snapshot_used/hash",
         () =>
@@ -512,17 +573,27 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
       ),
       equalCheck("initial_change", c.expected.initial_change, run.initial),
     ];
+    return { checks, post, runs: [run] };
   },
 
   identity_doc_initial_then_fill: (c, context) => {
     const i = c.inputs as Json;
     const e = c.expected as Json;
     const checks: Check[] = [];
+    const runs: Delivery[] = [];
+    let post: Json;
     const names = namesOf(i.changes);
     for (const order of i.orders as string[][]) {
       const run = deliver(context, order);
+      runs.push(run);
       const at = order.join(",");
       const validation = run.replica.validate();
+      post ??= {
+        admitted: sorted(run.admitted),
+        entries: entriesOf(validation, e.entries),
+        root_valid: validation.usable,
+        state: stateOf(run.replica),
+      };
       checks.push(
         equalCheck(`state/${at}`, e.state, stateOf(run.replica)),
         equalCheck(`root_valid/${at}`, e.root_valid, validation.usable),
@@ -538,7 +609,7 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
           : equalCheck("state", e.state, stateOf(snap)).ok || "the Snapshot's state differs",
       ),
     );
-    return checks;
+    return { checks, post, runs };
   },
 
   pairing_concurrent_same_key: (c, context) => {
@@ -547,12 +618,22 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
     const history = namesOf(i.history);
     const changes = namesOf(i.changes);
     const checks: Check[] = [];
+    const runs: Delivery[] = [];
+    let post: Json;
     for (const order of [changes, [...changes].reverse()]) {
       const run = deliver(context, [...history, ...order]);
+      runs.push(run);
       const at = order.join(",");
       const view = stateOf(run.replica) as Json;
       const validation = run.replica.validate();
       const outcome = entryOutcome(validation.problems, "requests", e.entry);
+      post ??= {
+        admitted: sorted(run.admitted.filter((n) => changes.includes(n))),
+        entry: e.entry,
+        entry_conflicted: Object.hasOwn(view.requests, `${e.entry}_conflict_set`),
+        entry_diagnostic: outcome,
+        entry_valid: outcome === "valid" && Object.hasOwn(validation.requests, e.entry),
+      };
       checks.push(
         equalCheck(
           `admitted/${at}`,
@@ -578,7 +659,7 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
         equalCheck(`entry_diagnostic/${at}`, e.entry_diagnostic, outcome),
       );
     }
-    return checks;
+    return { checks, post, runs };
   },
 
   device_entry_missing_keys_union: (c, context) => {
@@ -591,74 +672,86 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
       (k) => view.devices[k].missing_keys_conflict_set !== undefined,
     );
     if (key === undefined)
-      return [{ name: "entry_valid", ok: false, message: "no entry with a missing_keys conflict" }];
+      return {
+        checks: [
+          { name: "entry_valid", ok: false, message: "no entry with a missing_keys conflict" },
+        ],
+        post: null,
+        runs: [],
+      };
     const validation = withIdentityDocument(save, (doc) => validateIdentity(doc, root));
     const read = validation.devices[key]?.missing_keys;
-    return [
+    const post = {
+      entry_valid: entryOutcome(validation.problems, "devices", key) === "valid",
+      missing_keys_conflict_set: view.devices[key].missing_keys_conflict_set,
+      missing_keys_read:
+        read === undefined
+          ? null
+          : Object.fromEntries(Object.entries(read).map(([r, eps]) => [r, eps.map(Number)])),
+    };
+    const checks = [
       check("entry_valid/changes", () => {
         const hashes = new Set(snapshotHashes(i.snapshot.b64url));
         return namesOf(i.changes).every((n) =>
           hashes.has((changeCase(context, n).inputs as Json).change_hash),
         );
       }),
-      equalCheck(
-        "entry_valid",
-        e.entry_valid,
-        entryOutcome(validation.problems, "devices", key) === "valid",
-      ),
+      equalCheck("entry_valid", e.entry_valid, post.entry_valid),
       equalCheck(
         "missing_keys_conflict_set",
         e.missing_keys_conflict_set,
-        view.devices[key].missing_keys_conflict_set,
+        post.missing_keys_conflict_set,
       ),
-      equalCheck(
-        "missing_keys_read",
-        e.missing_keys_read,
-        read === undefined
-          ? null
-          : Object.fromEntries(Object.entries(read).map(([r, eps]) => [r, eps.map(Number)])),
-      ),
+      equalCheck("missing_keys_read", e.missing_keys_read, post.missing_keys_read),
     ];
+    return { checks, post, runs: [] };
   },
 
   missing_keys_concurrent_device_and_root: (c, context) => {
     const i = c.inputs as Json;
     const e = c.expected as Json;
     const checks: Check[] = [];
+    const runs: Delivery[] = [];
+    let post: Json;
     for (const [k, order] of Object.entries(i.orders as Record<string, string[]>)) {
       const run = deliver(context, order);
+      runs.push(run);
       checks.push(...deliveryChecks(k, e, run));
       const view = stateOf(run.replica) as Json;
       const entry = view.devices[e.state.entry];
       const validation = run.replica.validate();
       const read = validation.devices[e.state.entry]?.missing_keys;
-      checks.push(
-        equalCheck(`state/${k}`, e.state, {
-          entry: e.state.entry,
-          entry_valid: entryOutcome(validation.problems, "devices", e.state.entry) === "valid",
-          missing_keys_conflict_set:
-            entry?.missing_keys_conflict_set ??
-            (entry?.missing_keys === undefined ? [] : [entry.missing_keys]),
-          missing_keys_read:
-            read === undefined
-              ? null
-              : Object.fromEntries(Object.entries(read).map(([r, eps]) => [r, eps.map(Number)])),
-        }),
-      );
+      const state = {
+        entry: e.state.entry,
+        entry_valid: entryOutcome(validation.problems, "devices", e.state.entry) === "valid",
+        missing_keys_conflict_set:
+          entry?.missing_keys_conflict_set ??
+          (entry?.missing_keys === undefined ? [] : [entry.missing_keys]),
+        missing_keys_read:
+          read === undefined
+            ? null
+            : Object.fromEntries(Object.entries(read).map(([r, eps]) => [r, eps.map(Number)])),
+      };
+      post ??= { ...deliveryOf(context, run), state };
+      checks.push(equalCheck(`state/${k}`, e.state, state));
     }
-    return checks;
+    return { checks, post, runs };
   },
 
   missing_keys_hidden_entry_resolution: (c, context) => {
     const i = c.inputs as Json;
     const e = c.expected as Json;
     const checks: Check[] = [];
+    const runs: Delivery[] = [];
+    const post: Json = {};
     for (const [k, order] of Object.entries(i.orders as Record<string, string[]>)) {
       const run = deliver(context, order);
+      runs.push(run);
+      post[k] = { ...deliveryOf(context, run), state: stateOf(run.replica) };
       checks.push(...deliveryChecks(k, e[k], run).map((x) => ({ ...x, name: `${k}/${x.name}` })));
-      checks.push(equalCheck(`${k}/state`, e[k].state, stateOf(run.replica)));
+      checks.push(equalCheck(`${k}/state`, e[k].state, post[k].state));
     }
-    return checks;
+    return { checks, post, runs };
   },
 
   identity_snapshot_equivalence: (c, context) => {
@@ -668,7 +761,12 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
     const run = deliver(context, names);
     const validation = run.replica.validate();
     const snap = fromSnapshot(context, i.snapshot.b64url, names);
-    return [
+    const post = {
+      entries: entriesOf(validation, e.entries),
+      root_valid: validation.usable,
+      state: stateOf(run.replica),
+    };
+    const checks = [
       equalCheck("state", e.state, stateOf(run.replica)),
       equalCheck("root_valid", e.root_valid, validation.usable),
       equalCheck("entries", e.entries, entriesOf(validation, e.entries)),
@@ -684,12 +782,14 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
             "the Snapshot's entries differ",
       ),
     ];
+    return { checks, post, runs: [run] };
   },
 
   root_of_corpus: (c) => {
     const i = c.inputs as Json;
     const e = c.expected as Json;
-    return Object.entries(i.heads as Record<string, string>).map(([name, head]) =>
+    const post: Json = {};
+    const checks = Object.entries(i.heads as Record<string, string>).map(([name, head]) =>
       check(name, () => {
         const state = chainAt(head).state;
         const table = e[name] as Record<string, Json>;
@@ -709,10 +809,12 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
             ];
           }),
         );
+        post[name] = got;
         const r = equalCheck(name, table, got);
         return r.ok || r.message;
       }),
     );
+    return { checks, post, runs: [] };
   },
 
   assignee_root_ref: (c) => {
@@ -730,19 +832,33 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
       const human = labelOf(rootOf(state, parseRef(ref)));
       humans.set(human, [...(humans.get(human) ?? []), ref]);
     }
-    return [
-      equalCheck("crdt_set", e.crdt_set, [...new Set(assignees)].sort()),
-      equalCheck("display_humans", e.display_humans, [...humans.keys()]),
-      equalCheck(
-        "merged",
-        e.merged,
-        Object.fromEntries(
-          [...humans].filter(([, refs]) => refs.length > 1).map(([h, refs]) => [h, sorted(refs)]),
-        ),
+    const post = {
+      crdt_set: [...new Set(assignees)].sort(),
+      display_humans: [...humans.keys()],
+      merged: Object.fromEntries(
+        [...humans].filter(([, refs]) => refs.length > 1).map(([h, refs]) => [h, sorted(refs)]),
       ),
+    };
+    const checks = [
+      equalCheck("crdt_set", e.crdt_set, post.crdt_set),
+      equalCheck("display_humans", e.display_humans, post.display_humans),
+      equalCheck("merged", e.merged, post.merged),
     ];
+    return { checks, post, runs: [] };
   },
 };
+
+/** A delivery in the corpus's shape: admitted, refused (code and diagnostic) and pending names. */
+function deliveryOf(context: HandlerContext, run: Delivery): Json {
+  void context;
+  return {
+    admitted: run.admitted,
+    pending: run.pending,
+    refused: Object.fromEntries(
+      Object.entries(run.refused).map(([k, d]) => [k, { code: "PROFILE_INVALID", diagnostic: d }]),
+    ),
+  };
+}
 
 function deliveryChecks(name: string, e: Json, run: Delivery): Check[] {
   return [
@@ -773,7 +889,10 @@ const snapshotInitial = (b64url: string): string | undefined =>
 const identityDocument: Handler = (c, context) => {
   const scenario = Object.hasOwn(SCENARIOS, c.id) ? SCENARIOS[c.id] : undefined;
   if (scenario === undefined) throw new Error(`no scenario for ${c.id}`);
-  return { checks: scenario(c, context) };
+  const r = scenario(c, context);
+  // accepted_ids: the changes the first delivery admitted (every order admits a set the checks compare).
+  const ids = [...new Set(r.runs[0]?.admittedHashes ?? [])].sort();
+  return { checks: r.checks, report: accepted(ids, r.post) };
 };
 
 export const IDENTITY_PROFILE_HANDLERS: Readonly<Record<string, Handler>> = {
