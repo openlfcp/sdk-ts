@@ -1,0 +1,123 @@
+{
+  "about": "Documented schema differences between the sdk-ts and sdk-rs identity outcome exports: fields one SDK reports and the other does not, each with the corpus, case (glob or list), step (absent: the case itself; \"*\": any step; a number), field (dotted glob: * inside a key is any characters, a ** key any number of keys), the side that reports it, and why. Anything else one side lacks is a divergence (scripts/identity-differential.mjs); an entry that covers nothing is stale.",
+  "differences": [
+    {
+      "corpus": "identity-profile.json",
+      "case": "identity_doc_hidden_entry_scalar_written",
+      "field": "post_state.roster.qN9GHPyGCXzqVN8vhhMDq-ZcNE0UmUcSoT0sOSrMhG8_conflict_set",
+      "side": "sdk-ts",
+      "why": "IDENTITY-PROFILE-01 §4 rule 2: a field (or a roster/devices entry) with concurrent values is reported by sdk-ts as `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs), and by sdk-rs as one of them; a reader MAY show any value of these display fields. Same merged document, two views (spec question 6)."
+    },
+    {
+      "corpus": "identity-profile.json",
+      "case": "identity_doc_hidden_entry_scalar_written",
+      "field": "post_state.roster.qN9GHPyGCXzqVN8vhhMDq-ZcNE0UmUcSoT0sOSrMhG8",
+      "side": "sdk-rs",
+      "why": "IDENTITY-PROFILE-01 §4 rule 2: a field (or a roster/devices entry) with concurrent values is reported by sdk-ts as `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs), and by sdk-rs as one of them; a reader MAY show any value of these display fields. Same merged document, two views (spec question 6)."
+    },
+    {
+      "corpus": "identity-profile.json",
+      "case": "identity_doc_scalar_beside_entry_list",
+      "field": "post_state.roster.qN9GHPyGCXzqVN8vhhMDq-ZcNE0UmUcSoT0sOSrMhG8_conflict_set",
+      "side": "sdk-ts",
+      "why": "IDENTITY-PROFILE-01 §4 rule 2: a field (or a roster/devices entry) with concurrent values is reported by sdk-ts as `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs), and by sdk-rs as one of them; a reader MAY show any value of these display fields. Same merged document, two views (spec question 6)."
+    },
+    {
+      "corpus": "identity-profile.json",
+      "case": "identity_doc_scalar_beside_entry_list",
+      "field": "post_state.roster.qN9GHPyGCXzqVN8vhhMDq-ZcNE0UmUcSoT0sOSrMhG8",
+      "side": "sdk-rs",
+      "why": "IDENTITY-PROFILE-01 §4 rule 2: a field (or a roster/devices entry) with concurrent values is reported by sdk-ts as `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs), and by sdk-rs as one of them; a reader MAY show any value of these display fields. Same merged document, two views (spec question 6)."
+    },
+    {
+      "corpus": "identity-profile.json",
+      "case": "missing_keys_device_appends_hidden_hint",
+      "field": "post_state.devices.p:3LcJU3p8ZrnXhcnemzHRzxki0J8iXhBHnCSzAs6z-fI_conflict_set",
+      "side": "sdk-ts",
+      "why": "IDENTITY-PROFILE-01 §4 rule 2: a field (or a roster/devices entry) with concurrent values is reported by sdk-ts as `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs), and by sdk-rs as one of them; a reader MAY show any value of these display fields. Same merged document, two views (spec question 6)."
+    },
+    {
+      "corpus": "identity-profile.json",
+      "case": "missing_keys_device_appends_hidden_hint",
+      "field": "post_state.devices.p:3LcJU3p8ZrnXhcnemzHRzxki0J8iXhBHnCSzAs6z-fI",
+      "side": "sdk-rs",
+      "why": "IDENTITY-PROFILE-01 §4 rule 2: a field (or a roster/devices entry) with concurrent values is reported by sdk-ts as `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs), and by sdk-rs as one of them; a reader MAY show any value of these display fields. Same merged document, two views (spec question 6)."
+    },
+    {
+      "corpus": "identity-profile.json",
+      "case": "missing_keys_device_writes_hidden_own_hint",
+      "field": "post_state.devices.p:3LcJU3p8ZrnXhcnemzHRzxki0J8iXhBHnCSzAs6z-fI_conflict_set",
+      "side": "sdk-ts",
+      "why": "IDENTITY-PROFILE-01 §4 rule 2: a field (or a roster/devices entry) with concurrent values is reported by sdk-ts as `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs), and by sdk-rs as one of them; a reader MAY show any value of these display fields. Same merged document, two views (spec question 6)."
+    },
+    {
+      "corpus": "identity-profile.json",
+      "case": "missing_keys_device_writes_hidden_own_hint",
+      "field": "post_state.devices.p:3LcJU3p8ZrnXhcnemzHRzxki0J8iXhBHnCSzAs6z-fI",
+      "side": "sdk-rs",
+      "why": "IDENTITY-PROFILE-01 §4 rule 2: a field (or a roster/devices entry) with concurrent values is reported by sdk-ts as `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs), and by sdk-rs as one of them; a reader MAY show any value of these display fields. Same merged document, two views (spec question 6)."
+    },
+    {
+      "corpus": "identity-profile.json",
+      "case": "roster_conflicted_name",
+      "field": "post_state.name_conflict_set",
+      "side": "sdk-ts",
+      "why": "IDENTITY-PROFILE-01 §4 rule 2: a field (or a roster/devices entry) with concurrent values is reported by sdk-ts as `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs), and by sdk-rs as one of them; a reader MAY show any value of these display fields. Same merged document, two views (spec question 6)."
+    },
+    {
+      "corpus": "identity-profile.json",
+      "case": "roster_conflicted_name",
+      "field": "post_state.name",
+      "side": "sdk-rs",
+      "why": "IDENTITY-PROFILE-01 §4 rule 2: a field (or a roster/devices entry) with concurrent values is reported by sdk-ts as `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs), and by sdk-rs as one of them; a reader MAY show any value of these display fields. Same merged document, two views (spec question 6)."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "case": "F08_pairing_personal",
+      "step": 12,
+      "field": "p:*",
+      "side": "sdk-rs",
+      "why": "At the profile step that admits PAIR_L's request, sdk-rs reports the Identity Resource document's device entries as a table (entry by PrincipalRef, with active/registered/revoked/suspended of that table); sdk-ts reports the profile case's outcome only. The fixture states no device table here."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "case": "F08_pairing_personal",
+      "step": 12,
+      "field": "active",
+      "side": "sdk-rs",
+      "why": "Same table as p:* at this step (see the entry above)."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "case": "F08_pairing_personal",
+      "step": 12,
+      "field": "registered",
+      "side": "sdk-rs",
+      "why": "Same table as p:* at this step (see the entry above)."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "case": "F08_pairing_personal",
+      "step": 12,
+      "field": "revoked",
+      "side": "sdk-rs",
+      "why": "Same table as p:* at this step (see the entry above)."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "case": "F08_pairing_personal",
+      "step": 12,
+      "field": "suspended",
+      "side": "sdk-rs",
+      "why": "Same table as p:* at this step (see the entry above)."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "case": "F09_pairing_service",
+      "step": 13,
+      "field": "Y",
+      "side": "sdk-ts",
+      "why": "The candidate evidence of §5.3 step 8 at the X-with-C0 registration: sdk-ts reports every Resource the fixture names outside the result's scope ([X]) as never shown as granted at each step that states candidate evidence; sdk-rs reports Y at steps 9 and 15 (where it agrees) but not 13."
+    }
+  ]
+}

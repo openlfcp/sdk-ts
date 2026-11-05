@@ -194,8 +194,12 @@ Each identity suite also exports what sdk-ts decided for every case, in the
 `lfcp-identity-outcomes/1` format sdk-rs exports too (outcome, diagnostic,
 accepted IDs, post-state, flow steps), when `LFCP_IDENTITY_REPORT_DIR` is set.
 `scripts/identity-differential.mjs` compares the two exports without either SDK
-reading the other's code; every divergence must be explained, with the side the
-text supports, in `conformance/identity/differential-known.json`:
+reading the other's code. Required fields (outcome, accepted IDs, post-state,
+flow steps) must be on both sides, and state tables are compared by membership: a
+field only one side reports is a divergence unless
+`conformance/identity/differential-schema.json` documents it (corpus, case, step,
+field, side, why). Every divergence must be explained, with the side the text
+supports, in `conformance/identity/differential-known.json`:
 
 ```sh
 LFCP_IDENTITY_REPORT_DIR=/path/ts pnpm exec vitest run conformance/identity/

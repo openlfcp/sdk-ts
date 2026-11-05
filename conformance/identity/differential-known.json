@@ -1,4 +1,17 @@
 {
   "about": "Divergences between the sdk-ts and sdk-rs identity outcome exports (scripts/identity-differential.mjs), each with the side the specification text supports (`right`) and why. Corpus verdicts are never changed here. An entry that matches no divergence fails the run.",
-  "divergences": []
+  "divergences": [
+    {
+      "corpus": "identity-flows.json",
+      "path": "F13_durable_phases#1.signed_certificate",
+      "right": "sdk-ts",
+      "why": "Step 1 is the approval journal before phase 1 (the chain at P2). IDENTITY-PROFILE-01 §5.3 step 5 (N9): nothing is signed for D_B until the consume is accepted; the certificate is signed in phase 2 (step 4), where both SDKs report CERT_B from the journaled payload. sdk-rs reports the signed certificate already at step 1 (its flow export marks the step simulation: true): a check of the journaled payload, not a signature sent, but the export states a certificate signed before phase 1. sdk-ts reports it at step 4 only. The fixture states neither field at step 1."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "path": "F13_durable_phases#1.certificate_payload_matches_journal",
+      "right": "sdk-ts",
+      "why": "Step 1 is the approval journal before phase 1 (the chain at P2). IDENTITY-PROFILE-01 §5.3 step 5 (N9): nothing is signed for D_B until the consume is accepted; the certificate is signed in phase 2 (step 4), where both SDKs report CERT_B from the journaled payload. sdk-rs reports the signed certificate already at step 1 (its flow export marks the step simulation: true): a check of the journaled payload, not a signature sent, but the export states a certificate signed before phase 1. sdk-ts reports it at step 4 only. The fixture states neither field at step 1."
+    }
+  ]
 }
