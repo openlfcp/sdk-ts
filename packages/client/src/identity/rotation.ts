@@ -228,8 +228,18 @@ export interface LocalAccepted {
   readonly units: readonly Uint8Array[];
   /** The sequences verified Snapshots cover (W §29.3). */
   readonly snapshot: HaveVector;
-  /** Unit IDs (hex) this installation already refused as data: AEAD or Data Profile. */
+  /**
+   * Unit IDs (hex) whose bytes this installation proved bad as data: a failed
+   * AEAD or a Data Profile decode refusal. A missing or mismatching DEK is
+   * not such a proof: those units are verified again here.
+   */
   readonly refused?: ReadonlySet<string>;
+  /**
+   * Unit IDs (hex) this installation accepted on the wire (its actor chain
+   * links through them), including units its profile later refused to
+   * merge: recipients link through them the same way.
+   */
+  readonly accepted?: ReadonlySet<string>;
 }
 
 /** What the rotating client needs to judge a unit as data (W §26.3 rules 6 and 7). */
@@ -265,6 +275,7 @@ async function acceptedAsData(
   local: LocalAccepted,
   data: FrontierData,
 ): Promise<boolean> {
+  if (local.accepted?.has(unitId) === true) return true;
   if (local.refused?.has(unitId) === true) return false;
   const profile =
     data.profile !== undefined && data.profile.dataProfile === chain.state.dataProfile
@@ -438,11 +449,18 @@ async function localAccepted(o: FlowOptions, chain: LinearChain): Promise<LocalA
     "profile-unsupported",
   ] as const)
     for (const u of await st.dataUnits.withStatus(R, status)) units.push(u.bytes);
-  // Units this installation refused as data: a failed decryption or a profile refusal.
+  // What this installation decided as a receiver. Proven bad bytes: AEAD and
+  // profile decode failures (a missing or wrong DEK is verified again). Accepted
+  // on the wire: the units its actor chain links through, a unit the profile
+  // refused when merging included (it keeps the accepted mark).
   const refused = new Set<string>();
-  for (const status of ["local-failure", "profile-rejected"] as const)
-    for (const u of await st.dataUnits.withStatus(R, status)) refused.add(toHex(u.unitId));
-  return { units, snapshot: await snapshotFrontier(st as LfcpStorage, R), refused };
+  for (const u of await st.dataUnits.withStatus(R, "local-failure"))
+    if (/^(AEAD|PROFILE_REJECTED):/.test(u.detail ?? "")) refused.add(toHex(u.unitId));
+  const accepted = new Set<string>();
+  for (const status of ["merged", "profile-pending", "profile-held", "profile-rejected"] as const)
+    for (const u of await st.dataUnits.withStatus(R, status))
+      if (u.accepted) accepted.add(toHex(u.unitId));
+  return { units, snapshot: await snapshotFrontier(st as LfcpStorage, R), refused, accepted };
 }
 
 /**

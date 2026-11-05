@@ -90,6 +90,18 @@ export class MemoryCoordinator {
     );
   }
 
+  /** The exact bytes of the units held for a Resource, by actor and sequence. */
+  unitsBytes(resource: ResourceId): Uint8Array[] {
+    return [...(this.hosted.get(toHex(resource))?.units.values() ?? [])].sort((a, b) => {
+      const x = parseDataUnit(a).payload;
+      const y = parseDataUnit(b).payload;
+      const ax = toHex(x.actor);
+      const ay = toHex(y.actor);
+      if (ax !== ay) return ax < ay ? -1 : 1;
+      return x.actorSeq < y.actorSeq ? -1 : 1;
+    });
+  }
+
   unitsOf(resource: ResourceId) {
     return [...(this.hosted.get(toHex(resource))?.units.values() ?? [])].map(
       (b) => parseDataUnit(b).payload,

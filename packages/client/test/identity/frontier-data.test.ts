@@ -1,7 +1,9 @@
 import { actorSequence, bytesEqual, type DataUnitId } from "@openlfcp/core";
 import { generateResourceDEK } from "@openlfcp/crypto";
+import type { LfcpStorage } from "@openlfcp/storage";
 import { sealDataUnit } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
+import { DataUnitApplier } from "../../src/apply.js";
 import { heldDeks } from "../../src/identity/context.js";
 import { OperationJournal } from "../../src/identity/journal.js";
 import { rotateAfter } from "../../src/identity/rotation.js";
@@ -87,5 +89,69 @@ describe("the rotation frontier counts only data recipients accept", { timeout: 
       },
     };
     expect(await rotate("probe-profile", { dataProfiles: [profile] })).toEqual([8n, [[10n, 10n]]]);
+  });
+
+  /** A DataUnitApplier on P's storage: the receiver whose stored statuses the rotation reads. */
+  const applierFor = (
+    w: Awaited<ReturnType<typeof setup>>["w"],
+    R: never,
+    dek: unknown,
+    apply?: (v: Uint8Array) => void,
+  ) => {
+    const chain = w.server.chain(R);
+    const codec = {
+      dataProfile: chain.state.dataProfile,
+      encode: (v: Uint8Array) => v,
+      decode: (v: Uint8Array) => v,
+    };
+    return new DataUnitApplier({
+      storage: w.P.storage,
+      dek: () => dek,
+      handlers: [
+        {
+          dataProfile: chain.state.dataProfile,
+          codecFor: () => codec,
+          apply: (u: { unitId: Uint8Array }, v: Uint8Array) => {
+            apply?.(v);
+            return { merged: [u.unitId], objects: [], diagnostics: [] };
+          },
+          exclude: () => ({ objects: [], pending: [] }),
+        },
+      ],
+    } as never);
+  };
+
+  test("a unit first refused for a missing DEK is verified again with the DEK (review 21)", async () => {
+    const { w, R, seal, last8, rotate } = await setup();
+    const h9 = seal(9, last8, "honest 9");
+    const h10 = seal(10, h9.unitId, "honest 10");
+    // This installation saw 9 before it held the epoch's DEK: stored as local-failure NO_DEK.
+    const noKey = applierFor(w, R, undefined);
+    expect(await noKey.receive(w.server.chain(R), h9.bytes)).toMatchObject({
+      kind: "local-failure",
+      reason: "NO_DEK",
+    });
+    for (const u of [h9, h10]) w.server.inject(R, u.bytes);
+    expect(await rotate("probe-no-dek")).toEqual([10n, []]);
+  });
+
+  test("a unit the profile refused when applying still links its actor's chain (review 21)", async () => {
+    const { w, R, seal, last8, rotate } = await setup();
+    const h9 = seal(9, last8, "applied as refused");
+    const h10 = seal(10, h9.unitId, "honest 10");
+    const dek = (await heldDeks(w.P.secrets, w.server.chain(R))).get("0");
+    // The receiver accepts 9 on the wire and its profile refuses it when merging;
+    // the actor's chain links through it, so the receiver applies 10.
+    const receiver = applierFor(w, R, dek, (v) => {
+      if (new TextDecoder().decode(v) === "applied as refused")
+        throw new Error("admission refusal");
+    });
+    for (const u of [...w.server.unitsBytes(R), h9.bytes, h10.bytes])
+      await receiver.receive(w.server.chain(R), u);
+    expect((await (w.P.storage as unknown as LfcpStorage).dataUnits.get(h10.unitId))?.status).toBe(
+      "merged",
+    );
+    for (const u of [h9, h10]) w.server.inject(R, u.bytes);
+    expect(await rotate("probe-apply-refusal")).toEqual([10n, []]);
   });
 });
