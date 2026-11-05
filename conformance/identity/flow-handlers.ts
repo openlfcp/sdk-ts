@@ -911,6 +911,8 @@ function stated(expected: unknown, got: unknown): unknown {
  * differential compares what both report. The checks see them either way.
  */
 const STATED_ONLY = new Set([
+  // A step's case carries its diagnostic in the case's own export (wire, profile), compared there.
+  "diagnostic",
   "approval",
   "counted",
   "status",

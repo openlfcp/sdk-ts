@@ -296,7 +296,6 @@ function compareOutcome(ts, rs, ctx) {
     if (NOT_COMPARED.has(k) || k === "steps") continue;
     // A flow's outcome summarises its steps.
     if (k === "outcome" && flow) continue;
-    if (k === "diagnostic" && (ts[k] === undefined || rs[k] === undefined)) continue;
     if (required.includes(k) && (!(k in ts) || !(k in rs))) continue;
     compareValues(ts[k], rs[k], [k], sub);
   }
@@ -586,6 +585,25 @@ function selfTest() {
   // The entry names its set side: the reverse pair is not covered.
   if (run({ r: cv({ name: "X (root)" }) }, tsSet, conflictSchema).diffs.length !== 2)
     fail("a conflict view of the other side");
+
+  // A profile diagnostic is compared: deleting it on one side is a divergence (review of sdk-ts#19b).
+  const badRoot = () => ({
+    identity_doc_bad_root: {
+      outcome: "PROFILE_INVALID",
+      diagnostic: "INVALID_ROOT",
+      accepted_ids: [],
+      post_state: null,
+    },
+  });
+  const noDiag = badRoot();
+  delete noDiag.identity_doc_bad_root.diagnostic;
+  const r4 = compareExports("identity-profile.json", mk(noDiag), mk(badRoot()));
+  if (r4.diffs.map((d) => d.label).join() !== "identity_doc_bad_root.diagnostic")
+    fail(`a missing diagnostic ${stable(r4.diffs)}`);
+  const otherDiag = badRoot();
+  otherDiag.identity_doc_bad_root.diagnostic = "INVALID_FIELD_TYPE";
+  if (compareExports("identity-profile.json", mk(otherDiag), mk(badRoot())).diffs.length !== 1)
+    fail("a different diagnostic");
 
   // A field a side declares N/A for a step may be absent on that side.
   const naField = clone(base());
