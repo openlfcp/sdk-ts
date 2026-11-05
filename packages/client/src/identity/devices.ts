@@ -15,6 +15,7 @@ import {
   type ControlState,
   certificateChain,
   checkDeviceCertificatePayload,
+  type DataProfileCodec,
   DEVICE_ABILITY,
   DEVICE_KIND,
   type DeviceCertificate,
@@ -67,6 +68,12 @@ export interface FlowOptions {
   readonly secrets: SecretStore;
   readonly network: IdentityNetwork;
   readonly now: () => number;
+  /**
+   * The application's Data Profile codecs. A rotation uses the Resource's
+   * codec to judge which units recipients accept as data (W §26.3 rule 7);
+   * without one, only decryption and recorded refusals are checked.
+   */
+  readonly dataProfiles?: readonly DataProfileCodec<unknown>[];
 }
 
 const hasCode = (mask: readonly bigint[], code: bigint) => mask.includes(code);

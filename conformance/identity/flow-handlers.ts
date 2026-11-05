@@ -65,6 +65,7 @@ import {
   chainOf,
   chainOfCert,
   contextOf,
+  dek0Of,
   type FlowCase,
   type FlowStep,
   idOf,
@@ -452,7 +453,12 @@ const SPECIALS: Readonly<Record<string, Special>> = {
     }
     const chain = chainAt("Yb1_bridge_out_of_scope");
     const channel = await server.network().connect(party("OWNER"), "wss://y.test");
-    const frontier = await verifiedFrontier(channel, chain);
+    const frontier = await verifiedFrontier(
+      channel,
+      chain,
+      { units: [], snapshot: [] },
+      { deks: new Map([["0", dek0Of("Y")]]) },
+    );
     const sets = frontier.map((h) => {
       const seqs: bigint[] = [];
       for (let s = 1n; s <= h.contiguous; s++) seqs.push(s);

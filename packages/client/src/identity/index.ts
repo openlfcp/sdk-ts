@@ -157,6 +157,8 @@ export {
 export {
   type ExposingRevocation,
   exposingRevocationsSince,
+  type FrontierData,
+  type LocalAccepted,
   type RotationOutcome,
   type RotationStatus,
   type RotatorTest,

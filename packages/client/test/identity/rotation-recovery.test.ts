@@ -97,7 +97,12 @@ describe("rotation recovery (review follow-up, IDENTITY-PROFILE-01 §8.3, §9.1�
     const c = seal(4n, a.unitId, "c");
     for (const u of [a, b, c]) w.server.inject(w.I, u.bytes);
     const channel = await w.P.network.connect(w.P.installation.signer, URL);
-    const frontier = await verifiedFrontier(channel, chain);
+    const frontier = await verifiedFrontier(
+      channel,
+      chain,
+      { units: [], snapshot: [] },
+      { deks: await heldDeks(w.P.secrets, chain) },
+    );
     const mine = frontier.find((h) => bytesEqual(h.principalId, id(1)));
     expect([mine?.contiguous, mine?.extras]).toEqual([2n, []]);
   });
@@ -141,16 +146,20 @@ describe("rotation recovery (review follow-up, IDENTITY-PROFILE-01 §8.3, §9.1�
     const stored = seal(3n, sha256(at(2n)), "stored");
     const fetched = seal(3n, sha256(at(2n)), "fetched");
     w.server.inject(w.I, fetched.bytes);
-    const frontier = await verifiedFrontier(channel, chain, {
-      units: [stored.bytes],
-      snapshot: [],
-    });
+    const frontier = await verifiedFrontier(
+      channel,
+      chain,
+      { units: [stored.bytes], snapshot: [] },
+      { deks: await heldDeks(w.P.secrets, chain) },
+    );
     expect(contiguousOf(frontier)).toEqual([2n, []]);
   });
 
   test("12b.1: a unit naming an older unit than the actor's latest is not accepted", async () => {
     const { w, at, chain, seal, channel } = await rootUnits();
     w.server.inject(w.I, seal(3n, sha256(at(1n)), "skips 2").bytes);
-    expect(contiguousOf(await verifiedFrontier(channel, chain))).toEqual([2n, []]);
+    const deks = await heldDeks(w.P.secrets, chain);
+    const frontier = await verifiedFrontier(channel, chain, { units: [], snapshot: [] }, { deks });
+    expect(contiguousOf(frontier)).toEqual([2n, []]);
   });
 });

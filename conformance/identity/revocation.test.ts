@@ -18,6 +18,7 @@ import { MemoryCoordinator } from "../../packages/client/test/identity/memory-co
 import {
   chainAt,
   chainOf,
+  dek0Of,
   flow,
   idOf,
   party,
@@ -101,7 +102,12 @@ describe("F14: the final frontier from the verified accepted set (§8.3)", () =>
     }
     const chain = chainAt("Yb1_bridge_out_of_scope");
     const channel = await server.network().connect(party("OWNER"), "wss://y.test");
-    const frontier = await verifiedFrontier(channel, chain);
+    const frontier = await verifiedFrontier(
+      channel,
+      chain,
+      { units: [], snapshot: [] },
+      { deks: new Map([["0", dek0Of("Y")]]) },
+    );
     expect(frontier.map((h) => [labelOf(h.principalId), h.contiguous, h.extras])).toEqual([
       ["DEV_A", 2n, [[4n, 4n]]],
     ]);

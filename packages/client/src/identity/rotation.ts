@@ -9,7 +9,7 @@ import {
   resourceId,
   toHex,
 } from "@openlfcp/core";
-import { generateResourceDEK, sha256 } from "@openlfcp/crypto";
+import { generateResourceDEK, type ResourceDEK, sha256 } from "@openlfcp/crypto";
 import type { LfcpStorage } from "@openlfcp/storage";
 import {
   ABILITY,
@@ -17,6 +17,7 @@ import {
   addSequence,
   type ControlState,
   checkDataUnit,
+  type DataProfileCodec,
   type HaveVector,
   hasAbility,
   hasSequence,
@@ -25,6 +26,7 @@ import {
   KEY_EPOCH_REASON,
   type PrincipalDescriptor,
   parseDataUnit,
+  receiveDataUnit,
   rotateEpoch,
 } from "@openlfcp/wire";
 import { snapshotFrontier } from "../outbound.js";
@@ -120,12 +122,18 @@ export function exposingRevocationsSince(chain: LinearChain): readonly ExposingR
  * §8.3: the final frontier of the closing epoch from this installation's
  * locally verified accepted set, after a Data synchronisation: a server's
  * Have Vector is a fetch hint; a sequence that cannot be fetched and
- * verified, or that fails authorization, stays outside.
+ * verified, or that fails authorization, stays outside. With `data`, a unit
+ * counts only when recipients accept it as data (W §26.3 rules 6 and 7: it
+ * decrypts under the epoch's DEK and the Data Profile accepts it), so a unit
+ * no recipient can merge never pushes an honest later unit of its actor
+ * beyond the cutoff; rotateAfter always passes it. Without `data` only
+ * signature, authorization and the actor chain are checked (0.3.0).
  */
 export async function verifiedFrontier(
   channel: IdentityChannel,
   chain: LinearChain,
   local: LocalAccepted = { units: [], snapshot: [] },
+  data?: FrontierData,
 ): Promise<HaveVector> {
   const R = chain.state.resourceId;
   const opened = await channel.open(R);
@@ -163,10 +171,22 @@ export async function verifiedFrontier(
     const p = parsed.payload;
     const check = await checkDataUnit(chain, bytes, seen);
     if (check.kind !== "valid") continue;
+    const covered = hasSequence(local.snapshot, p.actor, p.actorSeq);
+    // W §26.3 rules 6 and 7: a unit recipients cannot decrypt, or whose plaintext
+    // the Data Profile refuses, is not accepted data. It is not counted and does
+    // not become the actor's latest unit, so the honest unit after it, which names
+    // the actor's last good unit (W §26.2), still links. Units a verified Snapshot
+    // covers are attested by it (W §29.3).
+    if (
+      !covered &&
+      data !== undefined &&
+      !(await acceptedAsData(chain, bytes, toHex(check.unitId), local, data))
+    )
+      continue;
     const actor = toHex(p.actor);
     const last = latest.get(actor);
     let links: boolean;
-    if (hasSequence(local.snapshot, p.actor, p.actorSeq)) links = true;
+    if (covered) links = true;
     else {
       // The actor's last accepted position: its latest held unit or the highest
       // sequence a verified Snapshot covers, whichever is later. A unit at or below
@@ -208,6 +228,54 @@ export interface LocalAccepted {
   readonly units: readonly Uint8Array[];
   /** The sequences verified Snapshots cover (W §29.3). */
   readonly snapshot: HaveVector;
+  /** Unit IDs (hex) this installation already refused as data: AEAD or Data Profile. */
+  readonly refused?: ReadonlySet<string>;
+}
+
+/** What the rotating client needs to judge a unit as data (W §26.3 rules 6 and 7). */
+export interface FrontierData {
+  /** The DEKs held for the Resource's epochs, by epoch number. */
+  readonly deks: ReadonlyMap<string, ResourceDEK>;
+  /**
+   * The Resource's Data Profile codec, when the application gives it: its
+   * `decode` is the profile's acceptance. Without it only decryption is
+   * checked here, and a profile refusal this installation recorded still
+   * counts (LocalAccepted.refused).
+   */
+  readonly profile?: DataProfileCodec<unknown>;
+}
+
+const opaque = (dataProfile: string): DataProfileCodec<Uint8Array> => ({
+  dataProfile,
+  encode: (v) => v,
+  decode: (v) => v,
+});
+
+/**
+ * Whether recipients accept the unit as data: its DEK is held and matches
+ * the epoch's commitment, it decrypts, and the profile accepts the plaintext
+ * (receiveDataUnit's own steps, on a fresh accepted set: "held" for a link
+ * not decided here means those steps passed). A unit this client cannot
+ * decrypt cannot be verified and stays outside the frontier (W §19).
+ */
+async function acceptedAsData(
+  chain: LinearChain,
+  bytes: Uint8Array,
+  unitId: string,
+  local: LocalAccepted,
+  data: FrontierData,
+): Promise<boolean> {
+  if (local.refused?.has(unitId) === true) return false;
+  const profile =
+    data.profile !== undefined && data.profile.dataProfile === chain.state.dataProfile
+      ? data.profile
+      : opaque(chain.state.dataProfile);
+  const r = await receiveDataUnit(chain, bytes, {
+    seen: new InMemorySeenUnits(),
+    dek: (epoch) => data.deks.get(String(epoch)),
+    profile,
+  });
+  return r.kind === "accepted" || r.kind === "held";
 }
 
 export type RotationStatus =
@@ -282,7 +350,10 @@ export async function rotateAfter(
         : "awaiting-rotation";
     },
     build: async (chain) => {
-      const frontier = await verifiedFrontier(o.channel, chain, await localAccepted(o, chain));
+      const frontier = await verifiedFrontier(o.channel, chain, await localAccepted(o, chain), {
+        deks: await fetchDeks(o.storage, o.secrets, o.channel, chain, o.installation),
+        ...profileFor(o, chain),
+      });
       const dek = (await getPendingDek(o.secrets, R, o.operation)) ?? generateResourceDEK();
       // The DEK before the record that commits to it (§9.1).
       await putPendingDek(o.secrets, R, o.operation, dek);
@@ -337,6 +408,15 @@ export async function rotateAfter(
  * stored accepted units and verified Snapshots, when the storage keeps them),
  * merged into the verified frontier (§8.3).
  */
+/** The codec the application gave for the Resource's Data Profile, if any. */
+const profileFor = (
+  o: FlowOptions,
+  chain: LinearChain,
+): { profile?: DataProfileCodec<unknown> } => {
+  const profile = o.dataProfiles?.find((p) => p.dataProfile === chain.state.dataProfile);
+  return profile === undefined ? {} : { profile };
+};
+
 async function localAccepted(o: FlowOptions, chain: LinearChain): Promise<LocalAccepted> {
   const st = o.storage as Partial<LfcpStorage>;
   if (st.dataUnits === undefined || st.snapshots === undefined) return { units: [], snapshot: [] };
@@ -358,7 +438,11 @@ async function localAccepted(o: FlowOptions, chain: LinearChain): Promise<LocalA
     "profile-unsupported",
   ] as const)
     for (const u of await st.dataUnits.withStatus(R, status)) units.push(u.bytes);
-  return { units, snapshot: await snapshotFrontier(st as LfcpStorage, R) };
+  // Units this installation refused as data: a failed decryption or a profile refusal.
+  const refused = new Set<string>();
+  for (const status of ["local-failure", "profile-rejected"] as const)
+    for (const u of await st.dataUnits.withStatus(R, status)) refused.add(toHex(u.unitId));
+  return { units, snapshot: await snapshotFrontier(st as LfcpStorage, R), refused };
 }
 
 /**

@@ -5,6 +5,7 @@ import { fromHex, type PrincipalId, principalId } from "@openlfcp/core";
 import {
   type AgreementKeyPair,
   importAgreementKey,
+  importResourceDEK,
   importSigningKey,
   sha256,
 } from "@openlfcp/crypto";
@@ -180,3 +181,7 @@ export function chainOfCert(label: string): CertificateChain {
 
 export const resourceOf = (name: string) =>
   fromHex((wire.fixtures.resources[name] as { id: Hex }).id.hex);
+
+/** The DEK of epoch 0 of a fixture Resource (`dek0`). */
+export const dek0Of = (name: string) =>
+  importResourceDEK(fromHex((wire.fixtures.resources[name] as unknown as { dek0: Hex }).dek0.hex));
