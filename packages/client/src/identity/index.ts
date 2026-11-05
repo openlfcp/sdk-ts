@@ -155,6 +155,13 @@ export {
   rotateIfExposed,
 } from "./revocation.js";
 export {
+  type AddToRosterOptions,
+  type AddToRosterResult,
+  addToRoster,
+  type RosterWrite,
+  writeRosterEntry,
+} from "./roster.js";
+export {
   type ExposingRevocation,
   exposingRevocationsSince,
   type FrontierData,

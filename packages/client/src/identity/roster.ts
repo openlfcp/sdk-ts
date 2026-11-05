@@ -1,16 +1,32 @@
-import type { ResourceId } from "@openlfcp/core";
+import {
+  fromHex,
+  LfcpError,
+  type ResourceId,
+  resourceId,
+  secureRandom,
+  toHex,
+} from "@openlfcp/core";
+import { ABILITY, hasAbility } from "@openlfcp/wire";
+import { loadControlChain } from "../storage.js";
 import {
   fetchDeks,
   genesisOwner,
+  IdentityConflict,
   loadIdentityDocument,
   runUnitPhase,
   sealIdentityUnit,
   syncChain,
 } from "./context.js";
 import { type RosterEntryValue, resourceRef } from "./document.js";
-import type { OperationJournal } from "./journal.js";
-import type { IdentityChannel } from "./network.js";
-import type { IdentityFlowOptions } from "./resource.js";
+import { newOperationId, OperationJournal } from "./journal.js";
+import {
+  ChannelPool,
+  type IdentityChannel,
+  IdentityRefused,
+  IdentityUnavailable,
+} from "./network.js";
+import type { LinearChain } from "./phases.js";
+import { type IdentityFlowOptions, identityTarget } from "./resource.js";
 
 /**
  * The roster of the Identity Resource (IDENTITY-PROFILE-01 §2.1): how the
@@ -68,4 +84,127 @@ export async function writeRosterEntry(
   return r.state === "committed-own"
     ? { state: "written" }
     : { state: "refused", code: r.code ?? "refused" };
+}
+
+export interface AddToRosterOptions extends IdentityFlowOptions {
+  /** The Resource to list (a Resource of the human: created or joined here). */
+  readonly resource: ResourceId;
+  /** A display name for the roster entry. */
+  readonly name?: string;
+  /**
+   * The entry's fields; by default taken from the Resource's Control Chain:
+   * its Data Profile, route endpoints and coordinator (stored here, or read
+   * from `url`).
+   */
+  readonly entry?: RosterEntryValue;
+  /** The Resource's coordinator, when its chain is not stored here. */
+  readonly url?: string;
+  /** Resume this operation. */
+  readonly operation?: string;
+}
+
+export type AddToRosterResult =
+  /** This installation wrote the entry. */
+  | { readonly kind: "added"; readonly operation: string; readonly resource: ResourceId }
+  /** The roster already lists the Resource (written earlier, or by another device). */
+  | { readonly kind: "present"; readonly operation: string; readonly resource: ResourceId }
+  /** This installation cannot write `I` (`holds(D, 2)` is false, e.g. a Read device, §7.2). */
+  | { readonly kind: "needs-writer" }
+  /** The coordinator refused the unit: the operation stays open; resume it with `operation`. */
+  | {
+      readonly kind: "document-incomplete";
+      readonly operation: string;
+      readonly resource: ResourceId;
+      readonly code: string;
+    }
+  | { readonly kind: "conflict" }
+  | { readonly kind: "unavailable"; readonly operation?: string; readonly reason: string };
+
+/**
+ * Adds a Resource to the roster of the Identity Resource as one durable
+ * operation (IDENTITY-PROFILE-01 §2.1, §6, §9): the entry the human's other
+ * installations read to reach the Resource (pairing step 10, reconciliation
+ * §7.1). For a Resource created or joined after `I` was filled (§5.1), for
+ * example a section created later on any personal device. Idempotent: an
+ * entry already present is not written again; a unit refused as stale
+ * after a rotation of `I` is written again in the current epoch; any other
+ * refusal leaves the operation open. Only a writer of `I` (the root or a
+ * personal device holding data/write there) may add entries (§3 AI4: a
+ * pairing or service device never writes the roster).
+ */
+export async function addToRoster(o: AddToRosterOptions): Promise<AddToRosterResult> {
+  const target = await identityTarget(o);
+  const me = o.installation.signer;
+  const journal = new OperationJournal(o.storage);
+  const pool = new ChannelPool(o.network);
+  let operation = o.operation;
+  try {
+    const channel = await pool.get(me, target.url);
+    const I = await syncChain(o.storage, channel, target.resource);
+    if (!hasAbility(I.state, me.descriptor.principalId, ABILITY.DATA_WRITE))
+      return { kind: "needs-writer" };
+    if (operation === undefined || (await journal.get(operation)) === undefined) {
+      const entry = o.entry ?? (await entryOf(o, pool, o.resource));
+      operation = operation ?? newOperationId("add-to-roster", secureRandom(8));
+      await journal.begin({
+        id: operation,
+        kind: "add-to-roster",
+        createdAt: o.now(),
+        intent: {
+          identity: toHex(target.resource),
+          resource: toHex(o.resource),
+          entry: { ...entry, ...(o.name === undefined ? {} : { name: o.name }) },
+        },
+      });
+    }
+    const op = await journal.load(operation);
+    const resource = resourceId(fromHex(op.intent.resource as string));
+    const written = await writeRosterEntry(
+      o,
+      channel,
+      journal,
+      op.id,
+      target.resource,
+      resource,
+      op.intent.entry as RosterEntryValue,
+    );
+    if (written.state === "refused")
+      return { kind: "document-incomplete", operation: op.id, resource, code: written.code };
+    await journal.setStatus(op.id, "done");
+    return { kind: written.state === "written" ? "added" : "present", operation: op.id, resource };
+  } catch (e) {
+    if (e instanceof IdentityUnavailable || e instanceof IdentityRefused)
+      return {
+        kind: "unavailable",
+        ...(operation === undefined ? {} : { operation }),
+        reason: e.message,
+      };
+    if (e instanceof IdentityConflict) return { kind: "conflict" };
+    throw e;
+  } finally {
+    pool.closeAll();
+  }
+}
+
+/** The roster entry of a Resource from its Control Chain (W §15, §20): profile, routes, coordinator. */
+async function entryOf(
+  o: AddToRosterOptions,
+  pool: ChannelPool,
+  resource: ResourceId,
+): Promise<RosterEntryValue> {
+  const stored = await loadControlChain(o.storage, resource);
+  let chain: LinearChain;
+  if (stored?.kind === "linear") chain = stored;
+  else if (o.url !== undefined)
+    chain = await syncChain(o.storage, await pool.get(o.installation.signer, o.url), resource);
+  else
+    throw new LfcpError(
+      "MISSING_DEPENDENCY",
+      "the Resource's chain is not stored here: give its entry or its coordinator URL",
+    );
+  return {
+    profile: chain.state.dataProfile,
+    endpoints: chain.state.route.endpoints.map((e) => e.url),
+    coordinator: chain.state.route.coordinatorUrl,
+  };
 }

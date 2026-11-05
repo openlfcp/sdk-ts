@@ -40,7 +40,8 @@ export type OperationKind =
   | "rotate"
   | "reconcile"
   | "accept-invitation"
-  | "create-resource";
+  | "create-resource"
+  | "add-to-roster";
 
 /** The state of a whole operation. */
 export type OperationStatus =
