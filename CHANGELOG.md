@@ -4,7 +4,14 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
-## Unreleased
+## 0.3.0 — unreleased
+
+The first release of the 0.3 line, published under the npm dist-tag `latest`:
+MVP 0.4, multi-device identity (one person, several devices). It adds APIs and
+changes some results of the identity flows; read the notes below before
+upgrading from 0.2.2. Dated when tagged.
+
+### Conformance, differential and headless pairing (LFCP-04-412)
 
 Multi-device identity, T4 (LFCP-04-412): conformance on all three identity
 corpora, a differential run against sdk-rs, live identity flows against the
@@ -51,12 +58,6 @@ reference server, and headless pairing.
   no entry or several, nothing written); `completePairing`'s candidates carry
   their roster `name`.
 
-## 0.3.0 — unreleased
-
-The first release of the 0.3 line, published under the npm dist-tag `latest`:
-MVP 0.4, multi-device identity (one person, several devices). It adds APIs and
-changes some results of the identity flows; read the notes below before
-upgrading from 0.2.2. Dated when tagged.
 
 Multi-device identity, wire codecs (LFCP-04-405, against openlfcp/spec PR 2,
 LFCP-WIRE-01 §7.2, §7.3, §14, §15, §17.4, §17.5, §23.3, §62). The spec pin
