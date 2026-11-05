@@ -2,7 +2,8 @@
 // (LFCP-039a). JavaScript with hand-written types (rust-server.d.mts):
 // sdk-ts has no Node type definitions.
 //
-// The server checkout is $LFCP_SERVER_DIR, or ../server next to sdk-ts. It
+// $LFCP_SERVER_BIN, when set, is a prebuilt server binary that is run as
+// is. Otherwise the server checkout is $LFCP_SERVER_DIR, or ../server next to sdk-ts. It
 // is built with `cargo build` into a shared target directory
 // ($LFCP_SERVER_TARGET_DIR, default ~/Library/Caches/openlfcp-sdk-ts-server-target
 // on macOS, or the XDG cache elsewhere), so only the first run compiles. Not
@@ -51,8 +52,18 @@ function cargoAvailable() {
   }
 }
 
-/** Builds the server once (cargo is incremental) and returns the binary path, or a skip reason. */
+/**
+ * Builds the server once (cargo is incremental) and returns the binary path,
+ * or a skip reason. $LFCP_SERVER_BIN names a prebuilt server binary instead
+ * (built from the server.lock commit elsewhere): nothing is built, and a
+ * missing file is a skip reason like a missing checkout.
+ */
 function build() {
+  const prebuilt = process.env.LFCP_SERVER_BIN;
+  if (prebuilt !== undefined && prebuilt !== "") {
+    const bin = resolve(ROOT, prebuilt);
+    return existsSync(bin) ? { bin } : { skip: `LFCP_SERVER_BIN=${prebuilt}: no such file` };
+  }
   if (!existsSync(join(SERVER_DIR, "Cargo.toml")))
     return { skip: `no server checkout at ${SERVER_DIR} (set LFCP_SERVER_DIR)` };
   if (!cargoAvailable()) return { skip: "cargo is not installed" };

@@ -233,7 +233,10 @@ Rust reference server over a real WebSocket (LFCP-039a): it builds
 `../server` with cargo (or `$LFCP_SERVER_DIR`) into a shared temporary
 target directory (`$LFCP_SERVER_TARGET_DIR`), starts it on a temporary
 state directory, and is skipped, saying why, when cargo or the checkout
-is missing. With `LFCP_REQUIRE_LIVE=1` a missing cargo or checkout fails
+is missing. `LFCP_SERVER_BIN` runs a prebuilt server binary instead of
+building one (built from the `server.lock` commit, e.g. in its own
+worktree next to sdk-rs at the server's `sdk-rs.lock`). With
+`LFCP_REQUIRE_LIVE=1` a missing cargo, checkout or binary fails
 the run instead (cargo is often not on the default `PATH`; on macOS add
 `~/.rustup/toolchains/stable-aarch64-apple-darwin/bin`). `server.lock`
 pins the server commit these live tests run against; CI checks out that
