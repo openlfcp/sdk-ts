@@ -601,9 +601,10 @@ async function runStep(
       report = { ...report, ...run.report };
       if (run.report.outcome === "accept") accepted.add(c.id);
       if (isControl(c) && run.report.outcome === "accept") {
-        report = { ...report, ...controlFacts(c.id) };
-        if (run.report.post_state !== null && (run.report.post_state as Json).already_in_chain)
+        // Exact bytes already in the chain: the same ACK, and no new state to report (W §47).
+        if ((run.report.post_state as Json)?.already_in_chain === true)
           report = { ...report, ack: "same ACK", transition: false };
+        else report = { ...report, ...controlFacts(c.id) };
       }
       if (c.kind === "data_unit") {
         const carried = carries(c, run.report);
@@ -869,6 +870,60 @@ function stated(expected: unknown, got: unknown): unknown {
   );
 }
 
+/**
+ * Facts sdk-ts derives beyond the state every step reports (its outcome,
+ * accepted IDs and post-state, the device table after a Control Record,
+ * exposure, rotations, a frontier, the phase of a phase input): exported
+ * only where the fixture's step states them, as sdk-rs does, so that the
+ * differential compares what both report. The checks see them either way.
+ */
+const STATED_ONLY = new Set([
+  "approval",
+  "counted",
+  "status",
+  "head",
+  "leaves",
+  "proven",
+  "used",
+  "uses",
+  "offered",
+  "rotates",
+  "rotator",
+  "descendant_receives_new_epoch",
+  "identity_aware",
+  "ledger",
+  "package_phases",
+  "ledger_after",
+  "client",
+  ...Object.keys(wire.fixtures.resources),
+]);
+
+/**
+ * What a candidate's chain proves (§5.3 step 8) is one group: where a step
+ * states any of it, the step reports all of it, and of the Resources only
+ * those the flow's fixture names.
+ */
+const CANDIDATE = new Set(["leaves", "proven", "used", "uses", "status"]);
+
+function statedOnly(
+  report: Report,
+  expected: Readonly<Record<string, unknown>>,
+  step: FlowStep,
+  f: FlowCase,
+) {
+  const named = new Set(f.expected.steps.flatMap((s) => Object.keys(s)));
+  const resources = new Set(Object.keys(wire.fixtures.resources));
+  const candidate =
+    report.leaves !== undefined &&
+    Object.keys(expected).some((k) => CANDIDATE.has(k) || resources.has(k));
+  for (const k of Object.keys(report)) {
+    if (candidate && (CANDIDATE.has(k) || (resources.has(k) && named.has(k)))) continue;
+    // The own Register phase of a DEVICE_GRANT step; a phase input's phase is always reported.
+    const optional = STATED_ONLY.has(k) || (k === "phase" && step.phase_input === undefined);
+    if (optional && !Object.hasOwn(expected, k)) delete report[k];
+  }
+}
+
 const identityFlow: Handler = async (vector) => {
   const f = vector as unknown as FlowCase;
   const steps: Report[] = [];
@@ -877,10 +932,11 @@ const identityFlow: Handler = async (vector) => {
   const accepted = new Set<string>();
   for (const step of f.inputs.steps) {
     const { report, ok } = await runStep(f, step, steps, accepted);
+    const e = f.expected.steps.find((s) => s.n === step.n) ?? {};
+    statedOnly(report, e, step, f);
     if (step.case !== undefined && String(step.case).startsWith("wire:"))
       report.case_id = wireId(step);
     steps.push(report);
-    const e = f.expected.steps.find((s) => s.n === step.n) ?? {};
     const name = `steps/${step.n}`;
     if (report.outcome === "N/A") {
       notApplicable.push({ step: step.n, reason: report.not_applicable });

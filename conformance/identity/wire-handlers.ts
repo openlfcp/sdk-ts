@@ -251,12 +251,8 @@ const principal: Handler = (c) => {
   ];
   return {
     checks,
-    report: accept([d.principalId], {
-      descriptor_cbor: toHex(encodePrincipalDescriptor(d)),
-      ed25519_public: toHex(d.ed25519PublicKey),
-      principal_id: toHex(d.principalId),
-      x25519_public: toHex(d.x25519PublicKey),
-    }),
+    // The descriptor's deterministic CBOR holds the ID and both keys, which the checks assert apart.
+    report: accept([d.principalId], { descriptor_cbor: toHex(encodePrincipalDescriptor(d)) }),
   };
 };
 
@@ -411,28 +407,31 @@ export function controlRecordReport(id: string): Report {
   const record = decodeControlRecord(bytes);
   const recordId = record.signed.id;
   const state = r.state;
+  // The exact bytes of a record already in the chain: the same ACK, no transition (§47);
+  // the state is the one before, so the report states the replay, not the state again.
+  if (!("code" in prior) && prior.records.some((x) => bytesEqual(x.signed.id, recordId)))
+    return accept([recordId], {
+      already_in_chain: true,
+      ack_record: [...RECORD_CASES.entries()].find(
+        ([rid, cid]) => rid === toHex(recordId) && cid !== id,
+      )?.[1],
+      control_seq: num(state.seq),
+      state_unchanged: prior.state.seq === state.seq && bytesEqual(prior.state.head, state.head),
+    });
   const post: Report = controlState(state);
   const type = record.body.type;
   if (type === "CAPABILITY_GRANT") {
     const g = state.grants.get(toHex(recordId));
     if (g !== undefined) post.issuer_root = principalLabel(g.issuerRoot);
   }
+  // W §17.4: whether a DEVICE_GRANT's leaf registers the device here or only binds it.
   const chain = chainOfBody(record);
-  if (chain !== undefined) {
+  if (record.body.type === "DEVICE_GRANT" && chain !== undefined) {
     const a = checkChainAuthority(chain, state.resourceId);
     if (a.valid) post.in_scope = a.inScope;
   }
   if (type === "DEVICE_REVOKE" && !("code" in prior))
     post.exposing = isExposingRevocation(prior.state, state);
-  // The exact bytes of a record already in the chain: the same ACK, no transition (§47).
-  if (!("code" in prior) && prior.records.some((x) => bytesEqual(x.signed.id, recordId))) {
-    post.already_in_chain = true;
-    post.ack_record = [...RECORD_CASES.entries()].find(
-      ([rid, cid]) => rid === toHex(recordId) && cid !== id,
-    )?.[1];
-    post.state_unchanged =
-      prior.state.seq === state.seq && bytesEqual(prior.state.head, state.head);
-  }
   const queries = c.expected?.post_state?.queries;
   if (queries !== undefined) post.queries = queriesOf(state, Object.keys(queries));
   return accept([recordId], post);
