@@ -60,7 +60,7 @@ const stable = (v) =>
  * Compares two reported values. Pushes conflicting paths to `diffs` and
  * paths given by one side only to `oneSided` (as `<path> (<side>)`).
  */
-export function compareValues(ts, rs, path, diffs, oneSided) {
+export function compareValues(ts, rs, path, diffs, oneSided, id = path.split(/[.#]/)[0]) {
   if (ts === undefined || rs === undefined) {
     if (ts !== undefined) oneSided.push(`${path} (sdk-ts)`);
     if (rs !== undefined) oneSided.push(`${path} (sdk-rs)`);
@@ -73,7 +73,7 @@ export function compareValues(ts, rs, path, diffs, oneSided) {
   }
   if (isObject(ts) && isObject(rs)) {
     for (const k of [...new Set([...Object.keys(ts), ...Object.keys(rs)])].sort())
-      compareValues(ts[k], rs[k], `${path}.${k}`, diffs, oneSided);
+      compareValues(ts[k], rs[k], `${path}.${k}`, diffs, oneSided, id);
     return;
   }
   // A frontier entry without extra ranges is its contiguous count (W §28.1): n = {contiguous: n, extra_ranges: []}.
@@ -85,14 +85,17 @@ export function compareValues(ts, rs, path, diffs, oneSided) {
   rs = frontier(rs);
   const field = path.slice(path.lastIndexOf(".") + 1);
   const asSet = (v) => (SET_FIELDS.has(field) && Array.isArray(v) ? [...v].map(stable).sort() : v);
-  if (stable(asSet(ts)) !== stable(asSet(rs))) diffs.push({ path, ts, rs });
+  if (stable(asSet(ts)) !== stable(asSet(rs))) diffs.push({ id, path, ts, rs });
 }
 
-/** One outcome (a case, or a flow step) against the other side's. */
-function compareOutcome(ts, rs, path, out) {
+/**
+ * One outcome (a case, or a flow step) against the other side's. `id` is
+ * the case ID, passed apart from the path: IDs contain dots (flow.*).
+ */
+function compareOutcome(ts, rs, path, out, id = path) {
   const na = (r) => r?.outcome === "N/A";
   if (ts === undefined || rs === undefined) {
-    out.missing.push({ path, side: ts === undefined ? "sdk-ts" : "sdk-rs" });
+    out.missing.push({ id, path, side: ts === undefined ? "sdk-ts" : "sdk-rs" });
     return;
   }
   const flow = Array.isArray(ts.steps) || Array.isArray(rs.steps);
@@ -107,6 +110,8 @@ function compareOutcome(ts, rs, path, out) {
             .join("; ")
         : (r.not_applicable ?? r.reason);
     out.na.push({
+      id,
+      step: path !== id,
       path,
       side: na(ts) && na(rs) ? "both" : na(ts) ? "sdk-ts" : "sdk-rs",
       reason: [na(ts) ? `sdk-ts: ${reasons(ts)}` : "", na(rs) ? `sdk-rs: ${reasons(rs)}` : ""]
@@ -123,7 +128,7 @@ function compareOutcome(ts, rs, path, out) {
     if (NOT_COMPARED.has(k) || k === "steps") continue;
     if (k === "outcome" && (na(ts) || na(rs))) continue;
     if (k === "diagnostic" && (ts[k] === undefined || rs[k] === undefined)) continue;
-    compareValues(ts[k], rs[k], `${path}.${k}`, diffs, oneSided);
+    compareValues(ts[k], rs[k], `${path}.${k}`, diffs, oneSided, id);
   }
   out.oneSided.push(...oneSided);
   for (const d of diffs) out.diffs.push(d);
@@ -132,7 +137,7 @@ function compareOutcome(ts, rs, path, out) {
     const a = byN(ts.steps);
     const b = byN(rs.steps);
     for (const n of [...new Set([...a.keys(), ...b.keys()])].sort((x, y) => x - y))
-      compareOutcome(a.get(n), b.get(n), `${path}#${n}`, out);
+      compareOutcome(a.get(n), b.get(n), `${path}#${n}`, out, id);
   }
   if (diffs.length === 0) out.matched.push(path);
 }
@@ -150,16 +155,11 @@ export function compareExports(name, ts, rs) {
   const ids = [...new Set([...Object.keys(ts.cases), ...Object.keys(rs.cases)])].sort();
   for (const id of ids) compareOutcome(ts.cases[id], rs.cases[id], id, out);
   out.cases = ids.length;
-  const caseOf = (path) => path.split(/[.#]/)[0];
-  const divergent = new Set(out.diffs.map((d) => caseOf(d.path)));
+  const divergent = new Set(out.diffs.map((d) => d.id));
   // A flow is compared step by step even when one side calls it N/A in part.
   const isFlow = (id) => Array.isArray(ts.cases[id]?.steps) && Array.isArray(rs.cases[id]?.steps);
-  const naCases = new Set(
-    out.na.filter((n) => !n.path.includes("#") && !isFlow(n.path)).map((n) => n.path),
-  );
-  const naSteps = new Set(
-    out.na.filter((n) => n.path.includes("#") || isFlow(n.path)).map((n) => caseOf(n.path)),
-  );
+  const naCases = new Set(out.na.filter((n) => !n.step && !isFlow(n.id)).map((n) => n.id));
+  const naSteps = new Set(out.na.filter((n) => n.step || isFlow(n.id)).map((n) => n.id));
   out.counts = {
     divergent: divergent.size,
     na: naCases.size,
@@ -330,6 +330,22 @@ function selfTest() {
   );
   if (v.unexplained.map((u) => u.path).join() !== "f#1.phase") fail(`unexplained ${stable(v)}`);
   if (v.stale.map((s) => s.path).join() !== "gone.outcome") fail(`stale ${stable(v.stale)}`);
+  // Case IDs with dots (flow.*) are counted as themselves, not by their prefix.
+  const dotted = compareExports(
+    "identity-wire.json",
+    mk({
+      "flow.a": { outcome: "accept", accepted_ids: [], post_state: null },
+      "flow.b": { outcome: "accept", accepted_ids: [], post_state: null },
+      "flow.c": { outcome: "accept", accepted_ids: [], post_state: null },
+    }),
+    mk({
+      "flow.a": { outcome: "AUTHORIZATION_FAILED", accepted_ids: [], post_state: null },
+      "flow.b": { outcome: "AUTHORIZATION_FAILED", accepted_ids: [], post_state: null },
+      "flow.c": { outcome: "accept", accepted_ids: [], post_state: null },
+    }),
+  );
+  if (stable(dotted.counts) !== stable({ divergent: 2, na: 0, withNaSteps: 0, match: 1 }))
+    fail(`dotted IDs ${stable(dotted.counts)}`);
   const pins = compareExports("x", mk({}), { ...mk({}), spec: { ...spec, commit: "d" } });
   if (pins.problems.length !== 1) fail("differing spec pins are not a problem");
   process.stdout.write("identity-differential self-test: ok\n");
