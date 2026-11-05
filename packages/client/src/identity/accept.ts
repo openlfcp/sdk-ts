@@ -33,15 +33,12 @@ import {
   genesisOwner,
   IdentityConflict,
   type KeyDelivery,
-  loadIdentityDocument,
   runControlPhase,
-  runUnitPhase,
-  sealIdentityUnit,
   storeDek,
   syncChain,
 } from "./context.js";
 import { type RegistrationResult, registerDevice } from "./devices.js";
-import { type RosterEntryValue, resourceRef } from "./document.js";
+import type { RosterEntryValue } from "./document.js";
 import {
   type JournalOperation,
   newOperationId,
@@ -52,6 +49,7 @@ import {
 import { ChannelPool, IdentityRefused, IdentityUnavailable } from "./network.js";
 import { classifyRegister, type LinearChain } from "./phases.js";
 import { type IdentityFlowOptions, identityTarget } from "./resource.js";
+import { writeRosterEntry } from "./roster.js";
 
 /**
  * Invitations accepted by a device and Resources created from a device
@@ -143,36 +141,16 @@ async function keyAndList(
       others.push(...r.results);
     }
   // §7.2 step 4, §7.3: the roster entry, so the human's other installations reach X.
-  const iChannel = await pool.get(me, iUrl);
-  const openI = async () => {
-    const chainI = await syncChain(o.storage, iChannel, I.state.resourceId);
-    const doc = o.document(I.state.resourceId, genesisOwner(chainI));
-    const deksI = await fetchDeks(o.storage, o.secrets, iChannel, chainI, o.installation);
-    const load = await loadIdentityDocument({ channel: iChannel, chain: chainI, deks: deksI, doc });
-    return { chainI, doc, deksI, load };
-  };
-  let roster = (await openI()).doc.roster().has(resourceRef(X));
-  if (!roster) {
-    const r = await runUnitPhase(iChannel, journal, operation, {
-      id: "roster",
-      resource: I.state.resourceId,
-      // A unit refused after a rotation of I is written again in the new epoch (W §19.1).
-      rebuildOn: ["STALE_DATA_EPOCH"],
-      build: async () => {
-        const { chainI, doc, deksI, load } = await openI();
-        return sealIdentityUnit({
-          storage: o.storage,
-          chain: chainI,
-          deks: deksI,
-          signer: me,
-          doc,
-          latest: load.latest,
-          intents: [{ intent: "roster.put", key: resourceRef(X), entry }],
-        });
-      },
-    });
-    roster = r.state === "committed-own";
-  }
+  const written = await writeRosterEntry(
+    o,
+    await pool.get(me, iUrl),
+    journal,
+    operation,
+    I.state.resourceId,
+    X,
+    entry,
+  );
+  const roster = written.state !== "refused";
   return { rootKeys, siblings: Object.freeze(others), roster };
 }
 
