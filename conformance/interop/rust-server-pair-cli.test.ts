@@ -45,11 +45,9 @@ afterAll(async () => {
   for (const d of dirs) removeDir(d);
 });
 
-declare const console: { warn(...a: unknown[]): void };
-
 describe("lfcp-node pair against the Rust reference server", { timeout: 300_000 }, () => {
-  it("pairs a service device for two named sections; the approver trims one; it prints its fingerprint and the result", async () => {
-    if (server === undefined) return void console.warn(`skipped: ${skip}`);
+  it("pairs a service device for two named sections; the approver trims one; it prints its fingerprint and the result", async (ctx) => {
+    if (server === undefined) return ctx.skip(`no reference server: ${skip}`);
     const url = server.url;
     const P = installation(51);
     const notes = await hostResource(P, url, "Notes");
@@ -146,8 +144,8 @@ describe("lfcp-node pair against the Rust reference server", { timeout: 300_000 
     }
   });
 
-  it("an unknown section writes no request; a request resumed after --wait is rejected when the session is cancelled", async () => {
-    if (server === undefined) return;
+  it("an unknown section writes no request; a request resumed after --wait is rejected when the session is cancelled", async (ctx) => {
+    if (server === undefined) return ctx.skip(`no reference server: ${skip}`);
     const url = server.url;
     const P = installation(52);
     const notes = await hostResource(P, url, "Notes");

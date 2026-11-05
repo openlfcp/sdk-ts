@@ -80,8 +80,8 @@ describe("identity flows against the Rust reference server", { timeout: 300_000 
   let A: Node;
   let B: Node;
 
-  it("hosts X and creates the Identity Resource on a server with identity-01", async () => {
-    if (server === undefined) return void console.warn(`skipped: ${skip}`);
+  it("hosts X and creates the Identity Resource on a server with identity-01", async (ctx) => {
+    if (server === undefined) return ctx.skip(`no reference server: ${skip}`);
     url = server.url;
     const channel = await P.network.connect(P.installation.signer, url);
     expect(channel.extensions).toContain("identity-01");
@@ -99,8 +99,8 @@ describe("identity flows against the Rust reference server", { timeout: 300_000 
     expect(chain.state.dataProfile).toBe("org.openlfcp.identity.v1");
   });
 
-  it("pairs A (Full) through a link: the same fingerprint on both sides, approved, registered in I and X", async () => {
-    if (server === undefined) return;
+  it("pairs A (Full) through a link: the same fingerprint on both sides, approved, registered in I and X", async (ctx) => {
+    if (server === undefined) return ctx.skip(`no reference server: ${skip}`);
     const r = await pair(P, 42, "full");
     A = r.B;
     const fp = deviceFingerprint(A.installation.signer.descriptor.principalId);
@@ -120,8 +120,8 @@ describe("identity flows against the Rust reference server", { timeout: 300_000 
     );
   });
 
-  it("pairs B (Edit) through A, a managing device", async () => {
-    if (server === undefined) return;
+  it("pairs B (Edit) through A, a managing device", async (ctx) => {
+    if (server === undefined) return ctx.skip(`no reference server: ${skip}`);
     const r = await pair(A, 43, "edit");
     B = r.B;
     if (r.done.kind !== "approved" || r.done.certificate === null)
@@ -132,8 +132,8 @@ describe("identity flows against the Rust reference server", { timeout: 300_000 
     expect(r.done.candidates.every((c) => c.status === "ready")).toBe(true);
   });
 
-  it("the same-root Key Package: B (no key/distribute) seals X's DEK to its root, not to a stranger", async () => {
-    if (server === undefined) return;
+  it("the same-root Key Package: B (no key/distribute) seals X's DEK to its root, not to a stranger", async (ctx) => {
+    if (server === undefined) return ctx.skip(`no reference server: ${skip}`);
     const channel = await B.network.connect(B.installation.signer, url);
     try {
       const x = await syncChain(B.storage, channel, X.resource);
@@ -164,8 +164,8 @@ describe("identity flows against the Rust reference server", { timeout: 300_000 
     }
   });
 
-  it("revokes A: I and X record it and rotate; B, issued by A, is suspended and reads nothing", async () => {
-    if (server === undefined) return;
+  it("revokes A: I and X record it and rotate; B, issued by A, is suspended and reads nothing", async (ctx) => {
+    if (server === undefined) return ctx.skip(`no reference server: ${skip}`);
     const a = A.installation.signer.descriptor.principalId;
     // I rotated already as each pairing session closed (§5.3 step 9); X never did.
     const before = new Map<string, bigint>();
@@ -192,8 +192,8 @@ describe("identity flows against the Rust reference server", { timeout: 300_000 
     await expect(chainOf(B, url, X.resource)).rejects.toBeInstanceOf(IdentityRefused);
   });
 
-  it("the revoked A reads the Control prefix through its revocation only, and proves it", async () => {
-    if (server === undefined) return;
+  it("the revoked A reads the Control prefix through its revocation only, and proves it", async (ctx) => {
+    if (server === undefined) return ctx.skip(`no reference server: ${skip}`);
     const a = A.installation.signer.descriptor.principalId;
     const channel = await A.network.connect(A.installation.signer, url);
     try {
@@ -217,5 +217,3 @@ describe("identity flows against the Rust reference server", { timeout: 300_000 
     expect(status.kind).toBe("revocation-proven");
   });
 });
-
-declare const console: { warn(...a: unknown[]): void };
