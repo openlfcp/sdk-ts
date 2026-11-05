@@ -4,6 +4,44 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## Unreleased
+
+Multi-device identity, T4 (LFCP-04-412): conformance on all three identity
+corpora, a differential run against sdk-rs, live identity flows against the
+reference server, and headless pairing.
+
+- Conformance runs every case of the three identity corpora as a suite:
+  all 387 of LFCP-IDENTITY-TEST-VECTORS-01 (before: the 196 Control Records,
+  with four post-state fields), with the whole post-state of W §79 the
+  corpus lists, certificate chains, Data Units with their plaintext, Key
+  Packages and the Key Package matrix, Snapshots, session reads and uploads
+  (W §41) and the rotator test; the 191 of IDENTITY-PROFILE-TEST-VECTORS-01;
+  and the 22 fixtures of IDENTITY-FLOW-FIXTURES-01 step by step. A step
+  sdk-ts cannot express on a fixture's bytes is reported as not applicable,
+  with its reason: a runner part of its own, never a pass and never a todo.
+- With `LFCP_IDENTITY_REPORT_DIR` set, each identity suite exports what
+  sdk-ts decided for every case in the `lfcp-identity-outcomes/1` format
+  sdk-rs exports too. `scripts/identity-differential.mjs` compares the two
+  exports case by case and step by step; every divergence must be explained,
+  with the side the text supports, in
+  `conformance/identity/differential-known.json`. Against sdk-rs `750ac8f`:
+  no divergence.
+- `server.lock` pins the reference server at `c12c3dd` (identity-01 at
+  `mvp-0.4-baseline.2`, hosting by the Genesis owner, the Control read of a
+  revoked reader). `rust-server-identity.test.ts` runs pairing, approval,
+  the same-root Key Package, revocation with rotation and the cascade, and a
+  revoked device's Control read and proof against it over a real WebSocket.
+  `LFCP_SERVER_BIN` runs the live tests on a prebuilt server binary.
+- `@openlfcp/storage-node`: `lfcp-node pair`, the headless pairing of a
+  service device (IDENTITY-PROFILE-01 §5.3, decision I6): the sections by
+  roster name, the fingerprint printed, the result from the chain, resumable.
+  The package now depends on `@openlfcp/client`, `wire`, `crypto` and
+  `shared-objects`, and is published after `client`.
+- `@openlfcp/client`: `requestPairing` takes `sections`, roster names
+  resolved after the link is verified (`unknown-sections` when one matches
+  no entry or several, nothing written); `completePairing`'s candidates carry
+  their roster `name`.
+
 ## 0.3.0 — unreleased
 
 The first release of the 0.3 line, published under the npm dist-tag `latest`:
