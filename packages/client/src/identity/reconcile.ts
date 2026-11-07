@@ -46,7 +46,7 @@ import {
 import { classifyRegister, classifyRevoke, type LinearChain, type PhaseState } from "./phases.js";
 import { type IdentityFlowOptions, identityTarget } from "./resource.js";
 import { rotateIfExposed } from "./revocation.js";
-import { type RotationOutcome, resumeRotations } from "./rotation.js";
+import { checkFlowProfiles, type RotationOutcome, resumeRotations } from "./rotation.js";
 
 /**
  * Reconciliation (IDENTITY-PROFILE-01 §7.1): carries the Identity
@@ -205,6 +205,7 @@ export async function reconcileDevices(
    */
   readonly document: DocumentWrite;
 }> {
+  checkFlowProfiles(o);
   const target = await identityTarget(o);
   const me = o.installation.signer;
   const journal = new OperationJournal(o.storage);

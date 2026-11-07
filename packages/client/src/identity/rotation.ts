@@ -40,7 +40,7 @@ import {
   storeDek,
   withoutEquivocations,
 } from "./context.js";
-import type { FlowOptions } from "./devices.js";
+import type { FlowOptions, UnitProfile } from "./devices.js";
 import {
   getPendingDek,
   OperationJournal,
@@ -135,6 +135,7 @@ export async function verifiedFrontier(
   local: LocalAccepted = { units: [], snapshot: [] },
   data?: FrontierData,
 ): Promise<HaveVector> {
+  if (data?.profile !== undefined) checkUnitProfile(data.profile, "FrontierData.profile");
   const R = chain.state.resourceId;
   const opened = await channel.open(R);
   const ranges =
@@ -180,7 +181,7 @@ export async function verifiedFrontier(
     if (
       !covered &&
       data !== undefined &&
-      !(await acceptedAsData(chain, bytes, toHex(check.unitId), local, data))
+      !(await acceptedAsData(chain, bytes, toHex(check.unitId), p.actor, local, data))
     )
       continue;
     const actor = toHex(p.actor);
@@ -247,12 +248,15 @@ export interface FrontierData {
   /** The DEKs held for the Resource's epochs, by epoch number. */
   readonly deks: ReadonlyMap<string, ResourceDEK>;
   /**
-   * The Resource's Data Profile codec, when the application gives it: its
-   * `decode` is the profile's acceptance. Without it only decryption is
+   * The Resource's Data Profile, when the application gives it, as its
+   * receiver checks one unit: `codecFor({resourceId, actor})` is bound to the
+   * unit's Resource and signer, and the codec's `decode` is the profile's
+   * acceptance (the change's actor included). Without it only decryption is
    * checked here, and a profile refusal this installation recorded still
-   * counts (LocalAccepted.refused).
+   * counts (LocalAccepted.refused). 0.3.1 took a bare codec, which cannot
+   * bind the actor: one without `codecFor` is refused (TypeError).
    */
-  readonly profile?: DataProfileCodec<unknown>;
+  readonly profile?: UnitProfile;
 }
 
 const opaque = (dataProfile: string): DataProfileCodec<Uint8Array> => ({
@@ -272,14 +276,16 @@ async function acceptedAsData(
   chain: LinearChain,
   bytes: Uint8Array,
   unitId: string,
+  actor: PrincipalId,
   local: LocalAccepted,
   data: FrontierData,
 ): Promise<boolean> {
   if (local.accepted?.has(unitId) === true) return true;
   if (local.refused?.has(unitId) === true) return false;
+  // The receiver's own check of this unit: bound to its Resource and signer (W §26.3 rule 7).
   const profile =
     data.profile !== undefined && data.profile.dataProfile === chain.state.dataProfile
-      ? data.profile
+      ? data.profile.codecFor({ resourceId: chain.state.resourceId, actor })
       : opaque(chain.state.dataProfile);
   const r = await receiveDataUnit(chain, bytes, {
     seen: new InMemorySeenUnits(),
@@ -331,6 +337,7 @@ export async function rotateAfter(
     readonly revokedAt: bigint;
   },
 ): Promise<RotationOutcome> {
+  checkFlowProfiles(o);
   const journal = new OperationJournal(o.storage);
   const me = o.installation.signer;
   const R = o.resource;
@@ -419,14 +426,33 @@ export async function rotateAfter(
  * stored accepted units and verified Snapshots, when the storage keeps them),
  * merged into the verified frontier (§8.3).
  */
-/** The codec the application gave for the Resource's Data Profile, if any. */
-const profileFor = (
-  o: FlowOptions,
-  chain: LinearChain,
-): { profile?: DataProfileCodec<unknown> } => {
-  const profile = o.dataProfiles?.find((p) => p.dataProfile === chain.state.dataProfile);
+/** The profile the application gave for the Resource's Data Profile, if any. */
+const profileFor = (o: FlowOptions, chain: LinearChain): { profile?: UnitProfile } => {
+  const profile = o.profiles?.find((p) => p.dataProfile === chain.state.dataProfile);
   return profile === undefined ? {} : { profile };
 };
+
+/**
+ * A profile given where a per-unit check is needed must be one: a bare codec
+ * (0.3.1's FlowOptions.dataProfiles, FrontierData.profile) cannot bind the
+ * change's actor to the unit's signer, so it is refused, never used as a
+ * weaker check (W §26.3 rule 7).
+ */
+function checkUnitProfile(profile: UnitProfile, where: string): void {
+  if (typeof (profile as Partial<UnitProfile>).codecFor !== "function")
+    throw new TypeError(
+      `${where} needs a per-unit profile (dataProfile and codecFor({resourceId, actor})), not a bare codec`,
+    );
+}
+
+/** The flow options of a rotation: 0.3.1's bare `dataProfiles` is refused, never checked less. */
+export function checkFlowProfiles(o: FlowOptions): void {
+  if ((o as { readonly dataProfiles?: unknown }).dataProfiles !== undefined)
+    throw new TypeError(
+      "FlowOptions.dataProfiles (bare codecs, 0.3.1) is replaced by FlowOptions.profiles (codecFor per unit): a codec without the unit's signer cannot check the change's actor",
+    );
+  for (const p of o.profiles ?? []) checkUnitProfile(p, "FlowOptions.profiles");
+}
 
 async function localAccepted(o: FlowOptions, chain: LinearChain): Promise<LocalAccepted> {
   const st = o.storage as Partial<LfcpStorage>;
@@ -472,6 +498,7 @@ async function localAccepted(o: FlowOptions, chain: LinearChain): Promise<LocalA
 export async function resumeRotations(
   o: FlowOptions & { readonly pool: ChannelPool },
 ): Promise<readonly RotationOutcome[]> {
+  checkFlowProfiles(o);
   const journal = new OperationJournal(o.storage);
   const out: RotationOutcome[] = [];
   for (const op of await journal.list())

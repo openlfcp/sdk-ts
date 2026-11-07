@@ -45,6 +45,7 @@ export {
   type RegistrationStatus,
   registerDevice,
   signChain,
+  type UnitProfile,
 } from "./devices.js";
 export {
   type DeviceEntryValue,

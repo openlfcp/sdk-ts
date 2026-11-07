@@ -15,7 +15,6 @@ import {
   type ControlState,
   certificateChain,
   checkDeviceCertificatePayload,
-  type DataProfileCodec,
   DEVICE_ABILITY,
   DEVICE_KIND,
   type DeviceCertificate,
@@ -30,6 +29,7 @@ import {
   signDeviceCertificate,
   validateControlChain,
 } from "@openlfcp/wire";
+import type { DataProfileHandler } from "../apply.js";
 import {
   deliverKeys,
   fetchDeks,
@@ -69,12 +69,25 @@ export interface FlowOptions {
   readonly network: IdentityNetwork;
   readonly now: () => number;
   /**
-   * The application's Data Profile codecs. A rotation uses the Resource's
-   * codec to judge which units recipients accept as data (W §26.3 rule 7);
-   * without one, only decryption and recorded refusals are checked.
+   * The application's Data Profiles, each as its receiver checks one unit:
+   * `codecFor({resourceId, actor})`, the codec bound to the unit's Resource
+   * and signer (the DataProfileHandler hook; e.g. shared-objects'
+   * sharedObjectsUnitProfile, sectionsUnitProfile, identityUnitProfile). A
+   * rotation judges each unit with its Resource's profile, as recipients do
+   * (W §26.3 rules 6 and 7, including the change's actor); without one, only
+   * decryption and recorded refusals are checked. Replaces 0.3.1's
+   * `dataProfiles` (bare codecs, which cannot bind the actor): a flow given
+   * `dataProfiles` throws instead of checking less.
    */
-  readonly dataProfiles?: readonly DataProfileCodec<unknown>[];
+  readonly profiles?: readonly UnitProfile[];
 }
+
+/**
+ * One Data Profile's per-unit check (the receiver's DataProfileHandler
+ * `dataProfile` and `codecFor`): `decode` of the codec it returns throws to
+ * reject the unit's plaintext.
+ */
+export type UnitProfile = Pick<DataProfileHandler<unknown>, "dataProfile" | "codecFor">;
 
 const hasCode = (mask: readonly bigint[], code: bigint) => mask.includes(code);
 

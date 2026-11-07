@@ -39,6 +39,7 @@ import {
 import { classifyRevoke, type LinearChain } from "./phases.js";
 import { type IdentityFlowOptions, identityTarget } from "./resource.js";
 import {
+  checkFlowProfiles,
   exposingRevocationsSince,
   type RotationOutcome,
   resumeRotations,
@@ -274,6 +275,7 @@ export async function revokeDevice(
     readonly operation?: string;
   },
 ): Promise<RevokeDeviceResult> {
+  checkFlowProfiles(o);
   const target = await identityTarget(o);
   const me = o.installation.signer.descriptor.principalId;
   const selfRetire = bytesEqual(me, o.device);
@@ -532,6 +534,7 @@ export async function rotateIfExposed(
     readonly resource: ResourceId;
   },
 ): Promise<RotationOutcome> {
+  checkFlowProfiles(o);
   // A rotation this operation already started resumes from its journaled phase: its
   // KEY_EPOCH may be committed while its DEK still waits in the pending slot (§9.1).
   const started = phaseOf(

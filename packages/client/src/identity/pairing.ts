@@ -79,6 +79,7 @@ import { classifyCancel, classifyConsume, classifyRegister, type LinearChain } f
 import { type IdentityFlowOptions, identityTarget } from "./resource.js";
 import { rotateIfExposed } from "./revocation.js";
 import type { RotationOutcome } from "./rotation.js";
+import { checkFlowProfiles } from "./rotation.js";
 
 /**
  * Pairing a new installation, the managing side `A` (IDENTITY-PROFILE-01
@@ -551,6 +552,7 @@ export async function approvePairing(
     readonly addedAt?: string;
   },
 ): Promise<ApprovalResult> {
+  checkFlowProfiles(o);
   const { I, R, J, url } = await readSession(o, o.review.session);
   const pool = new ChannelPool(o.network);
   const me = o.installation.signer;
@@ -697,6 +699,7 @@ export async function resumeApproval(
   o: IdentityFlowOptions,
   operation: string,
 ): Promise<ApprovalResult> {
+  checkFlowProfiles(o);
   const journal = new OperationJournal(o.storage);
   const pool = new ChannelPool(o.network);
   const me = o.installation.signer;
@@ -881,6 +884,7 @@ export type CancelResult =
 export async function cancelPairing(
   o: IdentityFlowOptions & { readonly session: string; readonly reject?: string },
 ): Promise<CancelResult> {
+  checkFlowProfiles(o);
   const { I, R, J, url } = await readSession(o, o.session);
   const journal = new OperationJournal(o.storage);
   const pool = new ChannelPool(o.network);
