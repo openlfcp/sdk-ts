@@ -4,6 +4,52 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.3.2 — unreleased
+
+A patch of 0.3.1 from the review of the plugin that uses it (obsidian#109,
+decision I17). Dated when tagged.
+
+### Fixed
+
+- The final frontier of a key rotation checked a unit's Data Profile with a
+  codec that saw the plaintext only. A unit signed by actor A that carries
+  another actor's Automerge change, which every receiver refuses
+  (`CHANGE_ACTOR_MISMATCH`), therefore counted as A's latest unit, and A's
+  honest next unit fell beyond the cutoff and was quarantined
+  (`STALE_DATA_EPOCH`, `BEYOND_CUTOFF`) after a device removal. A unit is
+  now judged with its own Resource and signer, as its receivers judge it
+  (LFCP-WIRE-01 §26.3 rule 7, §19; IDENTITY-PROFILE-01 §8.3).
+
+### Changed (breaking for 0.3.1 callers of the frontier profile)
+
+- `FlowOptions.dataProfiles` (bare `DataProfileCodec`s) is replaced by
+  `FlowOptions.profiles`: one `UnitProfile` per Data Profile, the receiver's
+  `DataProfileHandler` hook (`dataProfile` and
+  `codecFor({resourceId, actor})`). A bare codec cannot bind the change's
+  actor to the unit's signer, so it is no longer accepted: the flows that
+  rotate (`revokeDevice`, `reconcileDevices`, `approvePairing`,
+  `resumeApproval`, `cancelPairing`, `rotateIfExposed`, `resumeRotations`,
+  `rotateAfter`) throw a `TypeError` when given `dataProfiles`, before
+  doing anything, rather than checking less. `FrontierData.profile`
+  (`verifiedFrontier`'s fourth argument) is likewise a `UnitProfile`; a
+  bare codec there is a `TypeError`. Without a profile the behaviour is
+  0.3.1's (decryption and recorded refusals only).
+
+### Added
+
+- `@openlfcp/shared-objects`: `sharedObjectsCodecFor` and
+  `sharedObjectsUnitProfile`; `@openlfcp/shared-objects/sections`:
+  `sectionsCodecFor` and `sectionsUnitProfile`;
+  `@openlfcp/shared-objects/identity`: `identityCodecFor` and
+  `identityUnitProfile`. Each is its profile's per-unit codec without a
+  replica (framing, change structure and the change's actor, the same
+  check the profile's receiver applies; `SharedObjectsDataProfile.codecFor`
+  and `SharedSectionsDataProfile.codecFor` now return it), and a
+  `UnitProfile` to pass in `FlowOptions.profiles`. The Identity Profile's
+  writer-class rules (AI0–AI4) need the Control state at the unit's
+  `control_ref` and stay with the document's admission.
+- `@openlfcp/client`: the `UnitProfile` type.
+
 ## 0.3.1 — unreleased
 
 A patch of 0.3.0: one fix and one additive API, both found by the plugin's
