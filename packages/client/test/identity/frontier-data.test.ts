@@ -88,7 +88,7 @@ describe("the rotation frontier counts only data recipients accept", { timeout: 
         return v;
       },
     };
-    // FlowOptions.profiles (0.3.2): the profile as its receiver checks one unit (codecFor).
+    // FlowOptions.profiles (0.4.0): the profile as its receiver checks one unit (codecFor).
     expect(
       await rotate("probe-profile", {
         profiles: [{ dataProfile: profile.dataProfile, codecFor: () => profile }],

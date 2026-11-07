@@ -1,6 +1,6 @@
 // The rotation frontier judges each unit as its recipients do, with the
 // unit's own Resource and signer (LFCP-WIRE-01 §19, §26.3 rules 6 and 7;
-// IDENTITY-PROFILE-01 §8.3), through FlowOptions.profiles (0.3.2). Review
+// IDENTITY-PROFILE-01 §8.3), through FlowOptions.profiles (0.4.0). Review
 // obsidian#109b: a unit signed by A that carries another actor's change
 // (CHANGE_ACTOR_MISMATCH at every receiver) must not count, so that A's
 // honest next unit stays within the frontier; and the Identity Resource's

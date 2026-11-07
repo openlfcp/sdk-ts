@@ -4,10 +4,12 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
-## 0.3.2 — unreleased
+## 0.4.0 — unreleased
 
-A patch of 0.3.1 from the review of the plugin that uses it (obsidian#109,
-decision I17). Dated when tagged.
+The 0.4 line: one fix of 0.3.1 from the review of the plugin that uses it
+(obsidian#109, decision I17). Its API change is breaking for callers of the
+frontier profile, so it is a minor version, not 0.3.2 (decision I19).
+Dated when tagged.
 
 ### Fixed
 
@@ -20,7 +22,7 @@ decision I17). Dated when tagged.
   now judged with its own Resource and signer, as its receivers judge it
   (LFCP-WIRE-01 §26.3 rule 7, §19; IDENTITY-PROFILE-01 §8.3).
 
-### Changed (breaking for 0.3.1 callers of the frontier profile)
+### Changed (breaking for callers of the frontier profile)
 
 - `FlowOptions.dataProfiles` (bare `DataProfileCodec`s) is replaced by
   `FlowOptions.profiles`: one `UnitProfile` per Data Profile, the receiver's
@@ -50,7 +52,7 @@ decision I17). Dated when tagged.
   `control_ref` and stay with the document's admission.
 - `@openlfcp/client`: the `UnitProfile` type.
 
-## 0.3.1 — unreleased
+## 0.3.1 — 2026-11-05
 
 A patch of 0.3.0: one fix and one additive API, both found by the plugin's
 end-to-end device scenarios (LFCP-04-414, decision I17). Dated when tagged.
