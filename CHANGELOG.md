@@ -4,7 +4,7 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
-## 0.4.0 — unreleased
+## 0.4.0 — 2026-11-07
 
 The 0.4 line: one fix of 0.3.1 from the review of the plugin that uses it
 (obsidian#109, decision I17). Its API change is breaking for callers of the
