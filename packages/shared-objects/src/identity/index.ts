@@ -14,7 +14,9 @@ export {
   IdentityReplica,
   type IdentityUnit,
   identityCodec,
+  identityCodecFor,
   identitySnapshotCodec,
+  identityUnitProfile,
 } from "./replica.js";
 export {
   IDENTITY_DIAGNOSTIC_ORDER,

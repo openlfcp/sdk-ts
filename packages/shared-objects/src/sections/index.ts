@@ -27,6 +27,8 @@ export {
   type SectionsStagedOperation,
   type SectionsUnit,
   SharedSectionsDataProfile,
+  sectionsCodecFor,
+  sectionsUnitProfile,
 } from "./data-profile.js";
 export {
   type ProfileModel,

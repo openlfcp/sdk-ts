@@ -7,6 +7,7 @@ import {
   type ResourceId,
   toHex,
 } from "@openlfcp/core";
+import { checkChangeActor } from "../admission/actor.js";
 import {
   type CheckedChange,
   checkChange,
@@ -488,6 +489,36 @@ export const identityCodec = Object.freeze({
   encode: (change: CheckedChange): Uint8Array => frameChange(change.bytes),
   decode: unframeChange,
 });
+/**
+ * The codec of one unit of the Identity Profile, bound to its Resource and
+ * signer (§3: a change in another actor's sequence is CHANGE_ACTOR_MISMATCH).
+ * The writer-class rules (AI0–AI4) need the Control state at the unit's
+ * control_ref and stay with the document's admission (IdentityReplica.receive).
+ */
+export function identityCodecFor(unit: {
+  readonly resourceId: ResourceId;
+  readonly actor: PrincipalId;
+}) {
+  const actor = toHex(deriveIdentityActorId(unit.resourceId, unit.actor));
+  const bound = (change: CheckedChange): CheckedChange => checkChangeActor(change, actor);
+  return Object.freeze({
+    dataProfile: IDENTITY_PROFILE_ID,
+    encode: (change: CheckedChange): Uint8Array => frameChange(bound(change).bytes),
+    decode: (plaintext: Uint8Array): CheckedChange => bound(unframeChange(plaintext)),
+  });
+}
+
+/**
+ * The Identity Profile's per-unit check without a replica (structurally the
+ * client's UnitProfile): for the identity flows' rotation frontier
+ * (FlowOptions.profiles), so a rotation of the Identity Resource judges its
+ * units as recipients do.
+ */
+export const identityUnitProfile = Object.freeze({
+  dataProfile: IDENTITY_PROFILE_ID,
+  codecFor: identityCodecFor,
+});
+
 export const identitySnapshotCodec = Object.freeze({
   dataProfile: IDENTITY_PROFILE_ID,
   encode: frameSnapshot,

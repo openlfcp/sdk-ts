@@ -313,16 +313,7 @@ export class SharedObjectsDataProfile {
     readonly resourceId: ResourceId;
     readonly actor: PrincipalId;
   }): SharedObjectsCodec {
-    const actor = toHex(deriveActorId(unit.resourceId, unit.actor));
-    // §8, §11 (SO-SEC1): a unit carries only changes of its signer's §8
-    // actor, so no Principal can write into another Principal's Automerge
-    // history. Anything else is PROFILE_INVALID / CHANGE_ACTOR_MISMATCH.
-    const bound = (change: CheckedChange): CheckedChange => checkChangeActor(change, actor);
-    return {
-      dataProfile: PROFILE_ID,
-      encode: (change) => frameChange(bound(change).bytes),
-      decode: (plaintext) => bound(unframeChange(plaintext)),
-    };
+    return sharedObjectsCodecFor(unit);
   }
 
   apply(unit: SharedObjectsUnit, change: CheckedChange): SharedObjectsApplyResult {
@@ -530,3 +521,33 @@ function rebuildChanges(before: SharedObjectsReplica, after: SharedObjectsReplic
   }
   return out;
 }
+
+/**
+ * The codec of one unit of this profile, bound to its Resource and signer
+ * (§8, §11, SO-SEC1): a unit carries only changes of its signer's §8 actor,
+ * so no Principal can write into another Principal's Automerge history.
+ * Anything else is PROFILE_INVALID / CHANGE_ACTOR_MISMATCH. The same check
+ * whether a receiver merges the unit or a rotation judges it.
+ */
+export function sharedObjectsCodecFor(unit: {
+  readonly resourceId: ResourceId;
+  readonly actor: PrincipalId;
+}): SharedObjectsCodec {
+  const actor = toHex(deriveActorId(unit.resourceId, unit.actor));
+  const bound = (change: CheckedChange): CheckedChange => checkChangeActor(change, actor);
+  return {
+    dataProfile: PROFILE_ID,
+    encode: (change) => frameChange(bound(change).bytes),
+    decode: (plaintext) => bound(unframeChange(plaintext)),
+  };
+}
+
+/**
+ * This profile's per-unit check without a replica (structurally the client's
+ * UnitProfile): for the identity flows' rotation frontier
+ * (FlowOptions.profiles), which judges units as recipients do.
+ */
+export const sharedObjectsUnitProfile = Object.freeze({
+  dataProfile: PROFILE_ID,
+  codecFor: sharedObjectsCodecFor,
+});

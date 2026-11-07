@@ -34,6 +34,8 @@ export {
   type SharedObjectsListenerFailure,
   type SharedObjectsSnapshotCodec,
   type SharedObjectsUnit,
+  sharedObjectsCodecFor,
+  sharedObjectsUnitProfile,
 } from "./data-profile.js";
 export {
   applyBatchChecked,

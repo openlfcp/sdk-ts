@@ -260,13 +260,7 @@ export class SharedSectionsDataProfile {
 
   /** The codec of one unit, bound to its signer's section actor (§2). */
   codecFor(unit: { readonly resourceId: ResourceId; readonly actor: PrincipalId }): SectionsCodec {
-    const actor = toHex(deriveSectionActorId(unit.resourceId, unit.actor));
-    const bound = (c: CheckedChange) => checkChangeActor(c, actor);
-    return {
-      dataProfile: SECTIONS_PROFILE_ID,
-      encode: (change) => frameChange(bound(change).bytes),
-      decode: (plaintext) => bound(unframeChange(plaintext)),
-    };
+    return sectionsCodecFor(unit);
   }
 
   /**
@@ -590,3 +584,30 @@ export class SharedSectionsDataProfile {
     return profile;
   }
 }
+
+/**
+ * The codec of one unit of this profile, bound to its signer's section actor
+ * (§2): a change of another actor is PROFILE_INVALID / CHANGE_ACTOR_MISMATCH.
+ * The same check whether a receiver merges the unit or a rotation judges it.
+ */
+export function sectionsCodecFor(unit: {
+  readonly resourceId: ResourceId;
+  readonly actor: PrincipalId;
+}): SectionsCodec {
+  const actor = toHex(deriveSectionActorId(unit.resourceId, unit.actor));
+  const bound = (c: CheckedChange) => checkChangeActor(c, actor);
+  return {
+    dataProfile: SECTIONS_PROFILE_ID,
+    encode: (change) => frameChange(bound(change).bytes),
+    decode: (plaintext) => bound(unframeChange(plaintext)),
+  };
+}
+
+/**
+ * This profile's per-unit check without a replica (structurally the client's
+ * UnitProfile): for the identity flows' rotation frontier (FlowOptions.profiles).
+ */
+export const sectionsUnitProfile = Object.freeze({
+  dataProfile: SECTIONS_PROFILE_ID,
+  codecFor: sectionsCodecFor,
+});
