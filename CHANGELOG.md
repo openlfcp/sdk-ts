@@ -31,9 +31,19 @@ storage format changes. Journals and stores written by 0.5.0 load unchanged.
   during delivery, is finished by the next ordinary reconciliation without
   a new KEY_EPOCH, other people's devices included. Before, only the
   root's own devices were served again (§7.1 step 3).
-- `resumeRotations` reports a rotation on a forked Resource as
-  `unreachable` with code `CONTROL_CONFLICT` and leaves it owed, instead of
-  aborting the whole call.
+- `resumeRotations` resumes each owed rotation on its own. A rotation on a
+  forked Resource is reported `unreachable` with code `CONTROL_CONFLICT`. A
+  Resource whose coordinator refuses this installation's read (unhosted, or
+  read access revoked) is reported `refused` with the NACK's code. Both stay
+  owed, and the next Resource is still resumed. Before, one such Resource
+  aborted the call (and with it `reconcileDevices`), so later Resources'
+  owed packages never left.
+- A supplied `identityChain` no longer hides a revocation already stored
+  locally. The filter uses the newer of the supplied chain and the stored
+  chain of the same Identity Resource. Two chains that diverge are a fork:
+  `IdentityConflict`, and nothing is sealed. The filter is resolved again
+  at delivery time and for each resumed rotation, so a revocation that one
+  replay stores is applied by the next.
 
 ### Added
 
