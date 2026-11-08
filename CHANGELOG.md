@@ -4,7 +4,7 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
-## 0.5.1 — unreleased
+## 0.5.1 — 2026-11-08
 
 A patch release for the holistic review of MVP 0.4 (findings F1 and F2): no
 export is removed or renamed, no result union gains a variant, and no wire or
