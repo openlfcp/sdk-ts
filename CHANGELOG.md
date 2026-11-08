@@ -7,7 +7,7 @@ remove or rename any.
 ## 0.5.0 — unreleased
 
 0.4.0 at `mvp-0.4-baseline.4` (finding 1 and the profile and corpus findings
-of the LFCP-04-415 review, then review LFCP-04-415f). A minor release: no
+of the LFCP-04-415 review, then reviews LFCP-04-415f and 415h). A minor release: no
 export is removed or renamed, but two public result unions gain a variant
 (Changed), which breaks a caller that handles them exhaustively.
 
@@ -55,7 +55,13 @@ export is removed or renamed, but two public result unions gain a variant
   With a document port that has the new `retirement` capability (the
   storage-node port has it), every concurrent value of the flag is read and
   the flag is written alone, by step 4 and by the §8.2 revocation, so a
-  concurrent rename stays a conflict.
+  concurrent rename stays a conflict. A port without `retirement` keeps the
+  0.4 behaviour, which does not meet §7.1 step 4 for a CRDT document: to
+  mark a device revoked the client writes the whole entry it reads, so a
+  concurrent conflict of its label (or another display field) is resolved
+  to the value it read, and it sees only the selected value of `revoked`,
+  so it can miss a concurrent `revoked = false`. A document port should
+  implement `retirement`.
 - Pairing link checks: a coordinator that refuses the session as the link's
   device now rejects the link (`not-a-session`) instead of reporting the
   coordinator unavailable, and the device must be registered, not only
@@ -68,7 +74,12 @@ export is removed or renamed, but two public result unions gain a variant
   authorized only by the same-root rule is uploaded, to a server whose READY
   does not list `identity-01` (LFCP-WIRE-01 §37): `createPairingSession`
   did both. Under every flow the phase is refused (`IDENTITY_UNSUPPORTED`,
-  client-local) or the package skipped.
+  client-local) or the package skipped. This holds for journaled bytes too:
+  a revocation, cancel or approve resumed after the server dropped
+  `identity-01` sends nothing; and a pending Key Package is judged at its
+  own Control Head: one sealed by the same-root rule is re-sealed at the
+  current head when the sender now holds key/distribute there, and not
+  sent otherwise (review LFCP-04-415h, findings 1 and 2).
 - The CONTROL_GET decoder refuses a range whose end is below its start
   (`MALFORMED_MESSAGE`, LFCP-WIRE-01 §45); it accepted one.
 
