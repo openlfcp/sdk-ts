@@ -4,7 +4,7 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
-## 0.5.0 — unreleased
+## 0.5.0 — 2026-11-08
 
 0.4.0 at `mvp-0.4-baseline.4` (finding 1 and the profile and corpus findings
 of the LFCP-04-415 review, then reviews LFCP-04-415f and 415h). A minor release: no
