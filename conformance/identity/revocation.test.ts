@@ -5,6 +5,7 @@ import {
   classifyPackage,
   exposingRevocationsSince,
   planReconciliation,
+  planRevocations,
   readersAt,
   reconcileRecord,
   rotatorTest,
@@ -64,14 +65,15 @@ describe("F12: the rotator test of §8.1 on concrete states", () => {
 
 describe("F05: reconciliation plans the fixtures' exact records (§7.1)", () => {
   const I = chainAt("P4_register_dev_b_approved");
-  test("revocations first, then the intermediate-only DEV_A; DEV_B needs nothing", () => {
+  test("PAIR_J's consume is not relevant in X; the intermediate-only DEV_A is registered; DEV_B needs nothing", () => {
     let X = chainAt("flow.self_register_dev_b_on_j2");
+    // baseline.4 §7.1 step 1: a pairing device not bound in X is never propagated there.
+    const step1 = planRevocations(I, X);
+    expect(step1.propose).toEqual([]);
+    expect(step1.notRelevant.map(labelOf)).toEqual(["PAIR_J"]);
     const steps = planReconciliation(I, X);
-    expect(steps.map((s) => `${s.kind}:${labelOf(s.device)}`)).toEqual([
-      "revoke:PAIR_J",
-      "register:DEV_A",
-    ]);
-    const expected = ["flow.reconcile_revoke_pairing_in_x", "flow.reconcile_register_dev_a"];
+    expect(steps.map((s) => `${s.kind}:${labelOf(s.device)}`)).toEqual(["register:DEV_A"]);
+    const expected = ["flow.reconcile_register_dev_a_in_x"];
     steps.forEach((step, i) => {
       const bytes = reconcileRecord(X, step, party("OWNER"));
       expect(toHex(bytes)).toBe(toHex(recordOf(expected[i] as string)));

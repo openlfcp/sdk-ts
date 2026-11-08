@@ -10,7 +10,7 @@
 // change is delivered with its writer (signer, unit actor sequence, class)
 // as a verified Data Unit would be, and the state is read from its save.
 
-import { identityWriterClass } from "@openlfcp/client";
+import { identityWriterClass, pairingLinkRejection, readersAt } from "@openlfcp/client";
 import {
   bytesEqual,
   fromBase64url,
@@ -42,6 +42,7 @@ import {
   encodeInviteSecret,
   invitationPrincipal,
   isBound,
+  pairingDeviceSigner,
   parseDeviceCertificate,
   parseInviteUri,
   parsePairingUri,
@@ -453,13 +454,29 @@ const profileEntry: Handler = (c, context) => {
  * the corpora name it PAIRING_LINK_REJECTED. The SDK rejects it with the
  * client-local INVALID_INVITATION, which is never sent.
  */
+/**
+ * §5.2 checks 2–4 with sdk-ts's pairingLinkRejection, on the Identity
+ * Resource as the case's `binding_head` leaves it. The coordinator's side of
+ * check 2 (W §41: a session is opened only by a reader) is the fixture's;
+ * the client's side is what it does with that refusal.
+ */
+function linkRejection(i: Json): string | undefined {
+  const J = pairingDeviceSigner(parsePairingUri(String(i.uri))).descriptor.principalId;
+  const chain = chainAt(String(i.binding_head));
+  const reader = readersAt(chain.state).some((r) => bytesEqual(r.principalId, J));
+  return pairingLinkRejection(J, reader ? chain : { refused: "AUTHORIZATION_FAILED" });
+}
+
 const pairUriRejected: Handler = (c) => {
   const i = c.inputs as Json;
   let code: string | null = null;
   try {
     if (i.parser === "join") parseInviteUri(String(i.uri));
-    else if (i.parser === "pair") parsePairingUri(String(i.uri));
-    else throw new Error(`unknown parser ${i.parser}`);
+    else if (i.parser === "pair") {
+      parsePairingUri(String(i.uri));
+      if (i.binding_head !== undefined && linkRejection(i) !== undefined)
+        throw new LfcpError("INVALID_INVITATION", "the pairing link is rejected (§5.2)");
+    } else throw new Error(`unknown parser ${i.parser}`);
   } catch (e) {
     code =
       e instanceof LfcpError && e.code === "INVALID_INVITATION"
@@ -517,7 +534,40 @@ function fromSnapshot(
   }
 }
 
+/**
+ * §4 on a Snapshot whose initial change holds a container as a list (the
+ * change itself is refused by AI0): loaded as a state and validated, the
+ * root is INVALID_ROOT and the document is not usable.
+ */
+const initialListSnapshot: Scenario = (c, context) => {
+  const i = c.inputs as Json;
+  const e = c.expected as Json;
+  const { root } = optionsOf(context);
+  const validation = withIdentityDocument(fromBase64url(i.snapshot.b64url), (doc) =>
+    validateIdentity(doc, root),
+  );
+  const rootProblem = validation.problems.find((p) => p.diagnostic === "INVALID_ROOT");
+  const post = {
+    root_diagnostic: rootProblem?.diagnostic ?? null,
+    document_usable: validation.usable,
+  };
+  return {
+    checks: [
+      equalCheck("root_diagnostic", e.root_diagnostic, post.root_diagnostic),
+      equalCheck("document_usable", e.document_usable, post.document_usable),
+    ],
+    post,
+    runs: [],
+  };
+};
+
 const SCENARIOS: Readonly<Record<string, Scenario>> = {
+  ...Object.fromEntries(
+    ["roster", "devices", "requests", "extensions"].map((t) => [
+      `identity_doc_initial_${t}_list.snapshot`,
+      initialListSnapshot,
+    ]),
+  ),
   identity_doc_second_initial_other_unit: (c, context) => {
     const i = c.inputs as Json;
     const e = c.expected as Json;

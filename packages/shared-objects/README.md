@@ -40,7 +40,7 @@ without notice until the profile is in a baseline.
 ## Identity profile (MVP 0.4 Working Draft)
 
 `@openlfcp/shared-objects/identity` implements IDENTITY-PROFILE-01 §§2–4
-(`org.openlfcp.identity.v1`, `mvp-0.4-baseline.3`, LFCP-04-409 and 409b).
+(`org.openlfcp.identity.v1`, `mvp-0.4-baseline.4`, LFCP-04-409 and 409b).
 `IdentityReplica` admits changes with AI0–AI5, validates every concurrent
 field value and exposes `roster()`, `devices()` and `requests()`. Invalid
 entries are omitted; an invalid root makes all three readers empty.

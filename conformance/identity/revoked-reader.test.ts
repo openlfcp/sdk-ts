@@ -5,8 +5,12 @@ import { revokedReaderPrefix } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
 import { chainOf, contextOf, idOf, recordOf, wire } from "./corpus.js";
 
+// A ranged read (baseline.4: within, through, after, inverted, forked) is the
+// coordinator's answer to one request; the wire runner (sessionReadReport)
+// decides it. Here: which prefix a revoked reader is entitled to at all.
 const cases = wire.cases.filter(
-  (c) => c.kind === "session_read" && c.inputs.request === "CONTROL_GET",
+  (c) =>
+    c.kind === "session_read" && c.inputs.request === "CONTROL_GET" && c.inputs.range === undefined,
 );
 
 describe("LFCP-IDENTITY-TEST-VECTORS-01: control read for a revoked reader (W §41)", () => {

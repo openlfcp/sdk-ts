@@ -18,6 +18,7 @@
 // fixture's bytes is N/A with its reason, never a pass.
 
 import {
+  acceptInvitationAsDevice,
   candidateEvidence,
   checkIssuance,
   classifyConsume,
@@ -25,37 +26,50 @@ import {
   classifyRegister,
   classifyRevoke,
   classifyRotate,
+  createPairingSession,
+  type DeviceEntryValue,
   exposingRevocationsSince,
   type IdentityChannel,
   IdentityConflict,
   identityWriterClass,
+  keyRecipients,
   leafPayload,
   MASK_PRESETS,
+  planDisplayData,
   planReconciliation,
+  planRevocations,
+  principalOfRef,
+  principalRefOf,
   readersAt,
   recordSeq,
   rotatorTest,
   signChain,
+  storeDek,
   syncChain,
   verifiedFrontier,
 } from "@openlfcp/client";
-import { bytesEqual, fromHex, hash32, toHex } from "@openlfcp/core";
-import { sha256 } from "@openlfcp/crypto";
+import { bytesEqual, dataEpoch, fromHex, hash32, type PrincipalId, toHex } from "@openlfcp/core";
+import { InvitationSecret, importResourceDEK, sha256 } from "@openlfcp/crypto";
 import { unframeChange } from "@openlfcp/shared-objects/admission";
 import { InMemoryLfcpStorage } from "@openlfcp/storage";
 import {
+  ABILITY,
   activeDevice,
+  assembleInviteUri,
   type ControlRecord,
   type ControlState,
   certificateChain,
+  DEVICE_KIND,
   decodeControlRecord,
   deviceCertificatePayloadFromCbor,
+  hasAbility,
   parseDataUnit,
   signControlRecord,
   validateControlChain,
 } from "@openlfcp/wire";
 import { decodeStrict } from "@openlfcp/wire/cbor";
 import { MemoryCoordinator } from "../../packages/client/test/identity/memory-coordinator.js";
+import { device as localDevice } from "../../packages/client/test/identity/support.js";
 import { equalCheck } from "../checks.js";
 import type { Check, Handler, HandlerContext, HandlerResult, VectorCase } from "../runner.js";
 import { openSpec } from "../spec.mjs";
@@ -282,6 +296,15 @@ function sendBytes(f: FlowCase, ref: string): Report {
 // ---------------------------------------------------------------------------
 // phases (§9.2)
 
+/** A Register phase input's planned chain (leaf first), or the certificate's own chain. */
+const plannedChain = (p: Json) =>
+  Array.isArray(p.chain)
+    ? certificateChain(
+        (p.chain as string[]).map((l) => cert(l)),
+        idOf(p.root),
+      )
+    : chainOfCert(p.certificate);
+
 function phaseFacts(p: Json): Report {
   const chain = chainAt(String(p.state).replace(/^wire:/, ""));
   let phase: string;
@@ -291,12 +314,20 @@ function phaseFacts(p: Json): Report {
       break;
     case "register": {
       const own = p.own === true;
+      // The planned chain (baseline.4: every Register phase input names it); its issuers decide.
+      const planned = plannedChain(p);
       phase = classifyRegister(chain, {
         root: idOf(p.root),
-        chain: chainOfCert(p.certificate),
+        chain: planned,
         isOwnRecord: () => own,
       });
-      break;
+      return {
+        phase,
+        proposes: phase === "pending",
+        signs: phase !== "superseded",
+        not_superseded: phase !== "superseded",
+        chain: planned.certificates.map((c) => certificateLabel(c.id)),
+      };
     }
     case "revoke":
       phase = classifyRevoke(chain.state, idOf(p.root), idOf(p.device));
@@ -353,7 +384,257 @@ async function acceptedAt(head: string, units: readonly string[]): Promise<strin
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// reconciliation (§7.1, baseline.4)
+
+const labelsOf = (ids: readonly Uint8Array[]) => ids.map((d) => principalLabel(d));
+/** Revoked pairs of `root` whose device is not bound in the state (W §17.5 rule 5). */
+const unboundRevoked = (state: ControlState, root: PrincipalId) =>
+  [...state.revoked.values()].filter(
+    (r) => bytesEqual(r.root, root) && !state.devices.has(toHex(r.device)),
+  ).length;
+const pairingRevoked = (I: ControlState, state: ControlState) =>
+  [...state.revoked.values()].filter(
+    (r) => I.devices.get(toHex(r.device))?.kind === DEVICE_KIND.PAIRING,
+  ).length;
+
+/** The step whose case is the Identity Resource a reconciliation fixture reconciles from. */
+const RECONCILE_FROM: Readonly<Record<string, number>> = {
+  F05_reconciliation: 1,
+  "F05.sixty_five_sessions": 4,
+  F09_pairing_service: 6,
+};
+
+/**
+ * §7.1 step 1 with planRevocations: on the reconciliation's source `I`, a
+ * case-less step reports what step 1 proposes on the target as the next
+ * case finds it (and what it does not propagate); a DEVICE_REVOKE step on
+ * the target reports what step 1 proposed on the target before it, the
+ * root's unbound revoked pairs, and for a refusal the unpropagated pair the
+ * SDK reports (TargetReconciliation.unpropagated).
+ */
+function reconcileFacts(f: FlowCase, step: FlowStep, report: Report): Report | undefined {
+  const from = RECONCILE_FROM[f.id];
+  if (from === undefined || step.n < from) return undefined;
+  const I = chainAt(wireId(stepOf(f, from)));
+  const R = I.state.owner.principalId;
+  if (step.n === from) return { revoked_pairing_devices_in_I: pairingRevoked(I.state, I.state) };
+  if (step.case === undefined && step.phase_input === undefined && step.bytes_of === undefined) {
+    const next = f.inputs.steps.find((s) => s.n > step.n && String(s.case).startsWith("wire:"));
+    if (next === undefined) return undefined;
+    const plan = planRevocations(I, chainOf(contextOf(wireId(next))));
+    const proposals = labelsOf(plan.propose.map((p) => p.device));
+    return {
+      outcome: proposals.length === 0 ? "nothing to propose" : "not propagated",
+      proposals,
+      not_propagated: labelsOf(plan.notRelevant).sort(),
+    };
+  }
+  if (!String(step.case).startsWith("wire:")) return undefined;
+  const id = wireId(step);
+  if (!isControl(wireCase(id))) return undefined;
+  let record: ControlRecord;
+  try {
+    record = decodeControlRecord(recordOf(id));
+  } catch {
+    return undefined;
+  }
+  if (record.body.type !== "DEVICE_REVOKE") return undefined;
+  if (bytesEqual(record.payload.resourceId, I.state.resourceId)) return undefined;
+  const before = chainOf(contextOf(id));
+  const proposed = planRevocations(I, before).propose.map((p) => p.device);
+  const accepted = report.outcome === "accept";
+  const out: Report = {
+    proposals: labelsOf(proposed),
+    unbound_revoked_pairs_of_OWNER: unboundRevoked(accepted ? chainAt(id).state : before.state, R),
+  };
+  const device = record.body.device;
+  if (!accepted && proposed.some((d) => bytesEqual(d, device))) {
+    out.reported = true;
+    out.pair_state = "unpropagated";
+  }
+  if (report.exposing === true) out.rotation = "the rotation policy of §8.4 closes the epoch";
+  return out;
+}
+
+/** F05.display_data: §7.1 step 4 (planDisplayData) run on each step's state of I, the documents simulated. */
+const displayMemo = new Map<string, { steps: Map<number, Report>; final: Report }>();
+function displayRuns(f: FlowCase) {
+  const memo = displayMemo.get(f.id);
+  if (memo !== undefined) return memo;
+  const R = idOf("OWNER");
+  const ref = (l: string) => principalRefOf(idOf(l));
+  // The document of §5.1 holds the root's entry only (profile change.C1_fill).
+  const main = new Map<string, DeviceEntryValue>([[ref("OWNER"), { label: "Desktop", kind: 0 }]]);
+  let afterP2: Map<string, DeviceEntryValue> | undefined;
+  let service: Map<string, DeviceEntryValue> | undefined;
+  let state: ControlState | undefined;
+  let caseId: string | undefined;
+  const steps = new Map<number, Report>();
+  for (const s of f.inputs.steps) {
+    if (s.case !== undefined) {
+      caseId = wireId(s);
+      state = chainAt(caseId).state;
+    }
+    if (state === undefined) continue;
+    if (s.branch === "service" && service === undefined) service = new Map(afterP2 ?? main);
+    const doc = s.branch === "service" ? (service as Map<string, DeviceEntryValue>) : main;
+    const writes: Report[] = [];
+    for (const intent of planDisplayData(state, doc, R)) {
+      if (intent.intent !== "device.put") continue;
+      const was = doc.get(intent.key);
+      const write = Object.fromEntries(
+        Object.entries(intent.entry).filter(
+          ([k, v]) => was === undefined || (was as unknown as Record<string, unknown>)[k] !== v,
+        ),
+      );
+      const who = principalOfRef(intent.key);
+      writes.push({ entry: who === undefined ? intent.key : principalLabel(who), write });
+      doc.set(intent.key, { ...(was ?? {}), ...intent.entry } as DeviceEntryValue);
+    }
+    if (caseId === "P2_pairing_device") afterP2 = new Map(main);
+    const pairing = [...state.devices.entries()]
+      .filter(([, d]) => d.kind === DEVICE_KIND.PAIRING)
+      .map(([h]) => principalLabel(fromHex(h)))
+      .sort();
+    steps.set(s.n, {
+      ...(s.case === undefined
+        ? { outcome: writes.length === 0 ? "nothing to write" : "writes" }
+        : {}),
+      writes,
+      metadata_changes: writes.length,
+      pairing_devices_bound: pairing,
+    });
+  }
+  const entries = (doc: Map<string, DeviceEntryValue> | undefined) =>
+    Object.fromEntries(
+      [...(doc ?? [])].map(([k, v]) => {
+        const who = principalOfRef(k);
+        return [who === undefined ? k : principalLabel(who), v];
+      }),
+    );
+  const isPairing = (k: string) =>
+    f.inputs.steps.some((s) => {
+      if (s.case === undefined) return false;
+      const who = principalOfRef(k);
+      return (
+        who !== undefined &&
+        chainAt(wireId(s)).state.devices.get(toHex(who))?.kind === DEVICE_KIND.PAIRING
+      );
+    });
+  const final = {
+    entries_main: entries(main),
+    entries_service: entries(service),
+    entries_for_pairing_devices: [...main.keys(), ...(service?.keys() ?? [])].filter(isPairing)
+      .length,
+  };
+  const out = { steps, final };
+  displayMemo.set(f.id, out);
+  return out;
+}
+
+/** §5.3 step 1 with createPairingSession, on I at flow.pl_key_epoch_1 and the material DEV_A holds. */
+async function pairingWithMaterial(held: { root_unit_1: boolean; epochs: number[] }) {
+  const server = new MemoryCoordinator();
+  const I = server.seed(recordsAt("flow.pl_key_epoch_1"));
+  if (held.root_unit_1)
+    server.inject(I, fromHex(wireCase("flow.pl_root_unit_1").inputs.cose_sign1.hex));
+  const local = localDevice();
+  const chain = chainAt("flow.pl_key_epoch_1");
+  for (const e of held.epochs)
+    await storeDek(
+      local.storage,
+      local.secrets,
+      chain,
+      dataEpoch(BigInt(e)),
+      importResourceDEK(sha256(new TextEncoder().encode(`LFCP-TV-IDENTITY-DEK-I-EPOCH-${e}`))),
+    );
+  const p = party("DEV_A");
+  const url = chain.state.route.coordinatorUrl;
+  const r = await createPairingSession({
+    installation: { signer: p, agreement: p.agreement },
+    ...local,
+    network: server.network(),
+    now: () => 1,
+    identity: { resource: I, url },
+    document: () => {
+      throw new Error("no document is needed before the link");
+    },
+  });
+  const proposed = server.uploads.filter((u) => u.op === "control").length;
+  return r.kind === "missing-material"
+    ? { outcome: "no link", offers_link: false, missing: r.missing, records_proposed: proposed }
+    : r.kind === "created"
+      ? { outcome: "link", offers_link: true, records_proposed: proposed }
+      : { outcome: r.kind };
+}
+
+/** The text of §7.2 for an invitation a device that cannot write I leaves unclaimed. */
+const HANDED_OVER =
+  "complete the invitation on a personal installation that can write I; the link is handed over as received";
+
 const SPECIALS: Readonly<Record<string, Special>> = {
+  // §7.1 step 1 at the limit: DEV_P is treated as revoked in X (planReconciliation, keyRecipients).
+  "F05.sixty_five_sessions#10": (f) => {
+    const I = chainAt(wireId(stepOf(f, 4)));
+    const P = idOf("DEV_P");
+    const refusedAt = chainOf(contextOf(wireId(stepOf(f, 11))));
+    const registers = planReconciliation(I, refusedAt).some(
+      (s) =>
+        s.kind === "register" &&
+        (bytesEqual(s.device, P) || s.chain.issuers.some((e) => bytesEqual(e, P))),
+    );
+    // Even once DEV_P is active in X (it registered itself, step 11), step 3 seals nothing to it.
+    const seals = [refusedAt, chainAt(wireId(stepOf(f, 11)))].some((X) =>
+      keyRecipients(I, X).some((r) => bytesEqual(r.principalId, P)),
+    );
+    return {
+      outcome: !registers && !seals ? "DEV_P treated as revoked in X" : "DEV_P served in X",
+      registers_DEV_P: registers,
+      seals_to_DEV_P: seals,
+    };
+  },
+  // §7.2 with acceptInvitationAsDevice: a Read device of OWNER does not claim.
+  "F07.read_device_cannot_claim#2": async (f) => {
+    const server = new MemoryCoordinator();
+    const I = server.seed(recordsAt(wireId(stepOf(f, 1))));
+    const url = chainAt(wireId(stepOf(f, 1))).state.route.coordinatorUrl;
+    const p = party("DEV_R");
+    const link = assembleInviteUri({
+      resourceId: fromHex(
+        (wire.fixtures.resources.X as unknown as { id: { hex: string } }).id.hex,
+      ) as never,
+      endpoints: [url],
+      grantId: sha256(recordOf("N1_invite_grant")) as never,
+      secret: InvitationSecret.generate(),
+    });
+    const r = await acceptInvitationAsDevice({
+      installation: { signer: p, agreement: p.agreement },
+      ...localDevice(),
+      network: server.network(),
+      now: () => 1,
+      identity: { resource: I, url },
+      document: () => {
+        throw new Error("no document is needed before the claim");
+      },
+      link,
+    });
+    const sent = server.uploads.length;
+    return r.kind === "needs-writer" && sent === 0
+      ? {
+          outcome: "claim not sent",
+          claim_sent: false,
+          invitation: "unclaimed",
+          offered: HANDED_OVER,
+        }
+      : { outcome: r.kind, claim_sent: sent > 0 };
+  },
+  "F08.missing_material#2": (_f, step) => pairingWithMaterial(step.held as never),
+  "F08.missing_material#3": (_f, step) => pairingWithMaterial(step.held as never),
+  "F18_barrier#6": () =>
+    notVerified(
+      "LFCP-WIRE-01 §37: every identity flow of sdk-ts reads READY first and reports a Resource on a server without identity-01 as unsupported, sending nothing (reconcileDevices status unsupported, createIdentityResource in packages/client/test/identity/resource.test.ts); the fixture gives no flow to run on that server.",
+    ),
   // R1 rebuilds at K1: every unit it accepted is classified again at K1 (§19.1, LFCP-023).
   "F01_register_write_revoke_cutoff#9": async (f) => {
     const units = [2, 3, 4, 6].map((n) => wireId(stepOf(f, n)));
@@ -657,6 +938,8 @@ async function runStep(
       }
       if (c.kind === "session_read") {
         const post = run.report.post_state as Json;
+        for (const k of ["absent_fields", "records", "trimmed_at", "competing_returned"])
+          if (post?.[k] !== undefined) report[k] = post[k];
         if (post?.read === "prefix") {
           report.status = "revocation proven";
           report.head = post.control_head;
@@ -700,6 +983,8 @@ async function runStep(
     if (step.journal !== undefined && step.phase_input.phase === "register")
       report = { ...report, ...journalSigning(step) };
   }
+  const extra = await (EXTRAS[f.id] ?? (() => undefined))(f, step, report);
+  if (extra !== undefined) report = { ...report, ...extra };
   if (report.outcome === undefined)
     report = {
       ...report,
@@ -707,6 +992,58 @@ async function runStep(
     };
   return { report, ok };
 }
+
+// ---------------------------------------------------------------------------
+// per-fixture facts after a step (baseline.4 fixtures)
+
+type Extra = (
+  f: FlowCase,
+  step: FlowStep,
+  report: Report,
+) => Report | undefined | Promise<Report | undefined>;
+const holds2 = (id: string, who: string) =>
+  hasAbility(chainAt(id).state, idOf(who), ABILITY.DATA_WRITE);
+const REJECTED = {
+  // requestPairing returns not-a-session / invalid-link before it journals or writes anything (§5.2).
+  request_written: false,
+  sent_as_pairing_device_after_rejection: "nothing",
+  reported: true,
+};
+const EXTRAS: Readonly<Record<string, Extra>> = {
+  F05_reconciliation: reconcileFacts,
+  "F05.sixty_five_sessions": reconcileFacts,
+  F09_pairing_service: reconcileFacts,
+  "F05.display_data": (f, step) => displayRuns(f).steps.get(step.n),
+  "F07.read_device_cannot_claim": (_f, step) =>
+    step.case === undefined
+      ? undefined
+      : {
+          DEV_R_holds_2_in_I: holds2(wireId(step), "DEV_R"),
+          DEV_B_holds_2_in_I: holds2(wireId(step), "DEV_B"),
+        },
+  "F08.link_rejected": (_f, _step, report) =>
+    report.outcome === "PAIRING_LINK_REJECTED" ? REJECTED : undefined,
+  "F08.missing_material": (_f, step) =>
+    step.case === undefined
+      ? undefined
+      : {
+          epochs: [...chainAt(wireId(step)).state.epochs.keys()].map(Number).sort((a, b) => a - b),
+        },
+  "F13.issuer_revoked_before_resume": (_f, step) => {
+    const p = step.phase_input as Json;
+    if (p?.phase !== "register") return undefined;
+    const binding = chainAt(String(p.state).replace(/^wire:/, "")).state.devices.get(
+      toHex(idOf(p.device)),
+    );
+    return {
+      [`${p.device}_bound`]: binding !== undefined,
+      [`${p.device}_leaf`]:
+        binding?.leafId === null || binding?.leafId === undefined
+          ? null
+          : certificateLabel(binding.leafId),
+    };
+  },
+};
 
 /**
  * The change a unit refused for equivocation holds: the unit verifies on
@@ -797,6 +1134,43 @@ const FINALS: Readonly<Record<string, Final>> = {
         0,
     };
   },
+  "F05.sixty_five_sessions": (f) => {
+    const I = chainAt(wireId(stepOf(f, 4))).state;
+    // The main branch ends at step 6: DEV_P's self-registration (step 7) is refused.
+    const X = chainAt(wireId(stepOf(f, 6))).state;
+    return {
+      X_tombstones_from_pairing: pairingRevoked(I, X),
+      DEV_P_registered_in_X: X.devices.get(toHex(idOf("DEV_P")))?.registered === true,
+    };
+  },
+  "F05.display_data": (f) => displayRuns(f).final,
+  "F07.read_device_cannot_claim": (_f, steps) => ({
+    claims_sent_by_read_device: steps.filter((s) => s.claim_sent === true).length,
+  }),
+  "F08.link_rejected": (_f, steps) => ({
+    requests_written_after_rejection: steps.filter(
+      (s) => s.outcome === "PAIRING_LINK_REJECTED" && s.request_written !== false,
+    ).length,
+  }),
+  "F08.missing_material": (_f, steps) => ({
+    sessions_without_material: steps.filter(
+      (s) => s.outcome === "no link" && s.offers_link !== false,
+    ).length,
+  }),
+  "F13.issuer_revoked_before_resume": (f, steps) => ({
+    superseded: steps
+      .filter((s) => s.phase === "superseded")
+      .map((s) => {
+        const p = stepOf(f, Number(s.n)).phase_input as Json;
+        const bound = chainOf(contextOf(String(p.state).replace(/^wire:/, ""))).state.devices.has(
+          toHex(idOf(p.device)),
+        );
+        const through = plannedChain(p).issuers.map((e) => principalLabel(e));
+        return bound
+          ? `${p.device} re-certification through ${through.join(", ")}`
+          : `${p.device} first registration`;
+      }),
+  }),
   F06_concurrent_revokes: (f) => ({
     device_revoke_records: countRecords(
       wireId(stepOf(f, 3)),
@@ -936,6 +1310,38 @@ const STATED_ONLY = new Set([
   "package_phases",
   "ledger_after",
   "client",
+  // baseline.4: reconciliation, display data, link and material checks, planned chains.
+  "proposals",
+  "not_propagated",
+  "revoked_pairing_devices_in_I",
+  "unbound_revoked_pairs_of_OWNER",
+  "reported",
+  "pair_state",
+  "rotation",
+  "registers_DEV_P",
+  "seals_to_DEV_P",
+  "writes",
+  "metadata_changes",
+  "pairing_devices_bound",
+  "DEV_R_holds_2_in_I",
+  "DEV_B_holds_2_in_I",
+  "claim_sent",
+  "invitation",
+  "request_written",
+  "sent_as_pairing_device_after_rejection",
+  "epochs",
+  "offers_link",
+  "missing",
+  "records_proposed",
+  "chain",
+  "DEV_M2_bound",
+  "DEV_M2_leaf",
+  "DEV_B_bound",
+  "DEV_B_leaf",
+  "absent_fields",
+  "records",
+  "trimmed_at",
+  "competing_returned",
   ...Object.keys(wire.fixtures.resources),
 ]);
 

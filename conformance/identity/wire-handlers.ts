@@ -26,6 +26,7 @@ import {
   checkSnapshot,
   type DeviceCertificatePayload,
   decodeControlRecord,
+  decodeMessage,
   decodePrincipalDescriptor,
   deviceChainChecks,
   encodeMessage,
@@ -34,6 +35,7 @@ import {
   InMemorySeenUnits,
   isBound,
   isExposingRevocation,
+  MESSAGE_TYPE,
   objectId,
   parseDataUnit,
   parseDeviceCertificate,
@@ -54,7 +56,7 @@ import {
   verifyKeyPackage,
   verifySignedObject,
 } from "@openlfcp/wire";
-import { cborMap, decodeStrict, encode } from "@openlfcp/wire/cbor";
+import { type CborMap, cborMap, decodeStrict, encode } from "@openlfcp/wire/cbor";
 import { bytesCheck, check, equalCheck } from "../checks.js";
 import type { Check, Handler, HandlerResult, VectorCase } from "../runner.js";
 import { contextOf, idOf, type Linear, party, recordsAt, wire, wireCase } from "./corpus.js";
@@ -575,6 +577,15 @@ export function keyPackageReport(c: VectorCase): Report {
   if (v.kind === "rejected") return refuse(v.wireCode, `${v.reason}: ${v.message}`);
   const names = Object.keys((c.expected as Json).post_state ?? {});
   const at = view.stateAt(parsed.payload.controlHead) as ControlState;
+  // W §37, §100.1: a server whose READY lacks identity-01 refuses a package that only the
+  // same-root rule authorizes (the receiver's side; sdk-ts never uploads one there).
+  const extensions = (c.inputs as Json).server_extensions as string[] | undefined;
+  if (
+    extensions !== undefined &&
+    !extensions.includes("identity-01") &&
+    !hasAbility(at, parsed.payload.sender, ABILITY.KEY_DISTRIBUTE)
+  )
+    return refuse("AUTHORIZATION_FAILED", "same-root Key Package at a server without identity-01");
   return accept([parsed.signed.id], packageFacts(at, names));
 }
 
@@ -628,21 +639,118 @@ const REFUSED_READS = [
   "presence",
 ];
 
-/** W §41, §80.1: a read by a session at the accepted head; the revoked-reader prefix for Control reads. */
+/** The RESOURCE_OPENED body a revoked reader receives (W §41): the revoking record as the only head. */
+function revokedOpenedBody(chain: Linear, index: number, recordId: Uint8Array): Report {
+  const bytes = encodeMessage({
+    type: "RESOURCE_OPENED",
+    messageId: new Uint8Array(16),
+    body: {
+      resourceId: chain.state.resourceId,
+      heads: [{ seq: BigInt(index), recordId: recordId as never }],
+      haves: [],
+    },
+  });
+  // The body (message field 4) exactly as sdk-ts's encoder writes it.
+  const message = decodeStrict(bytes) as CborMap;
+  const body = message.entries.find(([k]) => Number(k) === 4)?.[1] as CborMap;
+  const fields = body.entries.map(([k]) => Number(k));
+  return {
+    answer: "RESOURCE_OPENED",
+    body: { control_heads: [recordLabel(recordId)], have_vector: [] },
+    body_cbor: { hex: toHex(encode(body)) },
+    absent_fields: [3, 4, 5].filter((k) => !fields.includes(k)),
+    live_subscription: false,
+  };
+}
+
+/** The labels of the records a server also holds, with their sequences (a fork it stores). */
+const heldElsewhere = (i: Json) =>
+  ((i.server_also_holds ?? []) as { case: string }[]).map((r) => ({
+    label: r.case,
+    seq: decodeControlRecord(fromHex(wireCase(r.case).inputs.cose_sign1.hex)).payload.controlSeq,
+  }));
+
+/**
+ * W §41, §45, §80.1: a read by a session at the accepted head; the
+ * revoked-reader prefix for Control reads (a range is served up to the
+ * revoking record, trimmed there, refused after it, and only from the
+ * accepted chain); a request for an extension the server does not advertise
+ * is PROTOCOL_UNSUPPORTED for every session. The coordinator's answers,
+ * computed with sdk-ts's revokedReaderPrefix and message codec.
+ */
 export function sessionReadReport(c: VectorCase): Report {
   const i = c.inputs as Json;
   const chain = latestChain(c);
   const session = idOf(i.session);
-  const identity = (i.server_extensions as string[]).includes("identity-01");
+  const extensions = i.server_extensions as string[];
+  const identity = extensions.includes("identity-01");
+  if (i.request === "PRESENCE" && !extensions.includes("presence"))
+    return refuse("PROTOCOL_UNSUPPORTED", "the server does not advertise presence");
+  const range = i.range as { start: number; end: number } | undefined;
+  // The request as received: sdk-ts's decoder refuses a range whose end is below its start (§45).
+  if (range !== undefined)
+    try {
+      decodeMessage(
+        encode(
+          cborMap([
+            [0, MESSAGE_TYPE.CONTROL_GET],
+            [1, new Uint8Array(16)],
+            [
+              4,
+              cborMap([
+                [0, chain.state.resourceId],
+                [1, BigInt(range.start)],
+                [2, BigInt(range.end)],
+              ]),
+            ],
+          ]),
+        ),
+      );
+    } catch (e) {
+      return refuse("MALFORMED_MESSAGE", e instanceof Error ? e.message : String(e));
+    }
+  const inRange = (seq: bigint, last: number) =>
+    range === undefined || (seq >= BigInt(range.start) && seq <= BigInt(Math.min(range.end, last)));
+  const batch = (last: number, competing: boolean): Report =>
+    range === undefined
+      ? {}
+      : {
+          answer: "CONTROL_BATCH",
+          records: chain.records
+            .filter((r) => inRange(r.payload.controlSeq, last))
+            .map((r) => recordLabel(r.signed.id)),
+          competing_returned: competing
+            ? heldElsewhere(i)
+                .filter((r) => inRange(r.seq, Number.MAX_SAFE_INTEGER))
+                .map((r) => r.label)
+                .sort()
+            : [],
+        };
   if (hasAbility(chain.state, session, ABILITY.DATA_READ))
     return accept([chain.state.head], {
       read: "full",
       control_head: recordLabel(chain.state.head),
+      ...batch(Number.MAX_SAFE_INTEGER, true),
     });
   const control = i.request === "RESOURCE_OPEN" || i.request.startsWith("CONTROL_");
   const prefix = identity && control ? revokedReaderPrefix(chain, session) : undefined;
   if (prefix === undefined)
     return refuse("AUTHORIZATION_FAILED", "no data/read and no revoked-reader prefix");
+  const base = { read: "prefix", control_head: recordLabel(prefix.recordId) };
+  if (i.request === "RESOURCE_OPEN")
+    return accept([prefix.recordId], {
+      ...base,
+      ...revokedOpenedBody(chain, prefix.index, prefix.recordId),
+    });
+  if (range !== undefined) {
+    if (range.start > prefix.index)
+      return refuse("AUTHORIZATION_FAILED", "a range after the revoking record (W §41)");
+    return accept([prefix.recordId], {
+      ...base,
+      ...batch(prefix.index, false),
+      ...(range.end > prefix.index ? { trimmed_at: recordLabel(prefix.recordId) } : {}),
+    });
+  }
   return accept([prefix.recordId], {
     read: "prefix",
     control_head: recordLabel(prefix.recordId),

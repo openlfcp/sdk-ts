@@ -15,13 +15,17 @@ type Json = any;
 const numbered = (prefix: string, n: number, width: number) =>
   Array.from({ length: n }, (_, i) => `${prefix}${String(i + 1).padStart(width, "0")}`);
 
-/** fixtures.derivations.limit_principals: Principals derived from these labels. */
+/**
+ * fixtures.derivations.limit_principals and session_principals (the closed
+ * sessions of F05.sixty_five_sessions): Principals derived from these labels.
+ */
 const DERIVED = [
   ...numbered("LIMIT_BOB_", 30, 2),
   ...numbered("LIMIT_OWNER_", 30, 2),
   ...numbered("PAIR_S_", 40, 2),
   ...numbered("TOMB_X_", 65, 3),
   ...numbered("TOMB_I_", 64, 3),
+  ...numbered("PAIR_T_", 65, 2),
 ];
 
 function principalLabels(): Map<string, string> {
