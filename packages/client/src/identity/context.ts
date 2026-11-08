@@ -25,6 +25,7 @@ import { dekSecretRef, type LfcpStorage, type SecretStore } from "@openlfcp/stor
 import {
   ABILITY,
   type DataUnitPayload,
+  decodeControlRecord,
   hasAbility,
   InMemorySeenUnits,
   type Parsed,
@@ -61,8 +62,7 @@ import {
   type PackageLedger,
   phaseOf,
 } from "./journal.js";
-import type { IdentityChannel } from "./network.js";
-import { IdentityUnavailable } from "./network.js";
+import { IDENTITY_EXTENSION, type IdentityChannel, IdentityUnavailable } from "./network.js";
 import type { LinearChain, PhaseState } from "./phases.js";
 
 /** The storage the identity flows use. */
@@ -239,6 +239,18 @@ export async function runControlPhase(
       bytes = fromHex(before.bytes);
     else {
       bytes = await spec.build(chain);
+      if (!channel.extensions.includes(IDENTITY_EXTENSION) && isDeviceRecord(bytes)) {
+        // W §37: no record of type 9 or 10 to a server whose READY lacks identity-01.
+        await journal.putPhase(operation, {
+          ...(before ?? {}),
+          id: spec.id,
+          kind: spec.kind,
+          resource: toHex(R),
+          state: "refused",
+          code: IDENTITY_UNSUPPORTED,
+        });
+        return Object.freeze({ state: "refused", chain, code: IDENTITY_UNSUPPORTED });
+      }
       const id = toHex(validateRecordId(bytes));
       await journal.putPhase(operation, {
         id: spec.id,
@@ -264,6 +276,20 @@ export async function runControlPhase(
     await journal.putPhase(operation, { ...phase, state: "refused", code: answer.code });
     return Object.freeze({ state: "refused", chain, code: answer.code });
   }
+}
+
+/**
+ * The client-local refusal code of a device record or same-root Key Package
+ * this client does not send to a server whose READY lacks `identity-01`
+ * (LFCP-WIRE-01 §37): the Resource is hosted on a server without identity
+ * support (IDENTITY-PROFILE-01 §6). No wire code.
+ */
+export const IDENTITY_UNSUPPORTED = "IDENTITY_UNSUPPORTED";
+
+/** A DEVICE_GRANT (type 9) or DEVICE_REVOKE (type 10). */
+function isDeviceRecord(bytes: Uint8Array): boolean {
+  const type = decodeControlRecord(bytes).body.type;
+  return type === "DEVICE_GRANT" || type === "DEVICE_REVOKE";
 }
 
 /** A Control Record's ID: SHA-256 of its exact bytes (W §13). */
@@ -429,12 +455,21 @@ export async function deliverKeys(options: {
   const skipped: { recipient: string; reason: string }[] = [];
   let complete = 0;
   const epochs = [...options.deks.keys()].sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1));
+  // W §37: without identity-01 the server applies no same-root rule (W §25.2); a sender
+  // without key/distribute is authorized only by it, and sends nothing there.
+  const sameRootOnly =
+    !options.channel.extensions.includes(IDENTITY_EXTENSION) &&
+    !hasAbility(chain.state, sender.descriptor.principalId, ABILITY.KEY_DISTRIBUTE);
   for (const recipient of options.recipients) {
     const rid = recipient.principalId;
     const hex = toHex(rid);
     if (bytesEqual(rid, sender.descriptor.principalId)) continue;
     if (!hasAbility(chain.state, rid, ABILITY.DATA_READ)) {
       skipped.push({ recipient: hex, reason: "not a reader at the head" });
+      continue;
+    }
+    if (sameRootOnly) {
+      skipped.push({ recipient: hex, reason: IDENTITY_UNSUPPORTED });
       continue;
     }
     for (const e of epochs) {

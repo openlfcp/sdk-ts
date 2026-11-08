@@ -74,7 +74,12 @@ import {
   pairingSecretRef,
   phaseOf,
 } from "./journal.js";
-import { ChannelPool, type IdentityChannel, IdentityUnavailable } from "./network.js";
+import {
+  ChannelPool,
+  IDENTITY_EXTENSION,
+  type IdentityChannel,
+  IdentityUnavailable,
+} from "./network.js";
 import { classifyCancel, classifyConsume, classifyRegister, type LinearChain } from "./phases.js";
 import { type IdentityFlowOptions, identityTarget } from "./resource.js";
 import { rotateIfExposed } from "./revocation.js";
@@ -126,9 +131,20 @@ export type PairingSessionResult =
   | { readonly kind: "missing-material"; readonly missing: readonly string[] }
   /** This installation is not the root or an active managing device of it. */
   | { readonly kind: "not-authorized"; readonly reason: string }
+  /**
+   * `I`'s coordinator does not list `identity-01` in READY: it is hosted on
+   * a server without identity support (IDENTITY-PROFILE-01 §6). Nothing is
+   * proposed or uploaded there: no DEVICE_GRANT, no same-root Key Package
+   * (LFCP-WIRE-01 §37).
+   */
+  | { readonly kind: "unsupported"; readonly session?: string; readonly reason: string }
   | { readonly kind: "refused"; readonly code: string }
   | { readonly kind: "conflict" }
   | { readonly kind: "unavailable"; readonly session?: string; readonly reason: string };
+
+/** W §37: the reason of an `unsupported` result. */
+const NO_IDENTITY_SUPPORT =
+  "the Identity Resource is hosted on a server without identity support (its READY does not list identity-01)";
 
 const PAIRING_MASK = [1n, 2n] as const;
 
@@ -167,6 +183,8 @@ export async function createPairingSession(
     pool,
     async (): Promise<PairingSessionResult> => {
       const channel = await pool.get(me, target.url);
+      if (!channel.extensions.includes(IDENTITY_EXTENSION))
+        return { kind: "unsupported", reason: NO_IDENTITY_SUPPORT };
       const chain = await syncChain(o.storage, channel, target.resource);
       const R = genesisOwner(chain);
       if (!mayManageDevices(chain.state, me.descriptor.principalId, R))
@@ -286,6 +304,9 @@ async function finishSession(
   );
   const me = o.installation.signer;
   const channel = await pool.get(me, op.intent.url as string);
+  // A resumed session may meet a server that no longer lists identity-01 (W §37).
+  if (!channel.extensions.includes(IDENTITY_EXTENSION))
+    return { kind: "unsupported", session, reason: NO_IDENTITY_SUPPORT };
   const grant = await runControlPhase(o.storage, channel, journal, session, {
     id: "grant",
     kind: "register",

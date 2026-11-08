@@ -29,6 +29,7 @@ import {
   createPairingSession,
   type DeviceEntryValue,
   exposingRevocationsSince,
+  heldDeks,
   type IdentityChannel,
   IdentityConflict,
   identityWriterClass,
@@ -42,6 +43,7 @@ import {
   principalRefOf,
   readersAt,
   recordSeq,
+  registerDevice,
   rotatorTest,
   signChain,
   storeDek,
@@ -69,7 +71,12 @@ import {
 } from "@openlfcp/wire";
 import { decodeStrict } from "@openlfcp/wire/cbor";
 import { MemoryCoordinator } from "../../packages/client/test/identity/memory-coordinator.js";
-import { device as localDevice } from "../../packages/client/test/identity/support.js";
+import {
+  party as installation,
+  device as localDevice,
+  URL as TEST_URL,
+} from "../../packages/client/test/identity/support.js";
+import { node, world } from "../../packages/client/test/identity/world.js";
 import { equalCheck } from "../checks.js";
 import type { Check, Handler, HandlerContext, HandlerResult, VectorCase } from "../runner.js";
 import { openSpec } from "../spec.mjs";
@@ -576,6 +583,42 @@ async function pairingWithMaterial(held: { root_unit_1: boolean; epochs: number[
       : { outcome: r.kind };
 }
 
+/**
+ * F18_barrier #6 (LFCP-WIRE-01 §37), run: a managing device of the root with
+ * 12 and without 6 in I (its packages are authorized only by the same-root
+ * rule) opens a pairing session, with every DEK and the root's unit 1 held,
+ * on a MemoryCoordinator whose READY lacks identity-01. The real
+ * createPairingSession; every upload is counted.
+ */
+async function pairingWithoutIdentity01(): Promise<Report> {
+  const w = await world(0);
+  const A = node(w.server, installation(2));
+  const root = installation(1).signer.descriptor.principalId;
+  const leaf = leafPayload(root, A.installation.signer.descriptor, 0, [1n, 2n, 12n], []);
+  const chain = signChain(w.server.chain(w.I).state, w.P.installation.signer, leaf);
+  const reg = await registerDevice({ ...w.P, chain, targets: [{ resource: w.I, url: TEST_URL }] });
+  if (reg.results[0]?.status !== "registered") return { outcome: "setup failed" };
+  const I = w.server.chain(w.I);
+  for (const [e, dek] of await heldDeks(w.P.secrets, I))
+    await storeDek(A.storage, A.secrets, I, dataEpoch(BigInt(e)), dek);
+  const sameRootOnly = !hasAbility(
+    I.state,
+    A.installation.signer.descriptor.principalId,
+    ABILITY.KEY_DISTRIBUTE,
+  );
+  w.server.extensions = [];
+  const before = w.server.uploads.length;
+  const r = await createPairingSession({ ...A, identity: { resource: w.I, url: TEST_URL } });
+  const sent = w.server.uploads.length - before;
+  if (!sameRootOnly) return { outcome: "setup failed: the manager holds key/distribute" };
+  return {
+    outcome: sent === 0 ? "not sent" : "sent",
+    ...(r.kind === "unsupported"
+      ? { reported: "hosted on a server without identity support" }
+      : {}),
+  };
+}
+
 /** The text of §7.2 for an invitation a device that cannot write I leaves unclaimed. */
 const HANDED_OVER =
   "complete the invitation on a personal installation that can write I; the link is handed over as received";
@@ -638,10 +681,7 @@ const SPECIALS: Readonly<Record<string, Special>> = {
   },
   "F08.missing_material#2": (_f, step) => pairingWithMaterial(step.held as never),
   "F08.missing_material#3": (_f, step) => pairingWithMaterial(step.held as never),
-  "F18_barrier#6": () =>
-    notVerified(
-      "LFCP-WIRE-01 §37: every identity flow of sdk-ts reads READY first and reports a Resource on a server without identity-01 as unsupported, sending nothing (reconcileDevices status unsupported, createIdentityResource in packages/client/test/identity/resource.test.ts); the fixture gives no flow to run on that server.",
-    ),
+  "F18_barrier#6": () => pairingWithoutIdentity01(),
   // R1 rebuilds at K1: every unit it accepted is classified again at K1 (§19.1, LFCP-023).
   "F01_register_write_revoke_cutoff#9": async (f) => {
     const units = [2, 3, 4, 6].map((n) => wireId(stepOf(f, n)));
