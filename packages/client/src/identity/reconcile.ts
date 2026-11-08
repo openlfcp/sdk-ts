@@ -32,6 +32,7 @@ import {
   type KeyDelivery,
   loadIdentityDocument,
   readersAt,
+  revokedByIdentity,
   runControlPhase,
   runUnitPhase,
   sealIdentityUnit,
@@ -300,10 +301,11 @@ export async function reconcileDevices(
   let document: DocumentWrite = { state: "none" };
   let open = false;
   try {
-    // A rotation an earlier run committed but did not adopt is finished first (§9.1).
-    await resumeRotations({ ...o, pool });
     const channel = await pool.get(me, target.url);
     const I = await syncChain(o.storage, channel, target.resource);
+    // A rotation an earlier run committed but did not adopt is finished first (§9.1). It
+    // seals nothing to a device I has revoked (§7.1 step 1).
+    await resumeRotations({ ...o, pool, identityChain: I });
     const R = genesisOwner(I);
     if (!mayManageDevices(I.state, me.descriptor.principalId, R))
       return {
@@ -464,14 +466,12 @@ export function keyRecipients(
   target: LinearChain,
 ): readonly PrincipalDescriptor[] {
   const R = genesisOwner(identity);
-  const revokedInI = (d: PrincipalId) => revocationOf(identity.state, R, d) !== undefined;
   return Object.freeze(
-    readersAt(target.state).filter((r) => {
-      if (!bytesEqual(actsFor(target.state, r.principalId), R)) return false;
-      if (revokedInI(r.principalId)) return false;
-      const binding = target.state.devices.get(toHex(r.principalId));
-      return binding === undefined || !binding.issuers.some(revokedInI);
-    }),
+    readersAt(target.state).filter(
+      (r) =>
+        bytesEqual(actsFor(target.state, r.principalId), R) &&
+        !revokedByIdentity(identity, target.state, r.principalId),
+    ),
   );
 }
 
@@ -518,7 +518,8 @@ async function reconcileTarget(
   const rotation =
     o.rotate === false
       ? undefined
-      : await rotateIfExposed({ ...o, channel, operation, resource: X });
+      : // §7.1 step 1: the new epoch is sealed to no device I has revoked, nor through one.
+        await rotateIfExposed({ ...o, channel, operation, resource: X, identityChain: I });
   return {
     resource: X,
     status: manages ? "done" : "not-authorized",

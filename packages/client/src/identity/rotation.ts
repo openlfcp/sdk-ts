@@ -36,6 +36,7 @@ import {
   fetchDeks,
   type KeyDelivery,
   readersAt,
+  revokedByIdentity,
   runControlPhase,
   storeDek,
   withoutEquivocations,
@@ -327,7 +328,11 @@ export interface RotationOutcome {
  * reuse it (§9.4). After the ACK the DEK goes to every reader of the new
  * head, each package recorded in the ledger; the revoked device, a
  * consumed or cancelled pairing device and suspended devices are not
- * readers and receive nothing.
+ * readers and receive nothing. With `identityChain`, neither does a reader that
+ * the rotator's Identity Resource has revoked, or whose chain in the
+ * Resource passes through such a device: a pair not yet propagated there
+ * (IDENTITY-PROFILE-01 §7.1 step 1) is treated as revoked, and the rotation
+ * closes the epoch for it as for the device just revoked.
  */
 export async function rotateAfter(
   o: FlowOptions & {
@@ -335,6 +340,8 @@ export async function rotateAfter(
     readonly operation: string;
     readonly resource: ResourceId;
     readonly revokedAt: bigint;
+    /** The Identity Resource of the rotator's root (§7.1 step 1), when the flow knows it. */
+    readonly identityChain?: LinearChain;
   },
 ): Promise<RotationOutcome> {
   checkFlowProfiles(o);
@@ -409,7 +416,11 @@ export async function rotateAfter(
     ledger: new PackageLedger(o.storage),
     chain,
     sender: me,
-    recipients: readersAt(chain.state),
+    recipients: readersAt(chain.state).filter(
+      (r) =>
+        o.identityChain === undefined ||
+        !revokedByIdentity(o.identityChain, chain.state, r.principalId),
+    ),
     deks: send,
   });
   const phase = phaseOf(await journal.load(o.operation), id);
@@ -496,7 +507,11 @@ async function localAccepted(o: FlowOptions, chain: LinearChain): Promise<LocalA
  * it (§9.1, §9.2). Run before planning new work on a Resource.
  */
 export async function resumeRotations(
-  o: FlowOptions & { readonly pool: ChannelPool },
+  o: FlowOptions & {
+    readonly pool: ChannelPool;
+    /** The Identity Resource of this installation's root: see rotateAfter. */
+    readonly identityChain?: LinearChain;
+  },
 ): Promise<readonly RotationOutcome[]> {
   checkFlowProfiles(o);
   const journal = new OperationJournal(o.storage);

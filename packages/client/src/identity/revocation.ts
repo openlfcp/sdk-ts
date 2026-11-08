@@ -293,8 +293,6 @@ export async function revokeDevice(
   const pool = new ChannelPool(o.network);
   const operation = o.operation ?? newOperationId("revoke-device", secureRandom(8));
   try {
-    // Rotations an earlier operation committed but did not adopt are finished first (§9.1).
-    if (!selfRetire) await resumeRotations({ ...o, pool });
     const channel = await pool.get(o.installation.signer, target.url);
     const known = await journal.get(operation);
     let I: LinearChain;
@@ -305,6 +303,9 @@ export async function revokeDevice(
       if (!(e instanceof IdentityRefused) || !selfRetire || known === undefined) throw e;
       return retireElsewhere(o, pool, journal, known);
     }
+    // Rotations an earlier operation committed but did not adopt are finished first (§9.1),
+    // sealing nothing to a device I has revoked (§7.1 step 1).
+    if (!selfRetire) await resumeRotations({ ...o, pool, identityChain: I });
     const R = genesisOwner(I);
     if (!selfRetire && !mayManageDevices(I.state, me, R)) return { kind: "not-authorized" };
     const mine = activeDevice(I.state, me);
@@ -334,6 +335,8 @@ export async function revokeDevice(
     const roster = targetsOf(await journal.load(operation));
     const binding = I.state.devices.get(toHex(o.device));
     const results: RevocationResult[] = [];
+    // I as this operation leaves it: a rotation seals nothing to a device it has revoked.
+    let identityChain = I;
     const one = async (
       c: IdentityChannel,
       X: ResourceId,
@@ -362,11 +365,18 @@ export async function revokeDevice(
       }
       if (outcome.state === "superseded") return { resource: X, revoke: "superseded" };
       if (outcome.state === "refused") return { resource: X, revoke: "refused" };
+      if (!inRoster) identityChain = outcome.chain;
       const revoke = outcome.state === "committed-own" ? "revoked" : "complete";
       if (selfRetire && o.reason === 0n) return { resource: X, revoke };
       let rotation: RotationOutcome;
       try {
-        rotation = await rotateIfExposed({ ...o, channel: c, operation, resource: X });
+        rotation = await rotateIfExposed({
+          ...o,
+          channel: c,
+          operation,
+          resource: X,
+          identityChain,
+        });
       } catch (e) {
         // The revocation stands; the rotation resumes from the journal (§9.1).
         if (!(e instanceof IdentityUnavailable)) throw e;
@@ -595,6 +605,8 @@ export async function rotateIfExposed(
     readonly channel: IdentityChannel;
     readonly operation: string;
     readonly resource: ResourceId;
+    /** The Identity Resource of this installation's root: see rotateAfter. */
+    readonly identityChain?: LinearChain;
   },
 ): Promise<RotationOutcome> {
   checkFlowProfiles(o);

@@ -33,6 +33,7 @@ import {
   parseKeyPackage,
   receiveDataUnit,
   receiveKeyPackage,
+  revocationOf,
   type Signer,
   sealDataUnit,
   sealKeyPackage,
@@ -374,6 +375,27 @@ export function readersAt(state: LinearChain["state"]): readonly PrincipalDescri
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([, d]) => d),
   );
+}
+
+/**
+ * IDENTITY-PROFILE-01 §7.1 step 1: whether `principal`, a reader of the
+ * target state, is a device that the Identity Resource `identity` has
+ * revoked, or whose current chain in the target passes through such a
+ * device. Until the pair is propagated the target still counts the device
+ * as active (an unpropagated pair), but the installations of `identity`'s
+ * root treat it as revoked there and seal nothing to it, in a rotation as
+ * in step 3.
+ */
+export function revokedByIdentity(
+  identity: LinearChain,
+  target: LinearChain["state"],
+  principal: PrincipalId,
+): boolean {
+  const R = genesisOwner(identity);
+  const revoked = (d: PrincipalId) => revocationOf(identity.state, R, d) !== undefined;
+  if (revoked(principal)) return true;
+  const binding = target.devices.get(toHex(principal));
+  return binding !== undefined && bytesEqual(binding.root, R) && binding.issuers.some(revoked);
 }
 
 export interface KeyDelivery {
