@@ -4,6 +4,54 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.5.1 — unreleased
+
+A patch release for the holistic review of MVP 0.4 (findings F1 and F2): no
+export is removed or renamed, no result union gains a variant, and no wire or
+storage format changes. Journals and stores written by 0.5.0 load unchanged.
+
+### Fixed
+
+- A rotation resumed or retried without `identityChain` no longer seals the
+  new DEK to a device that the installation's Identity Resource has revoked
+  while the Resource still counts it as active (IDENTITY-PROFILE-01 §7.1
+  step 1; F1). `rotateAfter`, `rotateIfExposed` and `resumeRotations` now
+  use, when the caller gives no chain, the Identity Resource the rotation
+  phase recorded, or else the one this installation recorded as its own, as
+  stored locally. While that Identity Resource is forked, the rotation
+  throws `IdentityConflict` and seals nothing (§9.7). An installation
+  without an Identity Resource delivers to every reader, as before.
+- A committed rotation keeps its delivery owed until every eligible reader,
+  of every root, has its Key Package (§§8.2, 9.1, 9.5; F2). Before the new
+  DEK is adopted and its pending slot deleted, the rotation phase is marked
+  `delivery: "outstanding"` (with its `epoch`) in the operation journal.
+  The mark becomes `done` only when no package was skipped.
+  `resumeRotations`, which `reconcileDevices` runs first, resumes marked
+  phases too. So a crash after adoption, or a transport failure or refusal
+  during delivery, is finished by the next ordinary reconciliation without
+  a new KEY_EPOCH, other people's devices included. Before, only the
+  root's own devices were served again (§7.1 step 3).
+- `resumeRotations` reports a rotation on a forked Resource as
+  `unreachable` with code `CONTROL_CONFLICT` and leaves it owed, instead of
+  aborting the whole call.
+
+### Added
+
+- `outstandingDeliveries({ storage, installation })`: the committed
+  rotations whose packages are still owed, each with the readers (of every
+  root, after the §7.1 step 1 filter) that the ledger has no package of
+  the new epoch for, from local state only. Use it to show an outstanding
+  handover until it is delivered.
+- `resumeRotations` and `deliveryIdentity` are exported. `deliveryIdentity`
+  is the Identity Resource that filters a delivery.
+
+### Not covered
+
+- A 0.5.0 rotation that crashed after adopting its DEK and before
+  delivering has no mark, so 0.5.1 does not find it. Reconciliation still
+  serves the root's own devices from the ledger. Other roots' readers need
+  an explicit `rotateIfExposed` on that operation.
+
 ## 0.5.0 — 2026-11-08
 
 0.4.0 at `mvp-0.4-baseline.4` (finding 1 and the profile and corpus findings
