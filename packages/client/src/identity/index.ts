@@ -170,13 +170,17 @@ export {
   writeRosterEntry,
 } from "./roster.js";
 export {
+  deliveryIdentity,
   type ExposingRevocation,
   exposingRevocationsSince,
   type FrontierData,
   type LocalAccepted,
+  type OutstandingDelivery,
+  outstandingDeliveries,
   type RotationOutcome,
   type RotationStatus,
   type RotatorTest,
+  resumeRotations,
   rotateAfter,
   rotatorTest,
   verifiedFrontier,
