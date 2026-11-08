@@ -4,6 +4,16 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## Unreleased
+
+### Spec pin: `mvp-0.4-baseline.3`
+
+- `spec.lock` pins `mvp-0.4-baseline.3` (`6af372b`), moving from
+  `mvp-0.4-baseline.2`. It clarifies the depth of admission rule AI2
+  (IDENTITY-PROFILE-01 §3) and adds 25 profile cases of that boundary;
+  no published value changes (`migrations/mvp-0.4-baseline.3/`). sdk-ts
+  already decided every new case as the corpus does: no code change.
+
 ## 0.4.0 — 2026-11-07
 
 The 0.4 line: one fix of 0.3.1 from the review of the plugin that uses it
