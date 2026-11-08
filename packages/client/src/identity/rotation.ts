@@ -3,6 +3,7 @@ import {
   type ControlRecordId,
   controlRecordId,
   type DataEpoch,
+  dataEpoch,
   fromHex,
   type PrincipalId,
   type ResourceId,
@@ -34,6 +35,8 @@ import { loadControlChain } from "../storage.js";
 import {
   deliverKeys,
   fetchDeks,
+  IdentityConflict,
+  type IdentityStorage,
   type KeyDelivery,
   readersAt,
   revokedByIdentity,
@@ -44,6 +47,7 @@ import {
 import type { FlowOptions, UnitProfile } from "./devices.js";
 import {
   getPendingDek,
+  type JournalPhase,
   OperationJournal,
   PackageLedger,
   pendingDekRef,
@@ -52,6 +56,7 @@ import {
 } from "./journal.js";
 import { type ChannelPool, type IdentityChannel, IdentityUnavailable } from "./network.js";
 import { keyEpochAfter, type LinearChain, type PhaseState, recordSeq } from "./phases.js";
+import { localIdentityResource } from "./resource.js";
 
 /**
  * Key rotation after device revocations (IDENTITY-PROFILE-01 §8.1–§8.4,
@@ -333,6 +338,20 @@ export interface RotationOutcome {
  * Resource passes through such a device: a pair not yet propagated there
  * (IDENTITY-PROFILE-01 §7.1 step 1) is treated as revoked, and the rotation
  * closes the epoch for it as for the device just revoked.
+ *
+ * Without `identityChain` the filter is not dropped (0.5.1): the Identity
+ * Resource the phase recorded, or else the one this installation recorded
+ * as its own, is read from storage (`deliveryIdentity`), so a resumed or
+ * retried rotation filters as the first attempt did. While that Identity
+ * Resource is forked (§9.7) the rotation throws IdentityConflict and seals
+ * nothing; an installation without one delivers to every reader.
+ *
+ * Delivery is durable (§9.1, §9.5): before the DEK is adopted and its
+ * pending slot deleted, the phase is marked as owing delivery (facts
+ * `delivery: "outstanding"`, `epoch`), and the mark is cleared only when
+ * every package to the eligible readers, of every root, is in the ledger.
+ * resumeRotations resumes a marked phase, so a crash after adoption or a
+ * transport failure during delivery leaves the packages owed, never lost.
  */
 export async function rotateAfter(
   o: FlowOptions & {
@@ -349,13 +368,22 @@ export async function rotateAfter(
   const me = o.installation.signer;
   const R = o.resource;
   const id = `rotate:${toHex(R)}`;
+  const prior = phaseOf(await journal.load(o.operation), id);
+  // §7.1 step 1: the revocation filter of every delivery this rotation makes, decided before
+  // anything is sent; a forked Identity Resource suspends the rotation (§9.7).
+  const identity = await deliveryIdentity(o, prior?.facts?.identity);
   // The epoch of this operation's own accepted KEY_EPOCH, found by its record ID.
   let ownEpoch: DataEpoch | undefined;
   const outcome = await runControlPhase(o.storage, o.channel, journal, o.operation, {
     id,
     kind: "rotate",
     resource: R,
-    facts: { revokedAt: String(o.revokedAt) },
+    // The delivery mark and the Identity Resource survive every reclassification.
+    facts: {
+      ...prior?.facts,
+      revokedAt: String(o.revokedAt),
+      ...(identity === undefined ? {} : { identity: toHex(identity.state.resourceId) }),
+    },
     // §9.3: rebuilt with the current accepted set on every attempt, even on the same head.
     resend: false,
     classify: (chain, isOwn): PhaseState => {
@@ -401,6 +429,9 @@ export async function rotateAfter(
     // another rotator may have closed it since (§9.2, §9.3).
     const dek = await getPendingDek(o.secrets, R, o.operation);
     if (dek !== undefined && ownEpoch !== undefined) {
+      // The delivery is owed before the pending slot goes: whatever stops this run from here
+      // on, resumeRotations finds the phase by its mark (§9.1, §9.5).
+      await setDelivery(journal, o.operation, id, "outstanding", ownEpoch);
       await storeDek(o.storage, o.secrets, chain, ownEpoch, dek);
       await o.secrets.delete(pendingDekRef(R, o.operation));
     }
@@ -417,19 +448,136 @@ export async function rotateAfter(
     chain,
     sender: me,
     recipients: readersAt(chain.state).filter(
-      (r) =>
-        o.identityChain === undefined ||
-        !revokedByIdentity(o.identityChain, chain.state, r.principalId),
+      (r) => identity === undefined || !revokedByIdentity(identity, chain.state, r.principalId),
     ),
     deks: send,
   });
   const phase = phaseOf(await journal.load(o.operation), id);
+  // Every eligible reader has every package (a refused one stays owed, and is resumed).
+  if (phase?.facts?.delivery === "outstanding" && keys.skipped.length === 0)
+    await setDelivery(journal, o.operation, id, "done");
   return {
     resource: R,
     status: phase?.state === "committed-own" ? "rotated" : "complete",
     epoch,
     keys,
   };
+}
+
+/** Marks the rotation phase `id` of `operation` as owing its packages, or as delivered. */
+async function setDelivery(
+  journal: OperationJournal,
+  operation: string,
+  id: string,
+  delivery: "outstanding" | "done",
+  epoch?: DataEpoch,
+): Promise<void> {
+  const phase = phaseOf(await journal.load(operation), id) as JournalPhase;
+  await journal.putPhase(operation, {
+    ...phase,
+    facts: {
+      ...phase.facts,
+      delivery,
+      ...(epoch === undefined ? {} : { epoch: String(epoch) }),
+    },
+  });
+}
+
+/**
+ * IDENTITY-PROFILE-01 §7.1 step 1: the Identity Resource whose revocations
+ * filter a delivery this installation makes. The caller's `identityChain`
+ * when it gives one; else the Identity Resource a phase recorded
+ * (`recorded`, hex), or this installation's own (localIdentityResource), as
+ * stored here. Undefined when there is none, or its chain is not stored
+ * (nothing is known of its revocations). Throws IdentityConflict while that
+ * Identity Resource is forked (§9.7): no delivery acting for it is made.
+ */
+export async function deliveryIdentity(
+  o: { readonly storage: IdentityStorage; readonly identityChain?: LinearChain },
+  recorded?: string,
+): Promise<LinearChain | undefined> {
+  const I =
+    o.identityChain?.state.resourceId ??
+    (recorded === undefined
+      ? await localIdentityResource(o.storage)
+      : resourceId(fromHex(recorded)));
+  if (I === undefined) return undefined;
+  const forked = () =>
+    new IdentityConflict(I, "the Identity Resource is forked: key delivery is suspended (§9.7)");
+  if ((await o.storage.control.conflict(I)) !== undefined) throw forked();
+  if (o.identityChain !== undefined) return o.identityChain;
+  const stored = await loadControlChain(o.storage, I);
+  if (stored === undefined) return undefined;
+  if (stored.kind !== "linear") throw forked();
+  return stored;
+}
+
+/** A committed rotation whose packages are still owed (rotateAfter's delivery mark). */
+export interface OutstandingDelivery {
+  /** The journaled operation that made the rotation (any kind: rotate, reconcile, revocation…). */
+  readonly operation: string;
+  readonly resource: ResourceId;
+  /** The epoch the rotation opened. */
+  readonly epoch: DataEpoch;
+  /**
+   * The readers (hex) of the stored head, of every root, that the ledger
+   * has no package of `epoch` for, after the §7.1 step 1 filter. While the
+   * Identity Resource is forked the eligibility of the root's own devices
+   * cannot be decided and only other roots' readers are listed.
+   */
+  readonly recipients: readonly string[];
+}
+
+/**
+ * The committed rotations whose delivery is still owed, from local state
+ * only (the journal, the stored chains and the package ledger): what a
+ * client shows as an outstanding handover until resumeRotations delivers
+ * it (§9.1, §9.5).
+ */
+export async function outstandingDeliveries(
+  o: Pick<FlowOptions, "storage" | "installation"> & { readonly identityChain?: LinearChain },
+): Promise<readonly OutstandingDelivery[]> {
+  const ledger = new PackageLedger(o.storage);
+  const me = o.installation.signer.descriptor.principalId;
+  const out: OutstandingDelivery[] = [];
+  for (const op of await new OperationJournal(o.storage).list())
+    for (const phase of op.phases) {
+      if (phase.kind !== "rotate" || phase.facts?.delivery !== "outstanding") continue;
+      if (phase.facts.epoch === undefined) continue;
+      const R = resourceId(fromHex(phase.resource));
+      const epoch = dataEpoch(BigInt(phase.facts.epoch));
+      const stored = await loadControlChain(o.storage, R);
+      if (stored?.kind !== "linear") {
+        out.push(Object.freeze({ operation: op.id, resource: R, epoch, recipients: [] }));
+        continue;
+      }
+      let identity: LinearChain | undefined;
+      let forked = false;
+      try {
+        identity = await deliveryIdentity(o, phase.facts.identity);
+      } catch (e) {
+        if (!(e instanceof IdentityConflict)) throw e;
+        forked = true;
+      }
+      const root = actsFor(stored.state, me);
+      const recipients: string[] = [];
+      for (const r of readersAt(stored.state)) {
+        const p = r.principalId;
+        if (bytesEqual(p, me)) continue;
+        if (forked && bytesEqual(actsFor(stored.state, p), root)) continue;
+        if (identity !== undefined && revokedByIdentity(identity, stored.state, p)) continue;
+        if (!(await ledger.has(R, epoch, p))) recipients.push(toHex(p));
+      }
+      out.push(
+        Object.freeze({
+          operation: op.id,
+          resource: R,
+          epoch,
+          recipients: Object.freeze(recipients),
+        }),
+      );
+    }
+  return Object.freeze(out);
 }
 
 /**
@@ -501,10 +649,15 @@ async function localAccepted(o: FlowOptions, chain: LinearChain): Promise<LocalA
 }
 
 /**
- * Resumes every rotation a journaled operation started and did not adopt:
- * a KEY_EPOCH whose ACK was lost leaves its DEK in the operation's pending
- * slot, whatever operation (revocation, reconciliation, pairing) started
- * it (§9.1, §9.2). Run before planning new work on a Resource.
+ * Resumes every rotation a journaled operation started and did not finish,
+ * whatever operation (revocation, reconciliation, pairing) started it
+ * (§9.1, §9.2): a KEY_EPOCH whose ACK was lost leaves its DEK in the
+ * operation's pending slot; a committed one whose packages are still owed
+ * carries rotateAfter's delivery mark (a crash after the DEK was adopted, a
+ * transport failure or a refusal during delivery). Run before planning new
+ * work on a Resource. Without `identityChain` each rotation still filters
+ * by deliveryIdentity; a forked Resource or Identity Resource reports the
+ * rotation `unreachable` with code CONTROL_CONFLICT and leaves it owed.
  */
 export async function resumeRotations(
   o: FlowOptions & {
@@ -520,7 +673,11 @@ export async function resumeRotations(
     for (const phase of op.phases) {
       if (phase.kind !== "rotate" || phase.facts?.revokedAt === undefined) continue;
       const R = resourceId(fromHex(phase.resource));
-      if ((await getPendingDek(o.secrets, R, op.id)) === undefined) continue;
+      if (
+        phase.facts.delivery !== "outstanding" &&
+        (await getPendingDek(o.secrets, R, op.id)) === undefined
+      )
+        continue;
       const stored = await loadControlChain(o.storage, R);
       if (stored?.kind !== "linear") continue;
       try {
@@ -535,8 +692,10 @@ export async function resumeRotations(
           }),
         );
       } catch (e) {
-        if (!(e instanceof IdentityUnavailable)) throw e;
-        out.push({ resource: R, status: "unreachable" });
+        if (e instanceof IdentityConflict)
+          out.push({ resource: R, status: "unreachable", code: "CONTROL_CONFLICT" });
+        else if (e instanceof IdentityUnavailable) out.push({ resource: R, status: "unreachable" });
+        else throw e;
       }
     }
   return Object.freeze(out);
