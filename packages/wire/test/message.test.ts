@@ -284,6 +284,34 @@ describe("every other body round-trips (§39-§61)", () => {
     );
   });
 
+  it("refuses a CONTROL_GET range whose end is below its start (§45)", () => {
+    const get = (start: number, end: number) =>
+      encode(
+        cborMap([
+          [0, 21],
+          [1, ID],
+          [
+            4,
+            cborMap([
+              [0, R],
+              [1, start],
+              [2, end],
+            ]),
+          ],
+        ]),
+      );
+    expect(codeOf(() => decodeMessage(get(5, 2)))).toBe("INVALID_STRUCTURE");
+    for (const [start, end] of [
+      [0, 0],
+      [5, 5],
+      [2, 9],
+    ] as const)
+      expect(decodeMessage(get(start, end))).toMatchObject({
+        type: "CONTROL_GET",
+        body: { start: BigInt(start), end: BigInt(end) },
+      });
+  });
+
   it("decodes live haves as received, refuses reversed ranges and sequence 0 (G-HV1), and calls the hook", () => {
     const unsorted = msg("DATA_HAVE", {
       resourceId: R,

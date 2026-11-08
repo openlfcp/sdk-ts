@@ -645,7 +645,11 @@ const CODECS: { readonly [K in CoreMessageType]: BodyCodec<MessageBodies[K]> } =
   CONTROL_GET: {
     decode(value) {
       const f = new Fields(value, "control-get-body", [0, 1, 2]);
-      return Object.freeze({ resourceId: rid(f, 0), start: f.uint(1), end: f.uint(2) });
+      const start = f.uint(1);
+      const end = f.uint(2);
+      // §45: a range whose end is below its start is MALFORMED_MESSAGE.
+      if (end < start) invalid("control-get-body", "the range's end is below its start (§45)");
+      return Object.freeze({ resourceId: rid(f, 0), start, end });
     },
     encode: (b) =>
       map([
