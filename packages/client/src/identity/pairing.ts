@@ -257,10 +257,15 @@ async function missingMaterial(
           dek: (epoch) => deks.get(String(epoch)),
           profile: identityPlaintextCodec,
         });
-  // A unit held whose epoch's DEK is missing is not missing itself: the DEK is listed.
-  const epochMissing =
-    unit !== undefined && !deks.has(String(parseDataUnit(unit).payload.dataEpoch));
-  if (opened?.kind !== "accepted" && !epochMissing)
+  // A unit held whose only failure is the missing DEK of a real epoch of I (every other
+  // check passed, and that DEK is listed above) is not missing itself. A unit naming an
+  // epoch I does not have, or failing any other check, is missing (§5.3 step 1).
+  const onlyDekMissing =
+    opened?.kind === "local-failure" &&
+    opened.reason === "NO_DEK" &&
+    unit !== undefined &&
+    chain.state.epochs.has(String(parseDataUnit(unit).payload.dataEpoch));
+  if (opened?.kind !== "accepted" && !onlyDekMissing)
     missing.push("the root's Data Unit with actor sequence 1");
   return missing;
 }

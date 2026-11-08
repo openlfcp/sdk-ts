@@ -1,6 +1,7 @@
-import { bytesEqual, dataEpoch, toHex } from "@openlfcp/core";
+import { actorSequence, bytesEqual, dataEpoch, toHex } from "@openlfcp/core";
+import { generateResourceDEK } from "@openlfcp/crypto";
 import { dekSecretRef } from "@openlfcp/storage";
-import { DEVICE_KIND, parseControlRecord } from "@openlfcp/wire";
+import { DEVICE_KIND, parseControlRecord, sealDataUnit } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
 import { principalRefOf } from "../../src/identity/document.js";
 import { OperationJournal } from "../../src/identity/journal.js";
@@ -196,6 +197,63 @@ describe("pairing a personal installation (IDENTITY-PROFILE-01 §5.3)", { timeou
     await w.P.secrets.delete(dekSecretRef(w.I, dataEpoch(0n)));
     const s = await createPairingSession(w.P);
     expect(s.kind).toBe("missing-material");
+    // Unit 1 is held and only its epoch's DEK is missing: the DEK alone is listed.
+    expect(s.kind === "missing-material" && s.missing).toEqual(["the DEK of epoch 0"]);
+  });
+
+  // Review LFCP-04-415f finding 2: the unit-1 message is withheld only for a
+  // NO_DEK result on a real epoch of I, never from the unit's header alone.
+  const rootUnitOnly = (w: Awaited<ReturnType<typeof world>>, bytes: Uint8Array) => {
+    w.server.hosted.get(toHex(w.I))?.units.clear();
+    w.server.inject(w.I, bytes);
+  };
+
+  test("a root unit 1 naming an epoch I does not have is missing, not a missing DEK (§5.3 step 1)", async () => {
+    const w = await world(0);
+    const chain = w.server.chain(w.I);
+    const bad = sealDataUnit(
+      {
+        resourceId: w.I,
+        controlHead: chain.state.head,
+        dataEpoch: dataEpoch(999n),
+        actorSeq: actorSequence(1n),
+        prevDataUnitId: null,
+      },
+      new Uint8Array([1]),
+      generateResourceDEK(),
+      w.P.installation.signer,
+    );
+    rootUnitOnly(w, bad.bytes);
+    const s = await createPairingSession(w.P);
+    expect(s.kind).toBe("missing-material");
+    expect(s.kind === "missing-material" && s.missing).toEqual([
+      "the root's Data Unit with actor sequence 1",
+    ]);
+  });
+
+  test("a root unit 1 refused for another reason stays missing while its epoch's DEK is missing (§5.3 step 1)", async () => {
+    const w = await world(0);
+    // Epoch 0 of I, but on a Control head I never had: not eligible, whatever the DEK.
+    const bad = sealDataUnit(
+      {
+        resourceId: w.I,
+        controlHead: new Uint8Array(32).fill(7) as never,
+        dataEpoch: dataEpoch(0n),
+        actorSeq: actorSequence(1n),
+        prevDataUnitId: null,
+      },
+      new Uint8Array([1]),
+      generateResourceDEK(),
+      w.P.installation.signer,
+    );
+    rootUnitOnly(w, bad.bytes);
+    await w.P.secrets.delete(dekSecretRef(w.I, dataEpoch(0n)));
+    const s = await createPairingSession(w.P);
+    expect(s.kind).toBe("missing-material");
+    expect(s.kind === "missing-material" && s.missing).toEqual([
+      "the DEK of epoch 0",
+      "the root's Data Unit with actor sequence 1",
+    ]);
   });
 
   test("a lost answer of J's DEVICE_GRANT: the link is shown after the journal completes (§5.3 step 1)", async () => {
