@@ -37,6 +37,13 @@
       "why": "IDENTITY-PROFILE-01 §4 rule 2: a field, or a roster/devices entry, with concurrent values. sdk-ts reports `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs); sdk-rs reports `<key>`, one value, which must be one of them (a reader MAY show any concurrent value, never another). Same merged document, two views (spec question 6)."
     },
     {
+      "corpus": "identity-profile.json",
+      "case": "device_conflicted_platform",
+      "field": "post_state.platform",
+      "conflict_set": "sdk-ts",
+      "why": "IDENTITY-PROFILE-01 §4 rule 2: a field, or a roster/devices entry, with concurrent values. sdk-ts reports `<key>_conflict_set`, every concurrent value (the convention of the corpus's own entry inputs); sdk-rs reports `<key>`, one value, which must be one of them (a reader MAY show any concurrent value, never another). Same merged document, two views (spec question 6)."
+    },
+    {
       "corpus": "identity-flows.json",
       "case": "F08_pairing_personal",
       "step": 12,
@@ -83,6 +90,46 @@
       "field": "Y",
       "side": "sdk-ts",
       "why": "The candidate evidence of §5.3 step 8 at the X-with-C0 registration: sdk-ts reports every Resource the fixture names outside the result's scope ([X]) as never shown as granted at each step that states candidate evidence; sdk-rs reports Y at steps 9 and 15 (where it agrees) but not 13."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "case": "F08.link_rejected",
+      "step": 2,
+      "field": "p:*",
+      "side": "sdk-rs",
+      "why": "At the profile step that writes PAIR_J's request (profile:pairing_writes_own_request, as at F08_pairing_personal step 12), sdk-rs reports the Identity Resource document's device entries as a table (entry by PrincipalRef, with active/registered/revoked/suspended of that table); sdk-ts reports the profile case's outcome only. The fixture states no device table here."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "case": "F08.link_rejected",
+      "step": 2,
+      "field": "active",
+      "side": "sdk-rs",
+      "why": "Same table as p:* at this step (see the entry above)."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "case": "F08.link_rejected",
+      "step": 2,
+      "field": "registered",
+      "side": "sdk-rs",
+      "why": "Same table as p:* at this step (see the entry above)."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "case": "F08.link_rejected",
+      "step": 2,
+      "field": "revoked",
+      "side": "sdk-rs",
+      "why": "Same table as p:* at this step (see the entry above)."
+    },
+    {
+      "corpus": "identity-flows.json",
+      "case": "F08.link_rejected",
+      "step": 2,
+      "field": "suspended",
+      "side": "sdk-rs",
+      "why": "Same table as p:* at this step (see the entry above)."
     }
   ]
 }

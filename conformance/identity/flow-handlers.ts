@@ -938,8 +938,8 @@ async function runStep(
       }
       if (c.kind === "session_read") {
         const post = run.report.post_state as Json;
-        for (const k of ["absent_fields", "records", "trimmed_at", "competing_returned"])
-          if (post?.[k] !== undefined) report[k] = post[k];
+        // The coordinator's answer (W §41), field by field, as sdk-rs exports it.
+        if (post !== null && typeof post === "object") Object.assign(report, post);
         if (post?.read === "prefix") {
           report.status = "revocation proven";
           report.head = post.control_head;
@@ -1338,10 +1338,6 @@ const STATED_ONLY = new Set([
   "DEV_M2_leaf",
   "DEV_B_bound",
   "DEV_B_leaf",
-  "absent_fields",
-  "records",
-  "trimmed_at",
-  "competing_returned",
   ...Object.keys(wire.fixtures.resources),
 ]);
 

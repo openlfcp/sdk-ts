@@ -466,6 +466,9 @@ function linkRejection(i: Json): string | undefined {
   const reader = readersAt(chain.state).some((r) => bytesEqual(r.principalId, J));
   return pairingLinkRejection(J, reader ? chain : { refused: "AUTHORIZATION_FAILED" });
 }
+/** The link's device, accepted when every check passes (as a pair_uri bytes case reports it). */
+const linkDevice = (i: Json): PrincipalId =>
+  pairingDeviceSigner(parsePairingUri(String(i.uri))).descriptor.principalId;
 
 const pairUriRejected: Handler = (c) => {
   const i = c.inputs as Json;
@@ -492,7 +495,7 @@ const pairUriRejected: Handler = (c) => {
     ],
     report:
       code === null
-        ? accepted([])
+        ? accepted(i.binding_head === undefined ? [] : [toHex(linkDevice(i))])
         : refusedReport(code, null, code === "PAIRING_LINK_REJECTED" ? undefined : code),
   };
 };

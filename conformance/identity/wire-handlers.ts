@@ -726,6 +726,9 @@ export function sessionReadReport(c: VectorCase): Report {
                 .sort()
             : [],
         };
+  // Presence reads no Control Record: a reader is answered, a revoked reader refused below.
+  if (i.request === "PRESENCE" && hasAbility(chain.state, session, ABILITY.DATA_READ))
+    return accept([], { read: "full" });
   if (hasAbility(chain.state, session, ABILITY.DATA_READ))
     return accept([chain.state.head], {
       read: "full",
