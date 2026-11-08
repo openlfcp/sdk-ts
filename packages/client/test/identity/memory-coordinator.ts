@@ -217,7 +217,9 @@ export class MemoryCoordinator {
         reach(r);
         if (this.offline) throw new IdentityUnavailable("offline");
         const h = hosted(r);
-        if (h === undefined) throw new IdentityUnavailable("not hosted");
+        // A NACK, as the connection network reports it (CONTROL_GET of W §45).
+        if (h === undefined)
+          throw new IdentityRefused("RESOURCE_NOT_HOSTED", "CONTROL_GET was refused");
         const access = this.#reader(h, signer);
         if (access === undefined) {
           throw new IdentityRefused("AUTHORIZATION_FAILED", "CONTROL_GET was refused");

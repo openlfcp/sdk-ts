@@ -54,7 +54,12 @@ import {
   phaseOf,
   putPendingDek,
 } from "./journal.js";
-import { type ChannelPool, type IdentityChannel, IdentityUnavailable } from "./network.js";
+import {
+  type ChannelPool,
+  type IdentityChannel,
+  IdentityRefused,
+  IdentityUnavailable,
+} from "./network.js";
 import { keyEpochAfter, type LinearChain, type PhaseState, recordSeq } from "./phases.js";
 import { localIdentityResource } from "./resource.js";
 
@@ -371,7 +376,8 @@ export async function rotateAfter(
   const prior = phaseOf(await journal.load(o.operation), id);
   // §7.1 step 1: the revocation filter of every delivery this rotation makes, decided before
   // anything is sent; a forked Identity Resource suspends the rotation (§9.7).
-  const identity = await deliveryIdentity(o, prior?.facts?.identity);
+  const recorded = prior?.facts?.identity;
+  const identity = await deliveryIdentity(o, recorded);
   // The epoch of this operation's own accepted KEY_EPOCH, found by its record ID.
   let ownEpoch: DataEpoch | undefined;
   const outcome = await runControlPhase(o.storage, o.channel, journal, o.operation, {
@@ -442,13 +448,20 @@ export async function rotateAfter(
   // Every epoch held from the rotated one on, to every reader of the head (§8.2); a takeover
   // seals only what it holds (§9.6).
   const send = new Map([...deks].filter(([e]) => BigInt(e) >= epoch));
+  // The filter again at delivery time: the control work above may have stored a newer
+  // chain of the Identity Resource (its own rotation, or another session's sync), and a
+  // revocation known here is never forgotten (§7.1 step 1).
+  const filter = await deliveryIdentity(
+    o,
+    recorded ?? (identity === undefined ? undefined : toHex(identity.state.resourceId)),
+  );
   const keys = await deliverKeys({
     channel: o.channel,
     ledger: new PackageLedger(o.storage),
     chain,
     sender: me,
     recipients: readersAt(chain.state).filter(
-      (r) => identity === undefined || !revokedByIdentity(identity, chain.state, r.principalId),
+      (r) => filter === undefined || !revokedByIdentity(filter, chain.state, r.principalId),
     ),
     deks: send,
   });
@@ -485,12 +498,15 @@ async function setDelivery(
 
 /**
  * IDENTITY-PROFILE-01 §7.1 step 1: the Identity Resource whose revocations
- * filter a delivery this installation makes. The caller's `identityChain`
- * when it gives one; else the Identity Resource a phase recorded
- * (`recorded`, hex), or this installation's own (localIdentityResource), as
- * stored here. Undefined when there is none, or its chain is not stored
- * (nothing is known of its revocations). Throws IdentityConflict while that
- * Identity Resource is forked (§9.7): no delivery acting for it is made.
+ * filter a delivery this installation makes: the one of the caller's
+ * `identityChain`, else the one a phase recorded (`recorded`, hex), else
+ * this installation's own (localIdentityResource). Its chain is the newer
+ * of the caller's and the one stored here (one extends the other), so a
+ * supplied snapshot never hides a revocation already stored; the caller's
+ * alone when none is stored. Undefined without an Identity Resource, or
+ * when neither chain is at hand (nothing is known of its revocations).
+ * Throws IdentityConflict while that Identity Resource is forked (§9.7),
+ * including when the two chains diverge: no delivery acting for it is made.
  */
 export async function deliveryIdentity(
   o: { readonly storage: IdentityStorage; readonly identityChain?: LinearChain },
@@ -505,11 +521,24 @@ export async function deliveryIdentity(
   const forked = () =>
     new IdentityConflict(I, "the Identity Resource is forked: key delivery is suspended (§9.7)");
   if ((await o.storage.control.conflict(I)) !== undefined) throw forked();
-  if (o.identityChain !== undefined) return o.identityChain;
   const stored = await loadControlChain(o.storage, I);
-  if (stored === undefined) return undefined;
-  if (stored.kind !== "linear") throw forked();
-  return stored;
+  if (stored !== undefined && stored.kind !== "linear") throw forked();
+  if (o.identityChain === undefined || stored === undefined) return stored ?? o.identityChain;
+  // A supplied chain never hides what is stored here: of two histories of I, one extending
+  // the other, the longer one; two that diverge are a fork (§9.7), never chosen by length.
+  const [shorter, longer] =
+    stored.records.length <= o.identityChain.records.length
+      ? [stored, o.identityChain]
+      : [o.identityChain, stored];
+  for (let i = 0; i < shorter.records.length; i++)
+    if (
+      !bytesEqual(
+        shorter.records[i]?.signed.id as Uint8Array,
+        longer.records[i]?.signed.id as Uint8Array,
+      )
+    )
+      throw forked();
+  return longer;
 }
 
 /** A committed rotation whose packages are still owed (rotateAfter's delivery mark). */
@@ -655,9 +684,12 @@ async function localAccepted(o: FlowOptions, chain: LinearChain): Promise<LocalA
  * operation's pending slot; a committed one whose packages are still owed
  * carries rotateAfter's delivery mark (a crash after the DEK was adopted, a
  * transport failure or a refusal during delivery). Run before planning new
- * work on a Resource. Without `identityChain` each rotation still filters
- * by deliveryIdentity; a forked Resource or Identity Resource reports the
- * rotation `unreachable` with code CONTROL_CONFLICT and leaves it owed.
+ * work on a Resource. Each rotation filters by deliveryIdentity, resolved
+ * again for each one. Each Resource is resumed on its own and keeps its
+ * obligation when it fails: a forked Resource or Identity Resource reports
+ * `unreachable` with code CONTROL_CONFLICT, a read the coordinator refuses
+ * (unhosted, read access revoked) `refused` with the NACK's code, an
+ * unreachable one `unreachable`; the next Resource is still resumed.
  */
 export async function resumeRotations(
   o: FlowOptions & {
@@ -692,9 +724,14 @@ export async function resumeRotations(
           }),
         );
       } catch (e) {
+        // Each Resource on its own: one that is forked, unreachable or refuses this
+        // installation's read (unhosted, read access revoked) keeps its obligation and is
+        // reported; the next Resource is still resumed.
         if (e instanceof IdentityConflict)
           out.push({ resource: R, status: "unreachable", code: "CONTROL_CONFLICT" });
         else if (e instanceof IdentityUnavailable) out.push({ resource: R, status: "unreachable" });
+        else if (e instanceof IdentityRefused)
+          out.push({ resource: R, status: "refused", code: e.code });
         else throw e;
       }
     }
