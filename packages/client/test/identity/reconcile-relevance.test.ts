@@ -10,7 +10,12 @@ import {
 import { describe, expect, test } from "vitest";
 import { readersAt } from "../../src/identity/context.js";
 import { createPairingSession } from "../../src/identity/pairing.js";
-import { keyRecipients, reconcileDevices } from "../../src/identity/reconcile.js";
+import {
+  keyRecipients,
+  planRevocations,
+  reconcileDevices,
+  revocationRelevant,
+} from "../../src/identity/reconcile.js";
 import { revokeDevice } from "../../src/identity/revocation.js";
 import type { MemoryCoordinator } from "./memory-coordinator.js";
 import { party, URL } from "./support.js";
@@ -129,6 +134,75 @@ describe("reconciliation propagates only relevant revocations (IDENTITY-PROFILE-
     const after = w.server.chain(X).state;
     expect(revocationOf(after, R, id(3))).toBeDefined();
     expect(after.preemptive.get(hex(R))).toBe(64);
+  });
+});
+
+// Review LFCP-04-415f's independent checks of §7.1 steps 1 and 3 and §8.4.
+describe("relevance, ordering and exclusions (review LFCP-04-415f)", { timeout: 120_000 }, () => {
+  test("relevance: unknown, personal, service in and out of scope, pairing; any binding in X wins", async () => {
+    const w = await world(1);
+    const X = w.resources[0] as ResourceId;
+    const target = w.server.chain(X).state;
+    const bindings = [
+      undefined,
+      { kind: 0, scope: [] },
+      { kind: 1, scope: [X] },
+      { kind: 1, scope: [w.I] },
+      { kind: 2, scope: [w.I] },
+    ] as const;
+    expect(bindings.map((b) => revocationRelevant(b as never, target, id(3)))).toEqual([
+      true,
+      true,
+      true,
+      false,
+      false,
+    ]);
+    await pair(w, w.P, 3, "read");
+    const bound = w.server.chain(X).state;
+    expect(bindings.map((b) => revocationRelevant(b as never, bound, id(3)))).toEqual([
+      true,
+      true,
+      true,
+      true,
+      true,
+    ]);
+  });
+
+  test("a service device out of a Resource's scope spends no pair there; an unknown device is propagated", async () => {
+    const w = await world(2);
+    const [X, Y] = w.resources as [ResourceId, ResourceId];
+    await pair(w, w.P, 3, "service", { kind: 1, scope: [X] });
+    const r = await revokeDevice({ ...w.P, device: id(3), reason: 1n });
+    expect(r.kind === "revoked" && r.results.find((t) => hex(t.resource) === hex(Y))?.revoke).toBe(
+      "not-relevant",
+    );
+    expect(w.server.chain(Y).state.preemptive.get(hex(id(1))) ?? 0).toBe(0);
+    const u = await revokeDevice({ ...w.P, device: id(99), reason: 1n });
+    expect(u.kind === "revoked" && u.results.map((t) => t.revoke)).toEqual([
+      "revoked",
+      "revoked",
+      "revoked",
+    ]);
+  });
+
+  test("bound devices first; a revoked device and a device it issued receive no key", async () => {
+    const w = await world(1);
+    const X = w.resources[0] as ResourceId;
+    const A = await pair(w, w.P, 2, "full");
+    await pair(w, A, 3, "read");
+    w.server.down.add(hex(X));
+    await revokeDevice({ ...w.P, device: id(99), reason: 1n });
+    await revokeDevice({ ...w.P, device: id(2), reason: 1n });
+    w.server.down.clear();
+    const I = w.server.chain(w.I);
+    const x = w.server.chain(X);
+    expect(planRevocations(I, x).propose.map((p) => hex(p.device))).toEqual([
+      hex(id(2)),
+      hex(id(99)),
+    ]);
+    const recipients = keyRecipients(I, x).map((p) => hex(p.principalId));
+    expect(recipients).not.toContain(hex(id(2)));
+    expect(recipients).not.toContain(hex(id(3)));
   });
 });
 
