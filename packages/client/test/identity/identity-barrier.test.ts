@@ -1,4 +1,5 @@
 import { toHex } from "@openlfcp/core";
+import { decodeControlRecord } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
 import { deliverKeys, heldDeks, storeDek, syncChain } from "../../src/identity/context.js";
 import { leafPayload, registerDevice, signChain } from "../../src/identity/devices.js";
@@ -118,5 +119,37 @@ describe("no identity record or same-root package without identity-01 (LFCP-WIRE
     });
     expect(r.kind === "revoked" && r.results.map((x) => x.revoke)).toEqual(["refused"]);
     expect(w.server.uploads.slice(before)).toEqual([]);
+  });
+
+  // Review LFCP-04-415h finding 1: the barrier covers journaled bytes, not only rebuilt ones.
+  test("a DEVICE_REVOKE journaled before the server dropped identity-01 is not sent again", async () => {
+    const w = await world(0);
+    const device = party(99).signer.descriptor.principalId;
+    w.server.fault = (e) => (e.op === "control" ? "drop-request" : undefined);
+    const first = await revokeDevice({ ...w.P, device, reason: 1n });
+    expect(first.kind).toBe("unavailable");
+    const journal = new OperationJournal(w.P.storage);
+    const [op] = await journal.list({ kind: "revoke-device" });
+    if (op === undefined) throw new Error("no journaled revocation");
+    const head = toHex(w.server.chain(w.I).state.head);
+    // The resumed phase would take the journaled-bytes branch: same bytes, same head.
+    expect(op.phases.some((p) => p.bytes !== undefined && p.expectedHead === head)).toBe(true);
+    w.server.fault = () => undefined;
+    w.server.extensions = [];
+    const before = w.server.uploads.length;
+    const r = await revokeDevice({
+      ...w.P,
+      device,
+      reason: 1n,
+      operation: op.id,
+    });
+    const sent = w.server.uploads
+      .slice(before)
+      .filter((e) => e.op === "control")
+      .map((e) => decodeControlRecord(e.bytes).body.type);
+    expect(sent).toEqual([]);
+    expect(r.kind === "revoked" && r.results[0]?.revoke).toBe("refused");
+    const phase = (await journal.load(op.id)).phases.find((p) => p.kind === "revoke");
+    expect(phase?.code).toBe("IDENTITY_UNSUPPORTED");
   });
 });

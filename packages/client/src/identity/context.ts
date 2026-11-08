@@ -234,23 +234,23 @@ export async function runControlPhase(
     if (attempt >= MAX_HEAD_RETRIES)
       throw new IdentityUnavailable(`the head kept moving while proposing ${spec.id}`);
     const head = toHex(chain.state.head);
-    let bytes: Uint8Array;
-    if (spec.resend !== false && before?.bytes !== undefined && before.expectedHead === head)
-      bytes = fromHex(before.bytes);
-    else {
-      bytes = await spec.build(chain);
-      if (!channel.extensions.includes(IDENTITY_EXTENSION) && isDeviceRecord(bytes)) {
-        // W §37: no record of type 9 or 10 to a server whose READY lacks identity-01.
-        await journal.putPhase(operation, {
-          ...(before ?? {}),
-          id: spec.id,
-          kind: spec.kind,
-          resource: toHex(R),
-          state: "refused",
-          code: IDENTITY_UNSUPPORTED,
-        });
-        return Object.freeze({ state: "refused", chain, code: IDENTITY_UNSUPPORTED });
-      }
+    const journaled =
+      spec.resend !== false && before?.bytes !== undefined && before.expectedHead === head;
+    const bytes = journaled ? fromHex(before.bytes as string) : await spec.build(chain);
+    if (!channel.extensions.includes(IDENTITY_EXTENSION) && isDeviceRecord(bytes)) {
+      // W §37: no record of type 9 or 10 to a server whose READY lacks identity-01,
+      // journaled bytes included (a resumed operation checks the current READY).
+      await journal.putPhase(operation, {
+        ...(before ?? {}),
+        id: spec.id,
+        kind: spec.kind,
+        resource: toHex(R),
+        state: "refused",
+        code: IDENTITY_UNSUPPORTED,
+      });
+      return Object.freeze({ state: "refused", chain, code: IDENTITY_UNSUPPORTED });
+    }
+    if (!journaled) {
       const id = toHex(validateRecordId(bytes));
       await journal.putPhase(operation, {
         id: spec.id,
