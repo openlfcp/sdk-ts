@@ -4,15 +4,65 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
-## Unreleased
+## 0.4.1 — unreleased
 
-### Spec pin: `mvp-0.4-baseline.3`
+A patch of 0.4.0 at `mvp-0.4-baseline.4` (finding 1 and the profile and
+corpus findings of the LFCP-04-415 review). No API is removed or renamed;
+the additions are new exports, an optional result field and the
+`not-relevant` outcome of a revocation in a roster Resource.
 
-- `spec.lock` pins `mvp-0.4-baseline.3` (`6af372b`), moving from
-  `mvp-0.4-baseline.2`. It clarifies the depth of admission rule AI2
-  (IDENTITY-PROFILE-01 §3) and adds 25 profile cases of that boundary;
-  no published value changes (`migrations/mvp-0.4-baseline.3/`). sdk-ts
-  already decided every new case as the corpus does: no code change.
+### Fixed
+
+- Reconciliation no longer spends the root's 64 unbound-revocation budget of
+  a roster Resource (LFCP-WIRE-01 §17.5 rule 5) on pairing sessions. Step 1
+  proposes only the revocations of `I` that are relevant in the target: the
+  device is bound there, or could become registered or issue a chain there
+  (kind 0, kind 1 with the target in its scope, or unknown); devices bound
+  in the target first. Every pairing session revokes its pairing device in
+  `I`, so after 64 sessions the revocation of a personal device not yet
+  registered in a Resource could no longer be recorded there
+  (IDENTITY-PROFILE-01 §7.1 step 1).
+- A propagation the target refuses is reported (`TargetReconciliation.
+  unpropagated`, with its `refused` step) and stays unpropagated: the device
+  is treated as revoked there, nothing is registered through it, it is never
+  bound to lift the limit, and a later run proposes it again (it succeeds
+  once the device is bound there, which is never limited).
+- Step 3 seals no key to a device that `I` has revoked, or whose chain in
+  the target passes through one, even while the target still counts it as
+  active (§7.1 step 3).
+- Step 4 restores display entries only for personal and service devices
+  bound in `I` as the leaf of a chain, creates none for a revoked device,
+  and sets `revoked = true` on a retired entry whose flag is not set; a
+  second run writes nothing (§7.1 step 4).
+- Revoking a device proposes `DEVICE_REVOKE` on a roster Resource only where
+  §7.1 step 1 would; elsewhere the result is `not-relevant` (§8.4).
+- Pairing link checks: a coordinator that refuses the session as the link's
+  device now rejects the link (`not-a-session`) instead of reporting the
+  coordinator unavailable, and the device must be registered, not only
+  bound (§5.2 checks 2 and 4).
+- A pairing session whose manager holds the root's unit 1 but not the DEK of
+  its epoch lists the missing DEK only, not the unit as well (§5.3 step 1).
+- The CONTROL_GET decoder refuses a range whose end is below its start
+  (`MALFORMED_MESSAGE`, LFCP-WIRE-01 §45); it accepted one.
+
+### Added
+
+- `planRevocations`, `revocationRelevant`, `keyRecipients` and
+  `planDisplayData`: §7.1 steps 1, 3 and 4 as pure functions on Control
+  states; `pairingLinkRejection`: the §5.2 checks after the link parses.
+
+### Spec pin: `mvp-0.4-baseline.4`
+
+- `spec.lock` pins `mvp-0.4-baseline.4` (`9bea714`). 0.4.0 shipped at
+  `mvp-0.4-baseline.2`; `mvp-0.4-baseline.3` (`6af372b`) only clarified the
+  depth of admission rule AI2 and added 25 profile cases, which sdk-ts
+  already decided as the corpus does. Baseline.4 has no wire rule changes; 28 published values change,
+  all from finding 1 (`migrations/mvp-0.4-baseline.4/`). The profile checks
+  of findings 2 to 5 (map-typed initial containers, the descriptor's Ed25519
+  key, `platform` and `revoked` types, an extension namespace written as a
+  scalar) were already decided as the corpus does; the runners gain the new
+  flow fixtures and steps, the planned `chain` of every Register phase, the
+  pairing link checks and the revoked-reader reads of W §41.
 
 ## 0.4.0 — 2026-11-07
 
