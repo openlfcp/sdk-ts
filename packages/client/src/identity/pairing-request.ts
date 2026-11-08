@@ -132,6 +132,37 @@ interface Candidate {
   readonly name?: string;
 }
 
+/**
+ * §5.2, the checks after the link parses and its secret is its device's
+ * (`parsePairingUri`, `pairingDeviceSigner`), on what opening `I` as `J`
+ * gave: the session as `J` is refused (W §41), `I`'s Genesis profile is not
+ * `org.openlfcp.identity.v1`, or `J` is not a registered, active kind-2
+ * device of `I`'s owner in `I`'s chain. Returns why the link is rejected
+ * (a client-local outcome, the corpora's PAIRING_LINK_REJECTED), or
+ * undefined when it passes; a rejected link is not used any further.
+ */
+export function pairingLinkRejection(
+  J: PrincipalId,
+  opened: LinearChain | { readonly refused: string },
+): string | undefined {
+  if ("refused" in opened) return `the session as the link's device is refused (${opened.refused})`;
+  const state = opened.state;
+  if (state.dataProfile !== IDENTITY_PROFILE)
+    return `the Resource is not an Identity Resource (its Genesis profile is ${state.dataProfile})`;
+  const R = genesisOwner(opened);
+  const binding = state.devices.get(toHex(J));
+  const j = activeDevice(state, J);
+  if (
+    binding === undefined ||
+    !binding.registered ||
+    j === undefined ||
+    j.kind !== DEVICE_KIND.PAIRING ||
+    !bytesEqual(j.root, R)
+  )
+    return "the link's device is not a registered, active pairing device of the owner";
+  return undefined;
+}
+
 /** §5.3 steps 2–3. */
 export async function requestPairing(o: RequestPairingOptions): Promise<RequestPairingResult> {
   let link: PairingLink;
@@ -167,16 +198,18 @@ export async function requestPairing(o: RequestPairingOptions): Promise<RequestP
       };
     }
     const channel = await pool.get(J, url);
-    const chain = await syncChain(o.storage, channel, I);
+    let chain: LinearChain;
+    try {
+      chain = await syncChain(o.storage, channel, I);
+    } catch (e) {
+      // §5.2 check 2: the coordinator refuses the session as J (W §41).
+      if (!(e instanceof IdentityRefused)) throw e;
+      const reason = pairingLinkRejection(J.descriptor.principalId, { refused: e.code });
+      return { kind: "not-a-session", reason: reason ?? e.message };
+    }
     const R = genesisOwner(chain);
-    if (chain.state.dataProfile !== IDENTITY_PROFILE)
-      return { kind: "not-a-session", reason: "the Resource is not an Identity Resource" };
-    const j = activeDevice(chain.state, J.descriptor.principalId);
-    if (j === undefined || j.kind !== DEVICE_KIND.PAIRING || !bytesEqual(j.root, R))
-      return {
-        kind: "not-a-session",
-        reason: "the link's device is not an active pairing device of the owner",
-      };
+    const rejected = pairingLinkRejection(J.descriptor.principalId, chain);
+    if (rejected !== undefined) return { kind: "not-a-session", reason: rejected };
     const pairing: Installation = { signer: J, agreement: link.secret.agreementKey };
     const deks = await fetchDeks(o.storage, o.secrets, channel, chain, pairing);
     const doc = o.document(I, R);

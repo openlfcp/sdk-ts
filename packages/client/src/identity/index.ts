@@ -109,6 +109,7 @@ export {
   candidateEvidence,
   completePairing,
   type PairingOutcome,
+  pairingLinkRejection,
   type RequestPairingOptions,
   type RequestPairingResult,
   requestPairing,
