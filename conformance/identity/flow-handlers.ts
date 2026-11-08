@@ -1010,11 +1010,20 @@ type Extra = (
 ) => Report | undefined | Promise<Report | undefined>;
 const holds2 = (id: string, who: string) =>
   hasAbility(chainAt(id).state, idOf(who), ABILITY.DATA_WRITE);
+/**
+ * F08.link_rejected: what follows a rejection is a property of the real
+ * requestPairing, which this harness does not run on the corpus states (it
+ * decides them with pairingLinkRejection). Those fields are not verified
+ * here, never stated as constants (review LFCP-04-415f finding 5).
+ */
+const LINK_REJECTION_NOT_RUN =
+  "requestPairing is not run on this state by the flow runner (the link check is pairingLinkRejection on the corpus chain); packages/client/test/identity/pairing-link-rejection.test.ts runs the real requestPairing for each failed check on a MemoryCoordinator and checks the answer, the journal and every upload.";
 const REJECTED = {
-  // requestPairing returns not-a-session / invalid-link before it journals or writes anything (§5.2).
-  request_written: false,
-  sent_as_pairing_device_after_rejection: "nothing",
-  reported: true,
+  not_verified_fields: {
+    request_written: LINK_REJECTION_NOT_RUN,
+    sent_as_pairing_device_after_rejection: LINK_REJECTION_NOT_RUN,
+    reported: LINK_REJECTION_NOT_RUN,
+  },
 };
 const EXTRAS: Readonly<Record<string, Extra>> = {
   F05_reconciliation: reconcileFacts,
@@ -1154,10 +1163,8 @@ const FINALS: Readonly<Record<string, Final>> = {
   "F07.read_device_cannot_claim": (_f, steps) => ({
     claims_sent_by_read_device: steps.filter((s) => s.claim_sent === true).length,
   }),
-  "F08.link_rejected": (_f, steps) => ({
-    requests_written_after_rejection: steps.filter(
-      (s) => s.outcome === "PAIRING_LINK_REJECTED" && s.request_written !== false,
-    ).length,
+  "F08.link_rejected": () => ({
+    not_verified_fields: { requests_written_after_rejection: LINK_REJECTION_NOT_RUN },
   }),
   "F08.missing_material": (_f, steps) => ({
     sessions_without_material: steps.filter(
@@ -1389,6 +1396,9 @@ const identityFlow: Handler = async (vector) => {
       report.case_id = wireId(step);
     steps.push(report);
     const name = `steps/${step.n}`;
+    // Fields of a step this harness models without running the SDK: not verified, not checked.
+    const unverified = (report.not_verified_fields ?? {}) as Record<string, string>;
+    delete report.not_verified_fields;
     if (report.outcome === "N/A") {
       notApplicable.push({ step: step.n, reason: report.not_applicable });
       continue;
@@ -1401,6 +1411,10 @@ const identityFlow: Handler = async (vector) => {
       checks.push({ name: `${name}/case`, ok: false, message: `${step.case} fails its checks` });
     for (const k of Object.keys(e)) {
       if (k === "n") continue;
+      if (Object.hasOwn(unverified, k)) {
+        notVerifiedSteps.push({ step: step.n, field: k, reason: unverified[k] });
+        continue;
+      }
       if (Object.hasOwn(FIELD_NA, k) && report[k] === undefined) {
         notApplicable.push({ step: step.n, field: k, reason: FIELD_NA[k] });
         continue;
@@ -1409,8 +1423,14 @@ const identityFlow: Handler = async (vector) => {
     }
   }
   const final: Report = await (FINALS[f.id] ?? (() => ({})))(f, steps);
+  const finalUnverified = (final.not_verified_fields ?? {}) as Record<string, string>;
+  delete final.not_verified_fields;
   const ef = ((f.expected as Json).final ?? {}) as Record<string, unknown>;
   for (const k of Object.keys(ef)) {
+    if (Object.hasOwn(finalUnverified, k)) {
+      notVerifiedSteps.push({ field: `final.${k}`, reason: finalUnverified[k] });
+      continue;
+    }
     if (Object.hasOwn(FINAL_NA, k)) {
       notApplicable.push({ field: `final.${k}`, reason: FINAL_NA[k] });
       continue;
