@@ -457,9 +457,20 @@ export async function deliverKeys(options: {
   const epochs = [...options.deks.keys()].sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1));
   // W §37: without identity-01 the server applies no same-root rule (W §25.2); a sender
   // without key/distribute is authorized only by it, and sends nothing there.
+  const identity = options.channel.extensions.includes(IDENTITY_EXTENSION);
   const sameRootOnly =
-    !options.channel.extensions.includes(IDENTITY_EXTENSION) &&
-    !hasAbility(chain.state, sender.descriptor.principalId, ABILITY.KEY_DISTRIBUTE);
+    !identity && !hasAbility(chain.state, sender.descriptor.principalId, ABILITY.KEY_DISTRIBUTE);
+  // The same for a pending package, at its own referenced head: a later key/distribute does
+  // not authorize it there (W §25.2), so it is re-sealed at the current head instead.
+  const resendable = (bytes: Uint8Array): boolean => {
+    const parsed = parseKeyPackage(bytes);
+    if (verifyKeyPackage(chain, parsed).kind !== "authorized") return false;
+    if (identity) return true;
+    const atHead = chain.stateAt(parsed.payload.controlHead);
+    return (
+      atHead !== undefined && hasAbility(atHead, parsed.payload.sender, ABILITY.KEY_DISTRIBUTE)
+    );
+  };
   for (const recipient of options.recipients) {
     const rid = recipient.principalId;
     const hex = toHex(rid);
@@ -480,11 +491,7 @@ export async function deliverKeys(options: {
       }
       // §9.1: a package sent before is sent again as the same bytes, while it is still authorized.
       let bytes = await ledger.pending(R, epoch, rid);
-      if (
-        bytes !== undefined &&
-        verifyKeyPackage(chain, parseKeyPackage(bytes)).kind !== "authorized"
-      )
-        bytes = undefined;
+      if (bytes !== undefined && !resendable(bytes)) bytes = undefined;
       if (bytes === undefined) {
         const sealed = await sealKeyPackage({
           resourceId: R,

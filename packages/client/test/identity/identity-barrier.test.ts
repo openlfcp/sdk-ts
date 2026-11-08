@@ -1,5 +1,11 @@
-import { toHex } from "@openlfcp/core";
-import { decodeControlRecord } from "@openlfcp/wire";
+import { dataEpoch, toHex } from "@openlfcp/core";
+import {
+  ABILITY,
+  decodeControlRecord,
+  hasAbility,
+  parseKeyPackage,
+  signControlRecord,
+} from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
 import { deliverKeys, heldDeks, storeDek, syncChain } from "../../src/identity/context.js";
 import { leafPayload, registerDevice, signChain } from "../../src/identity/devices.js";
@@ -7,7 +13,7 @@ import { OperationJournal, PackageLedger } from "../../src/identity/journal.js";
 import { createPairingSession, resumePairingSession } from "../../src/identity/pairing.js";
 import { revokeDevice } from "../../src/identity/revocation.js";
 import { party, URL } from "./support.js";
-import { node, world } from "./world.js";
+import { hostResource, node, world } from "./world.js";
 
 // LFCP-WIRE-01 §37 (review LFCP-04-415f; F18_barrier #6): a client proposes
 // no DEVICE_GRANT or DEVICE_REVOKE, and uploads no Key Package authorized
@@ -151,5 +157,96 @@ describe("no identity record or same-root package without identity-01 (LFCP-WIRE
     expect(r.kind === "revoked" && r.results[0]?.revoke).toBe("refused");
     const phase = (await journal.load(op.id)).phases.find((p) => p.kind === "revoke");
     expect(phase?.code).toBe("IDENTITY_UNSUPPORTED");
+  });
+
+  // Review LFCP-04-415h finding 2: a pending package is authorized at its own head. A device
+  // of P's root without 6 in X seals to P by the same-root rule; the package is lost and stays
+  // pending; X's owner then grants P 6 and the server drops identity-01. The pending package
+  // is still same-root only at its head: it is re-sealed at the current head, where A holds 6.
+  test("a pending same-root package is re-sealed at the current head without identity-01", async () => {
+    const w = await world(0);
+    const O = node(w.server, party(9));
+    const { resource: X, dek } = await hostResource(w.server, O);
+    const grant = async (abilities: bigint[]) => {
+      const c = w.server.chain(X);
+      const r = signControlRecord(
+        {
+          resourceId: X,
+          controlSeq: c.state.seq + 1n,
+          prevControlId: c.state.head,
+        },
+        {
+          type: "CAPABILITY_GRANT",
+          subject: w.P.installation.signer.descriptor,
+          abilities,
+          delegable: [],
+        },
+        O.installation.signer,
+      );
+      const ch = await w.server.network().connect(O.installation.signer, URL);
+      expect((await ch.putControl(X, c.state.head, r.bytes)).kind).toBe("ack");
+    };
+    await grant([1n]);
+    const A = node(w.server, party(2));
+    const cert = signChain(
+      w.server.chain(X).state,
+      w.P.installation.signer,
+      leafPayload(
+        w.P.installation.signer.descriptor.principalId,
+        A.installation.signer.descriptor,
+        0,
+        [1n, 6n],
+        [],
+      ),
+    );
+    const reg = await registerDevice({
+      ...w.P,
+      chain: cert,
+      targets: [{ resource: X, url: URL }],
+    });
+    expect(reg.results[0]?.status).toBe("registered");
+    const a = A.installation.signer.descriptor.principalId;
+    const p = w.P.installation.signer.descriptor;
+    let channel = await w.server.network().connect(A.installation.signer, URL);
+    const old = await syncChain(A.storage, channel, X);
+    expect(hasAbility(old.state, a, ABILITY.KEY_DISTRIBUTE)).toBe(false);
+    const ledger = new PackageLedger(A.storage);
+    const deks = new Map([["0", dek]]);
+    await storeDek(A.storage, A.secrets, old, dataEpoch(0n), dek);
+    w.server.fault = (e) => (e.op === "key-package" ? "drop-request" : undefined);
+    await expect(
+      deliverKeys({
+        channel,
+        ledger,
+        chain: old,
+        sender: A.installation.signer,
+        recipients: [p],
+        deks,
+      }),
+    ).rejects.toThrow();
+    const pending = await ledger.pending(X, dataEpoch(0n), p.principalId);
+    if (pending === undefined) throw new Error("no pending package");
+    expect(toHex(parseKeyPackage(pending).payload.controlHead)).toBe(toHex(old.state.head));
+    w.server.fault = () => undefined;
+    await grant([1n, 6n]);
+    w.server.extensions = [];
+    channel = await w.server.network().connect(A.installation.signer, URL);
+    const now = await syncChain(A.storage, channel, X);
+    expect(hasAbility(now.state, a, ABILITY.KEY_DISTRIBUTE)).toBe(true);
+    const before = w.server.uploads.length;
+    const out = await deliverKeys({
+      channel,
+      ledger,
+      chain: now,
+      sender: A.installation.signer,
+      recipients: [p],
+      deks,
+    });
+    const heads = w.server.uploads
+      .slice(before)
+      .filter((e) => e.op === "key-package")
+      .map((e) => toHex(parseKeyPackage(e.bytes).payload.controlHead));
+    expect(heads).toEqual([toHex(now.state.head)]);
+    expect(out.sent).toEqual([{ epoch: dataEpoch(0n), recipient: toHex(p.principalId) }]);
   });
 });
