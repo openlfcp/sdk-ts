@@ -13,6 +13,7 @@ export {
   type IdentityRefusal,
   IdentityReplica,
   type IdentityUnit,
+  type IdentityWriteOptions,
   identityCodec,
   identityCodecFor,
   identitySnapshotCodec,

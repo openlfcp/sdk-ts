@@ -29,6 +29,7 @@ import { admitBatch, admitChange, type DocumentSequences } from "../admission/se
 import { isWasmTrap } from "../replica.js";
 import { principalRef } from "../values.js";
 import { checkIdentityUnit, IdentityAdmission, refuseIdentity } from "./admission.js";
+import { IdentityReader } from "./reader.js";
 import { type IdentityValidation, validateIdentity } from "./schema.js";
 import {
   type DeviceEntry,
@@ -68,6 +69,16 @@ export interface IdentityReceiveResult {
   readonly duplicates: readonly string[];
   readonly waiting: readonly string[];
   readonly refused: readonly IdentityRefusal[];
+}
+
+/** Options of IdentityReplica.write. */
+export interface IdentityWriteOptions {
+  /**
+   * Device entries (PrincipalRefs) whose `revoked` flag the change sets to
+   * `true` after the intents, writing no other field of them: a retired
+   * entry (IDENTITY-PROFILE-01 §7.1 step 4, §8.2). Each entry must exist.
+   */
+  readonly retire?: readonly string[];
 }
 
 export type IdentityIntent =
@@ -351,16 +362,43 @@ export class IdentityReplica {
   }
 
   /**
+   * Every value the scalar field `table[key].field` holds now: one, or
+   * several under concurrent writes (identical values once, SOP §45); none
+   * when the field is absent or `table[key]` is not one map. Strings, uints
+   * and booleans as JavaScript values. `devices()` shows one of them; this
+   * is what IDENTITY-PROFILE-01 §7.1 step 4 reads of a retired entry's
+   * `revoked` ("some value is not true").
+   */
+  fieldValues(
+    table: "roster" | "devices" | "requests",
+    key: string,
+    field: string,
+  ): readonly unknown[] {
+    const reader = new IdentityReader(this.#doc);
+    const container = reader.map("_root", table);
+    const entry = container === undefined ? undefined : reader.map(container, key);
+    if (entry === undefined) return Object.freeze([]);
+    return Object.freeze(reader.all(entry, field).map(([, value]) => value));
+  }
+
+  /**
    * One transaction (one change) for the intent, or for several intents in
    * order, e.g. the fill change of IDENTITY-PROFILE-01 §5.1 or the devices
    * entry and the request deletion of §5.3 step 6; scalar strings/uints,
-   * unknown fields preserved on updates.
+   * unknown fields preserved on updates. `options.retire` adds the
+   * `revoked = true` flag of retired entries, field by field.
    */
-  write(writer: IdentityWriter, intent: IdentityIntent | readonly IdentityIntent[]): CheckedChange {
+  write(
+    writer: IdentityWriter,
+    intent: IdentityIntent | readonly IdentityIntent[],
+    options: IdentityWriteOptions = {},
+  ): CheckedChange {
     const intents: readonly IdentityIntent[] = Array.isArray(intent)
       ? intent
       : [intent as IdentityIntent];
-    if (intents.length === 0) throw new LfcpError("PROFILE_INVALID", "no intent to write");
+    const retire = options.retire ?? [];
+    if (intents.length === 0 && retire.length === 0)
+      throw new LfcpError("PROFILE_INVALID", "no intent to write");
     // AI5 (§3) refuses the change anyway; say why before building it.
     for (const i of intents)
       if (
@@ -378,14 +416,18 @@ export class IdentityReplica {
     try {
       const doc = A.change(fork, { time: 0 }, (d) => {
         for (const i of intents) applyIntent(d, i, this.#options.root, A.getBackend(d));
+        for (const key of retire) retireEntry(d, key);
       });
       const last = A.getLastLocalChange(doc);
       if (last === null || last === undefined)
         throw new LfcpError("PROFILE_INVALID", "the intent did not create a change");
       bytes = last;
       const validation = validateIdentity(doc, this.#options.root);
-      for (const i of intents) {
-        const base = "key" in i ? `/${tableOf(i)}/${i.key}` : "";
+      const written = [
+        ...intents.map((i) => ("key" in i ? `/${tableOf(i)}/${i.key}` : "")),
+        ...retire.map((key) => `/devices/${key}`),
+      ];
+      for (const base of written) {
         const problem = validation.problems.find(
           (p) =>
             p.diagnostic === "INVALID_ROOT" ||
@@ -454,6 +496,16 @@ function applyIntent(
   const entry = map[intent.key] as Record<string, unknown>;
   for (const [key, value] of Object.entries(intent.entry))
     if (value !== undefined) putValue(entry, key, value, backend);
+}
+
+/** `devices[key].revoked = true`, and nothing else of the entry (§7.1 step 4, §8.2). */
+function retireEntry(d: Record<string, unknown>, key: string): void {
+  const devices = d.devices as Record<string, unknown> | undefined;
+  if (devices === undefined) refuseIdentity("INVALID_ROOT", "initialize the identity first");
+  const entry = Object.hasOwn(devices, key) ? devices[key] : undefined;
+  if (entry === null || typeof entry !== "object")
+    throw new LfcpError("PROFILE_INVALID", `no device entry ${key} to retire`);
+  (entry as Record<string, unknown>).revoked = true;
 }
 
 function putValue(
