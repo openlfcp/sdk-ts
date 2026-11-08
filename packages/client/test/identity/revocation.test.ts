@@ -192,11 +192,10 @@ describe("revoking a device (IDENTITY-PROFILE-01 §8)", { timeout: 60_000 }, () 
     w.server.down.clear();
     const rec = await reconcileDevices(w.P);
     const x = rec.targets.find((t) => toHex(t.resource) === toHex(X));
-    // The revocations of I's consumed pairing devices travel too (reason 3 as 0), then A's.
-    expect(x?.steps.map((s) => [s.step.kind, s.state])).toEqual([
-      ["revoke", "committed-own"],
-      ["revoke", "committed-own"],
-    ]);
+    // Only A's revocation travels: I's consumed pairing device is not bound in X and can
+    // never act there, so it is not relevant (baseline.4 §7.1 step 1).
+    expect(x?.steps.map((s) => [s.step.kind, s.state])).toEqual([["revoke", "committed-own"]]);
+    expect(w.server.chain(X as never).state.preemptive.size).toBe(0);
     expect(toHex(x?.steps.at(-1)?.step.device as Uint8Array)).toBe(toHex(id(2)));
     expect(x?.rotation?.status).toBe("rotated");
     expect(epochPackages(w.server, X, currentEpoch(w.server, X))).not.toContain(toHex(id(2)));
@@ -212,7 +211,8 @@ describe("reconciliation (§7.1)", { timeout: 60_000 }, () => {
     await addToRoster(w.P, w.I, Y.resource, Y.entry);
     const first = await reconcileDevices(w.P);
     const y = first.targets.find((t) => toHex(t.resource) === toHex(Y.resource));
-    expect(y?.steps.map((s) => s.step.kind)).toEqual(["revoke", "revoke", "register", "register"]);
+    // The two consumed pairing devices of I are not relevant in Y (baseline.4 §7.1 step 1).
+    expect(y?.steps.map((s) => s.step.kind)).toEqual(["register", "register"]);
     expect(y?.steps.every((s) => s.state === "committed-own")).toBe(true);
     expect(epochPackages(w.server, Y.resource, 0n)).toEqual([toHex(id(2)), toHex(id(3))].sort());
     const second = await reconcileDevices(w.P);

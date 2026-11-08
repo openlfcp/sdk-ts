@@ -12,6 +12,8 @@ import {
 import {
   activeDevice,
   type ControlState,
+  type DeviceBinding,
+  revocationOf,
   signControlRecord,
   validateControlChain,
 } from "@openlfcp/wire";
@@ -37,6 +39,7 @@ import {
   IdentityUnavailable,
 } from "./network.js";
 import { classifyRevoke, type LinearChain } from "./phases.js";
+import { revocationRelevant } from "./reconcile.js";
 import { type IdentityFlowOptions, identityTarget } from "./resource.js";
 import {
   checkFlowProfiles,
@@ -225,6 +228,13 @@ export interface RevocationResult {
     /** The revoker's own chain passes through the device here: re-certify it here first (§8.1). */
     | "self-dependent"
     | "refused"
+    /**
+     * §8.4, §7.1 step 1: a roster Resource where the device is not bound and
+     * can never act (a pairing device, or a service device whose scope does
+     * not list it): no revocation is proposed there, so that it does not take
+     * one of the root's 64 unbound pairs (W §17.5 rule 5).
+     */
+    | "not-relevant"
     | "unreachable"
     | "unsupported"
     | "conflict";
@@ -312,6 +322,9 @@ export async function revokeDevice(
           device: toHex(o.device),
           root: toHex(R),
           reason: String(o.reason),
+          // §8.4: the device's binding in I decides where its revocation is relevant,
+          // also for a resumed self-retirement that can no longer read I.
+          ...bindingIntent(I.state.devices.get(toHex(o.device))),
           targets: (await rosterTargets(o, channel, I)).map((t) => ({
             resource: toHex(t.resource),
             url: t.url,
@@ -319,8 +332,15 @@ export async function revokeDevice(
         },
       });
     const roster = targetsOf(await journal.load(operation));
+    const binding = I.state.devices.get(toHex(o.device));
     const results: RevocationResult[] = [];
-    const one = async (c: IdentityChannel, X: ResourceId): Promise<RevocationResult> => {
+    const one = async (
+      c: IdentityChannel,
+      X: ResourceId,
+      inRoster = true,
+    ): Promise<RevocationResult> => {
+      if (inRoster && !(await relevantIn(o, c, X, R, binding)))
+        return { resource: X, revoke: "not-relevant" };
       let outcome: Awaited<ReturnType<typeof runControlPhase>>;
       try {
         outcome = await runControlPhase(o.storage, c, journal, operation, {
@@ -354,7 +374,7 @@ export async function revokeDevice(
       }
       return { resource: X, revoke, rotation };
     };
-    const first = await one(channel, target.resource);
+    const first = await one(channel, target.resource, false);
     results.push(first);
     if (first.revoke === "superseded") {
       await journal.setStatus(operation, "superseded");
@@ -403,6 +423,44 @@ export async function revokeDevice(
   }
 }
 
+/** The device's kind and scope in I, journaled with a revocation (§8.4). */
+const bindingIntent = (b: Pick<DeviceBinding, "kind" | "scope"> | undefined) =>
+  b === undefined ? {} : { binding: { kind: b.kind, scope: b.scope.map(toHex) } };
+
+/**
+ * The journaled binding; `null` when the operation predates it (0.4.0),
+ * which revokes in every roster Resource as before.
+ */
+function bindingOf(op: JournalOperation): Pick<DeviceBinding, "kind" | "scope"> | undefined | null {
+  if (!Object.hasOwn(op.intent, "targets")) return null;
+  const b = op.intent.binding as { kind: number; scope: string[] } | undefined;
+  if (b === undefined) return Object.hasOwn(op.intent, "binding") ? undefined : null;
+  return {
+    kind: b.kind as DeviceBinding["kind"],
+    scope: b.scope.map((h) => resourceId(fromHex(h))),
+  };
+}
+
+/**
+ * §8.4: whether the revocation of the device is proposed on the roster
+ * Resource `X`: when it is already revoked there (the phase classifies it
+ * as complete), or when it is relevant there by §7.1 step 1.
+ */
+async function relevantIn(
+  o: IdentityFlowOptions & { readonly device: PrincipalId },
+  c: IdentityChannel,
+  X: ResourceId,
+  R: PrincipalId,
+  binding: Pick<DeviceBinding, "kind" | "scope"> | undefined | null,
+): Promise<boolean> {
+  if (binding === null) return true;
+  const x = await syncChain(o.storage, c, X);
+  return (
+    revocationOf(x.state, R, o.device) !== undefined ||
+    revocationRelevant(binding, x.state, o.device)
+  );
+}
+
 const targetsOf = (op: JournalOperation) =>
   ((op.intent.targets as { resource: string; url: string }[] | undefined) ?? []).map((t) => ({
     resource: resourceId(fromHex(t.resource)),
@@ -420,9 +478,14 @@ async function retireElsewhere(
   const results: RevocationResult[] = [
     { resource: resourceId(fromHex(op.intent.identity as string)), revoke: "complete" },
   ];
+  const binding = bindingOf(op);
   for (const t of targetsOf(op)) {
     try {
       const c = await pool.get(o.installation.signer, t.url);
+      if (!(await relevantIn(o, c, t.resource, R, binding))) {
+        results.push({ resource: t.resource, revoke: "not-relevant" });
+        continue;
+      }
       const outcome = await runControlPhase(o.storage, c, journal, op.id, {
         id: `revoke:${toHex(t.resource)}`,
         kind: "revoke",

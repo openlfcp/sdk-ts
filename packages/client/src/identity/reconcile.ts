@@ -13,8 +13,12 @@ import {
   activeDevice,
   actsFor,
   type CertificateChain,
+  type ControlState,
   DEVICE_KIND,
+  type DeviceBinding,
   deviceFingerprint,
+  isBound,
+  type PrincipalDescriptor,
   revocationOf,
   type Signer,
   signControlRecord,
@@ -75,10 +79,83 @@ export type ReconcileStep =
     };
 
 /**
+ * §7.1 step 1: whether the revocation of `device` in `I` is relevant in the
+ * target `X`. It is when the device is bound in `X` (as a leaf or an
+ * intermediate, W §17.4 rule 9), or when it could become registered in `X`
+ * or issue a chain there: bound in `I` with kind 0, or with kind 1 and `X`
+ * in its scope, or not bound in `I` at all (its kind is unknown). A pairing
+ * device, or a service device whose scope does not list `X`, that is not
+ * bound in `X` can never act there (W §7.3 c3, c6; N8): its revocation
+ * would protect nothing and would take one of the 64 unbound pairs of the
+ * root that W §17.5 rule 5 allows in `X` and never frees.
+ *
+ * `binding` is the device's binding in `I` (undefined when unbound there).
+ */
+export function revocationRelevant(
+  binding: Pick<DeviceBinding, "kind" | "scope"> | undefined,
+  target: ControlState,
+  device: PrincipalId,
+): boolean {
+  if (isBound(target, device)) return true;
+  if (binding === undefined || binding.kind === DEVICE_KIND.PERSONAL) return true;
+  return (
+    binding.kind === DEVICE_KIND.SERVICE &&
+    binding.scope.some((s) => bytesEqual(s, target.resourceId))
+  );
+}
+
+/**
+ * §7.1 step 1 for one target: the revocations of `I` to propose on `X`
+ * (the pairs of `I`'s `revoked` not in `X`'s that are relevant there, those
+ * whose device is bound in `X` first, each group in `I`'s chain order), and
+ * the devices whose revocation is not relevant in `X` and is not
+ * propagated. Empty for the target `I` itself.
+ */
+export function planRevocations(
+  identity: LinearChain,
+  target: LinearChain,
+): {
+  readonly propose: readonly Extract<ReconcileStep, { kind: "revoke" }>[];
+  readonly notRelevant: readonly PrincipalId[];
+} {
+  if (bytesEqual(identity.state.resourceId, target.state.resourceId))
+    return { propose: [], notRelevant: [] };
+  const R = genesisOwner(identity);
+  const I = identity.state;
+  const X = target.state;
+  const bound: Extract<ReconcileStep, { kind: "revoke" }>[] = [];
+  const unbound: Extract<ReconcileStep, { kind: "revoke" }>[] = [];
+  const notRelevant: PrincipalId[] = [];
+  const seen = new Set<string>();
+  for (const r of identity.records) {
+    if (r.body.type !== "DEVICE_REVOKE" || !bytesEqual(r.body.root, R)) continue;
+    const d = r.body.device;
+    if (revocationOf(X, R, d) !== undefined || seen.has(toHex(d))) continue;
+    seen.add(toHex(d));
+    if (!revocationRelevant(I.devices.get(toHex(d)), X, d)) {
+      notRelevant.push(d);
+      continue;
+    }
+    (isBound(X, d) ? bound : unbound).push({
+      kind: "revoke",
+      root: R,
+      device: d,
+      reason: r.body.reason === 3n ? 0n : r.body.reason,
+    });
+  }
+  return Object.freeze({
+    propose: Object.freeze([...bound, ...unbound]),
+    notRelevant: Object.freeze(notRelevant),
+  });
+}
+
+/**
  * §7.1 steps 1 and 2 for one target, in their normative order. For the
  * target `I` itself both steps are vacuous. Registrations are planned on
- * the target's state as the revocations leave it (a device whose issuer
- * `I` revoked is never registered before the cascade reaches the target).
+ * the target's state as the revocations leave it, and every pair of `I`'s
+ * `revoked` counts as revoked in `X` whether its propagation succeeds or
+ * not (an unpropagated pair, refused by W §17.5 rule 5, or a pair that is
+ * not relevant): no device whose issuer `I` has revoked is ever registered.
  */
 export function planReconciliation(
   identity: LinearChain,
@@ -88,23 +165,10 @@ export function planReconciliation(
   const R = genesisOwner(identity);
   const I = identity.state;
   const X = target.state;
-  const steps: ReconcileStep[] = [];
-  // Step 1: every revoked pair of I not revoked in X, in I's chain order.
-  const revokedInX = (d: PrincipalId) => revocationOf(X, R, d) !== undefined;
-  const revokedNow = new Set<string>();
-  for (const r of identity.records) {
-    if (r.body.type !== "DEVICE_REVOKE" || !bytesEqual(r.body.root, R)) continue;
-    const d = r.body.device;
-    if (revokedInX(d) || revokedNow.has(toHex(d))) continue;
-    revokedNow.add(toHex(d));
-    steps.push({
-      kind: "revoke",
-      root: R,
-      device: d,
-      reason: r.body.reason === 3n ? 0n : r.body.reason,
-    });
-  }
-  const revokedAfter = (d: PrincipalId) => revokedInX(d) || revokedNow.has(toHex(d));
+  // Step 1: the relevant revocations of I, bound in X first.
+  const steps: ReconcileStep[] = [...planRevocations(identity, target).propose];
+  const revokedAfter = (d: PrincipalId) =>
+    revocationOf(X, R, d) !== undefined || revocationOf(I, R, d) !== undefined;
   // Step 2: registrations, in I's binding order.
   for (const [hex, d] of I.devices) {
     if (!bytesEqual(d.root, R) || d.chain === null || d.leafId === null) continue;
@@ -175,6 +239,15 @@ export interface TargetReconciliation {
     readonly step: ReconcileStep;
     readonly state: PhaseState | "refused";
   }[];
+  /**
+   * §7.1 step 1: devices whose revocation in `I` the target refused (the
+   * limit of W §17.5 rule 5, or the reconciler's authority there), to
+   * report to the human with the Resource. Each stays unpropagated: this
+   * run registered no device through it and sealed nothing to it, and a
+   * later run proposes it again. Empty when every relevant pair reached the
+   * target.
+   */
+  readonly unpropagated?: readonly PrincipalId[];
   readonly keys?: KeyDelivery;
   readonly rotation?: RotationOutcome;
 }
@@ -346,6 +419,29 @@ function displayIntents(
   return intents;
 }
 
+/**
+ * §7.1 step 3: the devices of `R` reconciliation seals the target's keys
+ * to: every reader of the target whose root is `R` (pairing devices of `I`
+ * included, in `I`), except a device revoked in `I` and a device whose
+ * current chain in the target passes through a device revoked in `I` (an
+ * unpropagated pair of step 1, which the target still counts as active).
+ */
+export function keyRecipients(
+  identity: LinearChain,
+  target: LinearChain,
+): readonly PrincipalDescriptor[] {
+  const R = genesisOwner(identity);
+  const revokedInI = (d: PrincipalId) => revocationOf(identity.state, R, d) !== undefined;
+  return Object.freeze(
+    readersAt(target.state).filter((r) => {
+      if (!bytesEqual(actsFor(target.state, r.principalId), R)) return false;
+      if (revokedInI(r.principalId)) return false;
+      const binding = target.state.devices.get(toHex(r.principalId));
+      return binding === undefined || !binding.issuers.some(revokedInI);
+    }),
+  );
+}
+
 async function reconcileTarget(
   o: IdentityFlowOptions & { readonly rotate?: boolean },
   channel: IdentityChannel,
@@ -377,11 +473,14 @@ async function reconcileTarget(
       steps.push({ step, state: outcome.state });
       chain = outcome.chain;
     }
-  // Step 3: every reader of the target whose root is R (pairing devices of I included), by the ledger.
+  // §7.1 step 1: a refused revocation is reported and stays unpropagated.
+  const unpropagated = steps
+    .filter((s) => s.step.kind === "revoke" && s.state === "refused")
+    .map((s) => s.step.device);
+  // Step 3: every reader of the target whose root is R (pairing devices of I included), by the
+  // ledger, except the devices I has revoked and those whose chain passes through one.
   const deks = await fetchDeks(o.storage, o.secrets, channel, chain, o.installation);
-  const recipients = readersAt(chain.state).filter((r) =>
-    bytesEqual(actsFor(chain.state, r.principalId), R),
-  );
+  const recipients = keyRecipients(I, chain);
   const keys = await deliverKeys({ channel, ledger, chain, sender: me, recipients, deks, resend });
   const rotation =
     o.rotate === false
@@ -391,6 +490,7 @@ async function reconcileTarget(
     resource: X,
     status: manages ? "done" : "not-authorized",
     steps: Object.freeze(steps),
+    ...(unpropagated.length === 0 ? {} : { unpropagated: Object.freeze(unpropagated) }),
     keys,
     ...(rotation === undefined ? {} : { rotation }),
   };

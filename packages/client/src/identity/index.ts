@@ -129,10 +129,13 @@ export {
 } from "./phases.js";
 export { type RevocationStatus, revocationStatus } from "./proof.js";
 export {
+  keyRecipients,
   planReconciliation,
+  planRevocations,
   type ReconcileStep,
   reconcileDevices,
   reconcileRecord,
+  revocationRelevant,
   type TargetReconciliation,
 } from "./reconcile.js";
 export {
