@@ -4,12 +4,25 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
-## 0.4.1 — unreleased
+## 0.5.0 — unreleased
 
-A patch of 0.4.0 at `mvp-0.4-baseline.4` (finding 1 and the profile and
-corpus findings of the LFCP-04-415 review). No API is removed or renamed;
-the additions are new exports, an optional result field and the
-`not-relevant` outcome of a revocation in a roster Resource.
+0.4.0 at `mvp-0.4-baseline.4` (finding 1 and the profile and corpus findings
+of the LFCP-04-415 review, then review LFCP-04-415f). A minor release: no
+export is removed or renamed, but two public result unions gain a variant
+(Changed), which breaks a caller that handles them exhaustively.
+
+### Changed
+
+- `RevocationResult.revoke` gains `not-relevant`: revoking a device proposes
+  `DEVICE_REVOKE` on a roster Resource only where §7.1 step 1 would (the
+  device is bound there, or could become registered or issue a chain
+  there); elsewhere no record is proposed and the result is `not-relevant`
+  (IDENTITY-PROFILE-01 §8.4). A `switch` or `Record` over `revoke` needs the
+  new key.
+- `PairingSessionResult` gains `unsupported`: `createPairingSession` and
+  `resumePairingSession` on an Identity Resource whose coordinator does not
+  list `identity-01` in READY propose and upload nothing there (below).
+- `planDisplayData` (new in this release) returns `{ intents, retire }`.
 
 ### Fixed
 
@@ -25,23 +38,37 @@ the additions are new exports, an optional result field and the
 - A propagation the target refuses is reported (`TargetReconciliation.
   unpropagated`, with its `refused` step) and stays unpropagated: the device
   is treated as revoked there, nothing is registered through it, it is never
-  bound to lift the limit, and a later run proposes it again (it succeeds
-  once the device is bound there, which is never limited).
-- Step 3 seals no key to a device that `I` has revoked, or whose chain in
-  the target passes through one, even while the target still counts it as
-  active (§7.1 step 3).
+  bound to lift the limit. A later run proposes it again once the target's
+  state changed (its head moved, for one by the device's binding there,
+  which is never limited); on the same state it reports the pair without
+  sending the refused record again.
+- Nothing is sealed to a device that `I` has revoked, or whose chain in the
+  target passes through one, even while the target still counts it as
+  active: neither by step 3 nor by a rotation that reconciliation, a
+  revocation or a resumed operation runs there (§7.1 steps 1 and 3; 415f
+  finding 1: a rotation after another, exposing, revocation sealed the new
+  epoch to it).
 - Step 4 restores display entries only for personal and service devices
   bound in `I` as the leaf of a chain, creates none for a revoked device,
-  and sets `revoked = true` on a retired entry whose flag is not set; a
-  second run writes nothing (§7.1 step 4).
-- Revoking a device proposes `DEVICE_REVOKE` on a roster Resource only where
-  §7.1 step 1 would; elsewhere the result is `not-relevant` (§8.4).
+  and sets `revoked = true` on a retired entry when some value of the flag
+  is not true or it is absent; a second run writes nothing (§7.1 step 4).
+  With a document port that has the new `retirement` capability (the
+  storage-node port has it), every concurrent value of the flag is read and
+  the flag is written alone, by step 4 and by the §8.2 revocation, so a
+  concurrent rename stays a conflict.
 - Pairing link checks: a coordinator that refuses the session as the link's
   device now rejects the link (`not-a-session`) instead of reporting the
   coordinator unavailable, and the device must be registered, not only
   bound (§5.2 checks 2 and 4).
 - A pairing session whose manager holds the root's unit 1 but not the DEK of
-  its epoch lists the missing DEK only, not the unit as well (§5.3 step 1).
+  its epoch lists the missing DEK only, not the unit as well; a root unit 1
+  refused for any other reason, or naming an epoch `I` does not have, is
+  still listed as missing (§5.3 step 1).
+- No `DEVICE_GRANT` or `DEVICE_REVOKE` is proposed, and no Key Package
+  authorized only by the same-root rule is uploaded, to a server whose READY
+  does not list `identity-01` (LFCP-WIRE-01 §37): `createPairingSession`
+  did both. Under every flow the phase is refused (`IDENTITY_UNSUPPORTED`,
+  client-local) or the package skipped.
 - The CONTROL_GET decoder refuses a range whose end is below its start
   (`MALFORMED_MESSAGE`, LFCP-WIRE-01 §45); it accepted one.
 
@@ -50,6 +77,12 @@ the additions are new exports, an optional result field and the
 - `planRevocations`, `revocationRelevant`, `keyRecipients` and
   `planDisplayData`: §7.1 steps 1, 3 and 4 as pure functions on Control
   states; `pairingLinkRejection`: the §5.2 checks after the link parses.
+- `IdentityDocumentPort.retirement` (optional, `IdentityRetirementPort`):
+  every value of a device entry's `revoked` and a write that sets it alone.
+  `IdentityReplica.fieldValues` and the `retire` option of
+  `IdentityReplica.write` (`IdentityWriteOptions`) provide it.
+- `rotateAfter`, `rotateIfExposed` and `resumeRotations` take an optional
+  `identityChain`: the readers it has revoked receive nothing.
 
 ### Spec pin: `mvp-0.4-baseline.4`
 
@@ -63,6 +96,9 @@ the additions are new exports, an optional result field and the
   scalar) were already decided as the corpus does; the runners gain the new
   flow fixtures and steps, the planned `chain` of every Register phase, the
   pairing link checks and the revoked-reader reads of W §41.
+- The flow runner reports as not verified what it models without running
+  the SDK (the steps after a rejected pairing link, F08.link_rejected), and
+  runs F18_barrier #6 through `createPairingSession`.
 
 ## 0.4.0 — 2026-11-07
 
