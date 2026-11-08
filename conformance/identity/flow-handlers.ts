@@ -480,17 +480,24 @@ function displayRuns(f: FlowCase) {
     if (s.branch === "service" && service === undefined) service = new Map(afterP2 ?? main);
     const doc = s.branch === "service" ? (service as Map<string, DeviceEntryValue>) : main;
     const writes: Report[] = [];
-    for (const intent of planDisplayData(state, doc, R)) {
-      if (intent.intent !== "device.put") continue;
-      const was = doc.get(intent.key);
+    const plan = planDisplayData(state, doc, R);
+    const puts = [
+      ...plan.intents.flatMap((i) =>
+        i.intent === "device.put" ? [[i.key, i.entry] as const] : [],
+      ),
+      // A retired entry: the flag alone (§7.1 step 4).
+      ...plan.retire.map((key) => [key, { revoked: true }] as const),
+    ];
+    for (const [key, entry] of puts) {
+      const was = doc.get(key);
       const write = Object.fromEntries(
-        Object.entries(intent.entry).filter(
+        Object.entries(entry).filter(
           ([k, v]) => was === undefined || (was as unknown as Record<string, unknown>)[k] !== v,
         ),
       );
-      const who = principalOfRef(intent.key);
-      writes.push({ entry: who === undefined ? intent.key : principalLabel(who), write });
-      doc.set(intent.key, { ...(was ?? {}), ...intent.entry } as DeviceEntryValue);
+      const who = principalOfRef(key);
+      writes.push({ entry: who === undefined ? key : principalLabel(who), write });
+      doc.set(key, { ...(was ?? {}), ...entry } as DeviceEntryValue);
     }
     if (caseId === "P2_pairing_device") afterP2 = new Map(main);
     const pairing = [...state.devices.entries()]

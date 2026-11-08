@@ -23,6 +23,7 @@ import {
   genesisOwner,
   IdentityConflict,
   loadIdentityDocument,
+  retiredFlagMissing,
   runControlPhase,
   runUnitPhase,
   sealIdentityUnit,
@@ -570,9 +571,11 @@ async function markRevoked(
       build: async () => {
         const now = await current();
         gone = now.entry === undefined;
-        if (now.entry === undefined || now.entry.revoked === true) return null;
-        // The device's missing_keys hint is written only by the device (§3 AI5).
-        const { missing_keys: _hint, ...display } = now.entry;
+        const retirement = now.doc.retirement;
+        const values =
+          retirement === undefined ? undefined : (k: string) => retirement.revokedValues(k);
+        if (!retiredFlagMissing(now.doc.devices(), key, values)) return null;
+        // The flag alone (§8.2); the device's missing_keys hint is its own (§3 AI5).
         return sealIdentityUnit({
           storage: o.storage,
           chain: now.chain,
@@ -580,7 +583,8 @@ async function markRevoked(
           signer: o.installation.signer,
           doc: now.doc,
           latest: now.load.latest,
-          intents: [{ intent: "device.put", key, entry: { ...display, revoked: true } }],
+          intents: [],
+          retire: [key],
         });
       },
     });

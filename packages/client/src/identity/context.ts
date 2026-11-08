@@ -591,6 +591,31 @@ export function genesisOwner(chain: LinearChain): PrincipalId {
   return g?.body.type === "GENESIS" ? g.body.owner.principalId : chain.state.owner.principalId;
 }
 
+/** 0.4's flag write on a port without `retirement`: the entry's display fields and the flag. */
+function retiredPut(doc: IdentityDocumentPort, key: string): IdentityIntent[] {
+  const entry = doc.devices().get(key);
+  if (entry === undefined) return [];
+  const { missing_keys: _hint, ...display } = entry;
+  return [{ intent: "device.put", key, entry: { ...display, revoked: true } }];
+}
+
+/**
+ * Whether the retired entry `devices[key]` needs its flag (§7.1 step 4):
+ * some value of its `revoked` is not `true`, or the field is absent. A port
+ * without `retirement` shows one value. False when there is no valid entry.
+ */
+export function retiredFlagMissing(
+  entries: ReadonlyMap<string, { readonly revoked?: boolean }>,
+  key: string,
+  revokedValues?: (key: string) => readonly unknown[],
+): boolean {
+  const entry = entries.get(key);
+  if (entry === undefined) return false;
+  if (revokedValues === undefined) return entry.revoked !== true;
+  const values = revokedValues(key);
+  return values.length === 0 || values.some((v) => v !== true);
+}
+
 /**
  * A new unit of `signer` in the Identity Resource carrying `intents` as
  * one change: the next actor sequence from the storage's reservation
@@ -605,6 +630,13 @@ export async function sealIdentityUnit(options: {
   readonly doc: IdentityDocumentPort;
   readonly latest: IdentityDocumentLoad["latest"];
   readonly intents: readonly IdentityIntent[];
+  /**
+   * Retired entries whose `revoked` flag the change sets (§7.1 step 4,
+   * §8.2): field by field when the port has `retirement`, else with
+   * `device.put` of the entry's display fields (its `missing_keys` hint is
+   * the device's own, §3 AI5).
+   */
+  readonly retire?: readonly string[];
   /** The sequence to use instead of a reservation (a pairing device shared by installations, §5.3). */
   readonly seq?: bigint;
 }): Promise<Uint8Array> {
@@ -623,14 +655,19 @@ export async function sealIdentityUnit(options: {
     while (previous !== undefined && seq <= previous.seq)
       seq = await options.storage.actorSequences.reserveNext(R, me);
   }
-  const plaintext = options.doc.write(
-    {
-      signer: me,
-      actorSeq: seq,
-      writerClass: identityWriterClass(chain.state, genesisOwner(chain), me),
-    },
-    options.intents,
-  );
+  const author = {
+    signer: me,
+    actorSeq: seq,
+    writerClass: identityWriterClass(chain.state, genesisOwner(chain), me),
+  };
+  const retire = options.retire ?? [];
+  const { doc } = options;
+  const plaintext =
+    retire.length === 0
+      ? doc.write(author, options.intents)
+      : doc.retirement !== undefined
+        ? doc.retirement.write(author, options.intents, retire)
+        : doc.write(author, [...options.intents, ...retire.flatMap((key) => retiredPut(doc, key))]);
   return sealDataUnit(
     {
       resourceId: R,

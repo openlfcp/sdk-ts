@@ -103,6 +103,34 @@ export interface IdentityDocumentPort {
     table: "roster" | "devices" | "requests",
     key: string,
   ): readonly { readonly hash: string; readonly signer: PrincipalId }[];
+  /**
+   * Optional (0.5.0): a device entry's `revoked` flag field by field, for
+   * a retired entry (§7.1 step 4, §8.2). With it, reconciliation sees every
+   * concurrent value of the flag and sets it without writing the entry's
+   * other fields, so it never resolves a conflict on them (a concurrent
+   * rename). A port without it shows one value per field (`devices()`), and
+   * the flag is written with `device.put` of the entry's display fields, as
+   * in 0.4. IdentityReplica provides both (`fieldValues`, `write`'s
+   * `retire` option).
+   */
+  readonly retirement?: IdentityRetirementPort;
+}
+
+/** IdentityDocumentPort.retirement. */
+export interface IdentityRetirementPort {
+  /** Every value `devices[key].revoked` holds now: several under concurrent writes, none when absent. */
+  revokedValues(key: string): readonly unknown[];
+  /**
+   * Like IdentityDocumentPort.write, the plaintext of one change by
+   * `author`: `intents` in order (possibly none), then `revoked = true` in
+   * each existing entry `devices[key]` of `retire`, no other field of those
+   * entries written.
+   */
+  write(
+    author: IdentityAuthor,
+    intents: readonly IdentityIntent[],
+    retire: readonly string[],
+  ): Uint8Array;
 }
 
 /** A passthrough Data Unit codec: the port produces and consumes the plaintext. */

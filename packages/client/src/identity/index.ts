@@ -53,6 +53,7 @@ export {
   type IdentityAuthor,
   type IdentityDocumentPort,
   type IdentityIntent,
+  type IdentityRetirementPort,
   type IdentityWriterClass,
   identityPlaintextCodec,
   identityWriterClass,
@@ -130,6 +131,7 @@ export {
 } from "./phases.js";
 export { type RevocationStatus, revocationStatus } from "./proof.js";
 export {
+  type DisplayPlan,
   keyRecipients,
   planDisplayData,
   planReconciliation,

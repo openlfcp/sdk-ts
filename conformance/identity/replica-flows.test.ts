@@ -9,6 +9,7 @@ import {
   fetchDeks,
   loadIdentityDocument,
   principalRefOf,
+  reconcileDevices,
   resourceRef,
   revokeDevice,
   sealIdentityUnit,
@@ -105,5 +106,85 @@ describe("identity flows with IdentityReplica", { timeout: 120_000 }, () => {
     const p = await open(P as never);
     expect(p.doc.replica().validate().problems).toEqual([]);
     expect(p.doc.devices().get(key)).toMatchObject({ revoked: true, missing_keys: hint });
+  });
+
+  // §7.1 step 4 and §8.2 write the flag of a retired entry alone (review LFCP-04-415f
+  // finding 3): a concurrent rename stays a conflict for the human, never resolved by them.
+  test("the revoked flag of an entry with a label conflict is written alone, by revocation and by reconciliation", async () => {
+    const server = new MemoryCoordinator();
+    const P = { ...node(server, party(1)), document: replicaPort };
+    const X = await hostResource(server, P as never);
+    const created = await createIdentityResource({ ...P, url: URL, label: "laptop", roster: [X] });
+    if (created.kind !== "created") throw new Error(created.kind);
+    const I = created.identity;
+    const A = await pair({ server }, P as never, 2, "full", { document: replicaPort as never });
+    await pair({ server }, P as never, 3, "edit", { document: replicaPort as never });
+    await pair({ server }, P as never, 4, "edit", { document: replicaPort as never });
+    const open = async (who: Node) => {
+      const channel = await server.network().connect(who.installation.signer, URL);
+      const chain = await syncChain(who.storage, channel, I as ResourceId);
+      const doc = replicaPort(I, party(1).signer.descriptor.principalId);
+      const deks = await fetchDeks(who.storage, who.secrets, channel, chain, who.installation);
+      const load = await loadIdentityDocument({ channel, chain, deks, doc });
+      return { channel, chain, deks, doc, load };
+    };
+    /** The root and A rename device `n` concurrently: a label conflict. */
+    const renameConcurrently = async (n: number) => {
+      const key = principalRefOf(party(n).signer.descriptor.principalId);
+      const views = [
+        { who: P as never as Node, view: await open(P as never), label: "alpha" },
+        { who: A, view: await open(A), label: "beta" },
+      ];
+      for (const { who, view, label } of views) {
+        const entry = view.doc.devices().get(key);
+        if (entry === undefined) throw new Error("no device entry");
+        const bytes = await sealIdentityUnit({
+          storage: who.storage,
+          chain: view.chain,
+          deks: view.deks,
+          signer: who.installation.signer,
+          doc: view.doc,
+          latest: view.load.latest,
+          intents: [{ intent: "device.put", key, entry: { ...entry, label } }],
+        });
+        expect((await view.channel.putDataUnit(I, bytes)).kind).toBe("ack");
+      }
+      const labels = (await open(P as never)).doc.replica().fieldValues("devices", key, "label");
+      expect([...labels].sort()).toEqual(["alpha", "beta"]);
+      return key;
+    };
+    const values = async (key: string) => {
+      const r = (await open(P as never)).doc.replica();
+      expect(r.validate().problems).toEqual([]);
+      return {
+        label: [...r.fieldValues("devices", key, "label")].sort(),
+        revoked: r.fieldValues("devices", key, "revoked"),
+      };
+    };
+
+    // §8.2: revokeDevice writes the flag.
+    const k3 = await renameConcurrently(3);
+    const r3 = await revokeDevice({
+      ...P,
+      device: party(3).signer.descriptor.principalId,
+      reason: 1n,
+    } as never);
+    expect(r3.kind === "revoked" && r3.document.state).toBe("committed-own");
+    expect(await values(k3)).toEqual({ label: ["alpha", "beta"], revoked: [true] });
+
+    // §7.1 step 4: the revocation's display unit is refused; reconciliation writes the flag.
+    const k4 = await renameConcurrently(4);
+    server.fault = (e) => (e.op === "data-unit" ? { nack: "AUTHORIZATION_FAILED" } : undefined);
+    const r4 = await revokeDevice({
+      ...P,
+      device: party(4).signer.descriptor.principalId,
+      reason: 1n,
+    } as never);
+    server.fault = () => undefined;
+    expect(r4.kind === "revoked" && r4.document.state).toBe("refused");
+    expect((await values(k4)).revoked).toEqual([]);
+    const run = await reconcileDevices({ ...P, rotate: false } as never);
+    expect(run.document.state).toBe("committed-own");
+    expect(await values(k4)).toEqual({ label: ["alpha", "beta"], revoked: [true] });
   });
 });

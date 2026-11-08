@@ -34,5 +34,13 @@ export function replicaPort(
     devices: () => map(replica.validate().devices) as never,
     requests: () => map(replica.validate().requests),
     origins: (table, key) => replica.origins(table, key),
+    // §7.1 step 4, §8.2: a retired entry's flag field by field, every concurrent value seen.
+    retirement: {
+      revokedValues: (key) => replica.fieldValues("devices", key, "revoked"),
+      write: (author, intents, retire) =>
+        identityCodec.encode(
+          replica.write(writer(author), intents as readonly ReplicaIntent[], { retire }),
+        ),
+    },
   };
 }
