@@ -38,7 +38,12 @@ import {
   syncChain,
 } from "./context.js";
 import { mayManageDevices } from "./devices.js";
-import { type IdentityIntent, principalRefOf, resourceRef } from "./document.js";
+import {
+  type DeviceEntryValue,
+  type IdentityIntent,
+  principalRefOf,
+  resourceRef,
+} from "./document.js";
 import { newOperationId, OperationJournal, PackageLedger } from "./journal.js";
 import {
   ChannelPool,
@@ -346,7 +351,8 @@ export async function reconcileDevices(
       }
     }
 
-    // Step 4: display data for devices in I's chain without a valid entry (labels default to the fingerprint).
+    // Step 4: display data for the leaf-bound personal and service devices of I without a valid
+    // entry (labels default to the fingerprint), and the flag of a retired entry.
     if (displayIntents(I, doc, R).length > 0 && doc.initialized()) {
       // Built on the current state of I: a rotation of I by this run, or by
       // anyone, makes an earlier unit stale (W §19.1), and it is written again.
@@ -396,28 +402,55 @@ export async function reconcileDevices(
   return { operation, targets: Object.freeze(out), document };
 }
 
-/** §7.1 step 4: a device entry for each device of R in I's chain without one. */
-function displayIntents(
-  I: LinearChain,
-  doc: { devices(): ReadonlyMap<string, unknown> },
-  R: PrincipalId,
+/**
+ * §7.1 step 4: the display data reconciliation writes in `I`'s document,
+ * from `I`'s Control state and the valid device entries (§4). For every
+ * device of `R` of kind 0 or 1 bound in `I` as the leaf of an accepted
+ * chain (an intermediate-only binding issues and does not act in `I`):
+ * when it is not revoked in `I` and has no valid entry, an entry labelled
+ * with its fingerprint (§5.2); when it is revoked in `I` and its entry (a
+ * retired entry) does not say `revoked = true`, that flag, as the §8.2
+ * revocation writes it. No entry is created for a revoked device, nothing
+ * is written for a pairing device, nothing is relabelled or deleted, and a
+ * second run on the same states plans nothing.
+ */
+export function planDisplayData(
+  identity: ControlState,
+  entries: ReadonlyMap<string, DeviceEntryValue>,
+  root: PrincipalId,
 ): IdentityIntent[] {
   const intents: IdentityIntent[] = [];
-  for (const [hex, d] of I.state.devices) {
-    if (!bytesEqual(d.root, R) || d.chain === null || d.kind === DEVICE_KIND.PAIRING) continue;
-    const key = principalRefOf(principalId(fromHex(hex)));
-    if (doc.devices().has(key)) continue;
+  for (const [hex, d] of identity.devices) {
+    if (!bytesEqual(d.root, root) || d.chain === null) continue;
+    if (d.kind !== DEVICE_KIND.PERSONAL && d.kind !== DEVICE_KIND.SERVICE) continue;
+    const D = principalId(fromHex(hex));
+    const key = principalRefOf(D);
+    const entry = entries.get(key);
+    if (revocationOf(identity, root, D) !== undefined) {
+      if (entry === undefined || entry.revoked === true) continue;
+      // The retired entry gets its flag; the device's missing_keys hint is its own (§3 AI5).
+      const { missing_keys: _hint, ...display } = entry;
+      intents.push({ intent: "device.put", key, entry: { ...display, revoked: true } });
+      continue;
+    }
+    if (entry !== undefined) continue;
     intents.push({
       intent: "device.put",
       key,
       entry: {
-        label: deviceFingerprint(principalId(fromHex(hex))),
+        label: deviceFingerprint(D),
         kind: d.kind === DEVICE_KIND.SERVICE ? 1 : 0,
       },
     });
   }
   return intents;
 }
+
+const displayIntents = (
+  I: LinearChain,
+  doc: { devices(): ReadonlyMap<string, DeviceEntryValue> },
+  R: PrincipalId,
+): IdentityIntent[] => planDisplayData(I.state, doc.devices(), R);
 
 /**
  * §7.1 step 3: the devices of `R` reconciliation seals the target's keys

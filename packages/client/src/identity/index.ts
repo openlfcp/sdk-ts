@@ -130,6 +130,7 @@ export {
 export { type RevocationStatus, revocationStatus } from "./proof.js";
 export {
   keyRecipients,
+  planDisplayData,
   planReconciliation,
   planRevocations,
   type ReconcileStep,
