@@ -2,6 +2,7 @@ import { type PrincipalId, type ResourceId, toHex } from "@openlfcp/core";
 import {
   type ControlBody,
   DEVICE_KIND,
+  decodeControlRecord,
   revocationOf,
   type Signer,
   signControlRecord,
@@ -128,6 +129,99 @@ describe("reconciliation propagates only relevant revocations (IDENTITY-PROFILE-
     const after = w.server.chain(X).state;
     expect(revocationOf(after, R, id(3))).toBeDefined();
     expect(after.preemptive.get(hex(R))).toBe(64);
+  });
+});
+
+describe("a refused propagation is not repeated on an unchanged target (§7.1 step 1)", {
+  timeout: 120_000,
+}, () => {
+  test("proposed again only once X's head moved; reported meanwhile without a CONTROL_PUT", async () => {
+    const w = await world(1);
+    const X = w.resources[0] as ResourceId;
+    const R = id(1);
+    await pair(w, w.P, 3, "read");
+    // DEV_3 is revoked in I while X is unreachable, then X refuses its propagation.
+    w.server.down.add(hex(X));
+    await revokeDevice({ ...w.P, device: id(3), reason: 1n });
+    w.server.down.clear();
+    // DEV_3 is bound in X: a refusal here is the reconciler's authority, injected.
+    // Unbound pairs are what the memory is for: X forgets DEV_3's binding below.
+    w.server.fault = (e) =>
+      e.op === "control" && hex(e.resource) === hex(X)
+        ? { nack: "AUTHORIZATION_FAILED" }
+        : undefined;
+    const puts = () =>
+      w.server.uploads.filter((e) => e.op === "control" && hex(e.resource) === hex(X)).length;
+    const x = (r: Awaited<ReturnType<typeof reconcileDevices>>) =>
+      r.targets.find((t) => hex(t.resource) === hex(X));
+
+    // The bound device's revocation is never limited: refused or not, it is proposed every run.
+    const bound1 = await reconcileDevices({ ...w.P, only: [X], rotate: false });
+    expect(x(bound1)?.unpropagated?.map(hex)).toEqual([hex(id(3))]);
+    const sentBound = puts();
+    await reconcileDevices({ ...w.P, only: [X], rotate: false });
+    expect(puts()).toBe(sentBound + 1);
+
+    // An unbound device: a fresh X where DEV_3 never registered.
+    const hosted = await hostResource(w.server, w.P);
+    const Y = hosted.resource;
+    await addToRoster(w.P, w.I, Y, hosted.entry);
+    w.server.fault = (e) => {
+      if (e.op !== "control" || hex(e.resource) !== hex(Y)) return undefined;
+      const b = decodeControlRecord(e.bytes).body;
+      return b.type === "DEVICE_REVOKE" && hex(b.device) === hex(id(3))
+        ? { nack: "AUTHORIZATION_FAILED" }
+        : undefined;
+    };
+    const putsY = () =>
+      w.server.uploads.filter((e) => e.op === "control" && hex(e.resource) === hex(Y)).length;
+    const y = (r: Awaited<ReturnType<typeof reconcileDevices>>) =>
+      r.targets.find((t) => hex(t.resource) === hex(Y));
+    const first = await reconcileDevices({ ...w.P, only: [Y], rotate: false });
+    expect(y(first)?.steps.map((s) => [s.step.kind, hex(s.step.device), s.state])).toEqual([
+      ["revoke", hex(id(3)), "refused"],
+    ]);
+    expect(y(first)?.unpropagated?.map(hex)).toEqual([hex(id(3))]);
+    const head = hex(w.server.chain(Y).state.head);
+    const sent = putsY();
+
+    // The same state of Y: reported, still unpropagated, nothing sent.
+    const second = await reconcileDevices({ ...w.P, only: [Y], rotate: false });
+    expect(hex(w.server.chain(Y).state.head)).toBe(head);
+    expect(y(second)?.steps.map((s) => [s.step.kind, hex(s.step.device), s.state])).toEqual([
+      ["revoke", hex(id(3)), "refused"],
+    ]);
+    expect(y(second)?.unpropagated?.map(hex)).toEqual([hex(id(3))]);
+    expect(putsY()).toBe(sent);
+    expect(w.server.chain(Y).state.devices.has(hex(id(3)))).toBe(false);
+
+    // Y's state changes (another record): the pair is proposed again.
+    const other = await commit(w.server, w.P.installation.signer, Y, {
+      type: "DEVICE_REVOKE",
+      root: R,
+      device: id(200),
+      reason: 1n,
+    });
+    expect(other.kind).toBe("ack");
+    const third = await reconcileDevices({ ...w.P, only: [Y], rotate: false });
+    expect(putsY()).toBe(sent + 2);
+    expect(y(third)?.unpropagated?.map(hex)).toEqual([hex(id(3))]);
+
+    // Y stops refusing: the next run on a changed state propagates it.
+    w.server.fault = () => undefined;
+    expect(
+      (
+        await commit(w.server, w.P.installation.signer, Y, {
+          type: "DEVICE_REVOKE",
+          root: R,
+          device: id(201),
+          reason: 1n,
+        })
+      ).kind,
+    ).toBe("ack");
+    const fourth = await reconcileDevices({ ...w.P, only: [Y], rotate: false });
+    expect(y(fourth)?.unpropagated).toBeUndefined();
+    expect(revocationOf(w.server.chain(Y).state, R, id(3))).toBeDefined();
   });
 });
 

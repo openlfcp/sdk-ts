@@ -251,9 +251,11 @@ export interface TargetReconciliation {
    * §7.1 step 1: devices whose revocation in `I` the target refused (the
    * limit of W §17.5 rule 5, or the reconciler's authority there), to
    * report to the human with the Resource. Each stays unpropagated: this
-   * run registered no device through it and sealed nothing to it, and a
-   * later run proposes it again. Empty when every relevant pair reached the
-   * target.
+   * run registered no device through it and sealed nothing to it. A later
+   * run proposes it again once the target's state changed since the
+   * refusal (its head moved, for one by the device's binding there); on the
+   * same state it reports the pair without sending anything. Empty when
+   * every relevant pair reached the target.
    */
   readonly unpropagated?: readonly PrincipalId[];
   readonly keys?: KeyDelivery;
@@ -493,6 +495,26 @@ export function keyRecipients(
   );
 }
 
+/**
+ * The revocations of `I` that `X` refused in an earlier reconciliation of
+ * this installation, as `<phase ID>@<head of X they were proposed on>`,
+ * with the refusal code (§7.1 step 1). A head names one state of `X`.
+ */
+async function refusedRevocations(
+  journal: OperationJournal,
+  operation: string,
+  X: ResourceId,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const prefix = `revoke:${toHex(X)}:`;
+  for (const op of await journal.list({ kind: "reconcile" }))
+    if (op.id !== operation)
+      for (const p of op.phases)
+        if (p.id.startsWith(prefix) && p.state === "refused" && p.expectedHead !== undefined)
+          out.set(`${p.id}@${p.expectedHead}`, p.code ?? "refused");
+  return out;
+}
+
 async function reconcileTarget(
   o: IdentityFlowOptions & { readonly rotate?: boolean },
   channel: IdentityChannel,
@@ -508,9 +530,29 @@ async function reconcileTarget(
   let chain = await syncChain(o.storage, channel, X);
   const steps: { step: ReconcileStep; state: PhaseState | "refused" }[] = [];
   const manages = mayManageDevices(chain.state, me.descriptor.principalId, R);
+  const refused = manages
+    ? await refusedRevocations(journal, operation, X)
+    : new Map<string, string>();
   if (manages)
     for (const step of planReconciliation(I, chain)) {
       const id = `${step.kind}:${toHex(X)}:${toHex(step.device)}`;
+      // §7.1 step 1: a refused propagation is not repeated as such. It is proposed again once
+      // X's state changed since the refusal (its head moved; binding the device moves it too,
+      // and a bound device's revocation is never limited), not on every run.
+      const head = toHex(chain.state.head);
+      const code = step.kind === "revoke" ? refused.get(`${id}@${head}`) : undefined;
+      if (code !== undefined && !isBound(chain.state, step.device)) {
+        await journal.putPhase(operation, {
+          id,
+          kind: "revoke",
+          resource: toHex(X),
+          state: "refused",
+          expectedHead: head,
+          code,
+        });
+        steps.push({ step, state: "refused" });
+        continue;
+      }
       const outcome = await runControlPhase(o.storage, channel, journal, operation, {
         id,
         kind: step.kind,
