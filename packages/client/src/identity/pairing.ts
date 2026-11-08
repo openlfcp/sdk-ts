@@ -257,7 +257,11 @@ async function missingMaterial(
           dek: (epoch) => deks.get(String(epoch)),
           profile: identityPlaintextCodec,
         });
-  if (opened?.kind !== "accepted") missing.push("the root's Data Unit with actor sequence 1");
+  // A unit held whose epoch's DEK is missing is not missing itself: the DEK is listed.
+  const epochMissing =
+    unit !== undefined && !deks.has(String(parseDataUnit(unit).payload.dataEpoch));
+  if (opened?.kind !== "accepted" && !epochMissing)
+    missing.push("the root's Data Unit with actor sequence 1");
   return missing;
 }
 
