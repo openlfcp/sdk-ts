@@ -52,8 +52,21 @@ export interface PairArguments {
   readonly platform: string;
   /** Seconds to wait for the result before exiting with WAITING; 0 sends the request only. */
   readonly wait: number;
-  /** Seconds between two checks of the result. */
-  readonly poll: number;
+  /**
+   * Seconds between two checks of the result; absent: PAIR_POLL_BACKOFF_MS
+   * (4, 8, 15, then every 30 s, as the plugin asks), from the start again
+   * whenever the result changes.
+   */
+  readonly poll?: number;
+}
+
+/** The pause before each next check of the result (decision I18: each check is a server session). */
+export const PAIR_POLL_BACKOFF_MS: readonly number[] = Object.freeze([4000, 8000, 15_000, 30_000]);
+
+/** The pause (ms) before check `step + 1` since the result last changed: `--poll`, or the backoff. */
+export function pairPollDelay(step: number, poll?: number): number {
+  if (poll !== undefined) return poll * 1000;
+  return PAIR_POLL_BACKOFF_MS[Math.min(step, PAIR_POLL_BACKOFF_MS.length - 1)] as number;
 }
 
 export const PAIR_USAGE = `usage: lfcp-node pair <link|-> --state <dir> --label <label>
@@ -63,7 +76,8 @@ export const PAIR_USAGE = `usage: lfcp-node pair <link|-> --state <dir> --label 
 Pairs this installation as a service device of the human whose managing
 device shows the link (IDENTITY-PROFILE-01 §5.3). Prints the fingerprint to
 compare with that device's screen, then waits for the approval. "-" reads the
-link from standard input. Run the same command again to resume.`;
+link from standard input. Run the same command again to resume. The result
+is checked after 4, 8, 15, then every 30 seconds, unless --poll is given.`;
 
 /** Parses the arguments after "pair"; a string is the usage error. */
 export function parsePairArguments(argv: readonly string[]): PairArguments | string {
@@ -73,7 +87,7 @@ export function parsePairArguments(argv: readonly string[]): PairArguments | str
   let kind: 0 | 1 = 1;
   let platform = "server";
   let wait = 600;
-  let poll = 5;
+  let poll: number | undefined;
   const sections: string[] = [];
   const seconds = (name: string, v: string | undefined): number | string => {
     const n = Number(v);
@@ -129,7 +143,16 @@ export function parsePairArguments(argv: readonly string[]): PairArguments | str
   if (kind === 1 && sections.length === 0)
     return "a service device needs at least one --section (or --personal)";
   if (kind === 0 && sections.length > 0) return "--section is for a service device only";
-  return { link, state, label, kind, sections, platform, wait, poll };
+  return {
+    link,
+    state,
+    label,
+    kind,
+    sections,
+    platform,
+    wait,
+    ...(poll === undefined ? {} : { poll }),
+  };
 }
 
 export interface PairEnvironment {
@@ -224,8 +247,12 @@ export async function pair(args: PairArguments, env: PairEnvironment): Promise<n
     }
     const deadline = now() + args.wait * 1000;
     let last = "";
+    let step = 0;
     const say = (line: string) => {
-      if (line !== last) out(line);
+      if (line !== last) {
+        out(line);
+        step = 0;
+      }
       last = line;
     };
     for (;;) {
@@ -257,7 +284,9 @@ export async function pair(args: PairArguments, env: PairEnvironment): Promise<n
         out("Not finished yet; run the same command again to resume.");
         return PAIR_EXIT.WAITING;
       }
-      await sleep(args.poll * 1000);
+      const pause = pairPollDelay(step, args.poll);
+      step++;
+      await sleep(Math.max(0, Math.min(pause, deadline - now())));
     }
   } finally {
     node.close();

@@ -20,6 +20,7 @@ import { identityDocument } from "./identity-document.js";
 import { openInstallation } from "./installation.js";
 import { FileSecretStore } from "./secrets.js";
 import { SqliteLfcpStorage } from "./sqlite.js";
+import { nodeUpgradeProbe } from "./upgrade-probe.js";
 
 /** The Data Profiles of this SDK, each as an identity flow checks one unit (FlowOptions.profiles). */
 export const NODE_UNIT_PROFILES: readonly UnitProfile[] = Object.freeze([
@@ -35,6 +36,12 @@ export interface NodeInstallationOptions {
   readonly replyTimeoutMs?: number;
   /** Default: NODE_UNIT_PROFILES. */
   readonly profiles?: readonly UnitProfile[];
+  /**
+   * How long an identity session no flow uses is kept for the next call
+   * (connectionNetwork's keepAliveMs, decision I18); default 60 s, 0 closes
+   * it with its flow. Ignored with `network`.
+   */
+  readonly keepAliveMs?: number;
 }
 
 export interface NodeInstallation {
@@ -45,9 +52,12 @@ export interface NodeInstallation {
   readonly secrets: FileSecretStore;
   /** What every identity flow takes: `revocationStatus({ ...node.flow, resource, url })`. */
   readonly flow: IdentityFlowOptions;
-  /** Closes the database. */
+  /** Closes the identity sessions kept for reuse (of the network it made) and the database. */
   close(): void;
 }
+
+/** The default life of an idle identity session (openNodeInstallation). */
+export const DEFAULT_KEEP_ALIVE_MS = 60_000;
 
 /** A reply timeout that does not keep the process alive. */
 const replyTimeout = (ms: number) => () =>
@@ -72,7 +82,12 @@ export async function openNodeInstallation(
     const installation = await openInstallation(state, secrets);
     const network =
       options.network ??
-      connectionNetwork({ now, timeout: replyTimeout(options.replyTimeoutMs ?? 30_000) });
+      connectionNetwork({
+        now,
+        timeout: replyTimeout(options.replyTimeoutMs ?? 30_000),
+        keepAliveMs: options.keepAliveMs ?? DEFAULT_KEEP_ALIVE_MS,
+        upgradeProbe: nodeUpgradeProbe(),
+      });
     const flow: IdentityFlowOptions = {
       installation,
       storage,
@@ -88,7 +103,11 @@ export async function openNodeInstallation(
       storage,
       secrets,
       flow,
-      close: () => storage.close(),
+      close: () => {
+        // The kept sessions of the network made here; a given network is its owner's.
+        if (options.network === undefined) network.close?.();
+        storage.close();
+      },
     });
   } catch (e) {
     storage.close();
