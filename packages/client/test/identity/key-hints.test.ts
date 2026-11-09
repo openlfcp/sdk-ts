@@ -1,6 +1,7 @@
 import { type DataEpoch, type PrincipalId, type ResourceId, toHex } from "@openlfcp/core";
 import { parseKeyPackage } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
+import { HINT_RESEND_BACKOFF_MS } from "../../src/identity/hint-marks.js";
 import { keyHints, resendKeys, setKeyHints } from "../../src/identity/hints.js";
 import { reconcileDevices } from "../../src/identity/reconcile.js";
 import { FakeIdentityDocument } from "./fake-document.js";
@@ -125,5 +126,92 @@ describe("a hint, or resendKeys, brings a lost package back (§7.1 step 3)", {
       .filter((u) => u.op === "key-package")
       .map((u) => hex(parseKeyPackage(u.bytes).payload.recipient));
     expect(new Set(sealed)).toEqual(new Set([hex(id(4))]));
+  });
+});
+
+/** Key Packages to `who` uploaded to X from upload index `from` on, refused ones included. */
+const uploadsTo = (server: MemoryCoordinator, X: ResourceId, who: PrincipalId, from: number) =>
+  server.uploads
+    .slice(from)
+    .filter(
+      (u) =>
+        u.op === "key-package" &&
+        hex(u.resource) === hex(X) &&
+        hex(parseKeyPackage(u.bytes).payload.recipient) === hex(who),
+    ).length;
+
+// Review 419 round 2, P2-1 (the reviewer's probes A1 and A2): a hint is answered once.
+describe("a hint is answered once (review 419 P2-1)", { timeout: 120_000 }, () => {
+  test("A1: a hint nobody clears is re-sealed once, then not again until it changes or a day passes", async () => {
+    const w = await world(1);
+    const X = w.resources[0] as ResourceId;
+    const D = await pair(w, w.P, 3, "full");
+    const e = epochOf(w.server, X);
+    losePackages(w.server, X, id(3));
+    expect(await setKeyHints({ ...D, missing: new Map([[X, [e]]]) })).toEqual({ kind: "written" });
+    // D never comes back. The first reconciliation answers the hint.
+    let from = w.server.uploads.length;
+    expect((await keyHints(w.P, { unanswered: true })).size).toBe(1);
+    await reconcileDevices({ ...w.P, rotate: false });
+    expect(uploadsTo(w.server, X, id(3), from)).toBe(1);
+    // Answered: not again, and no longer an unanswered hint.
+    expect((await keyHints(w.P, { unanswered: true })).size).toBe(0);
+    expect((await keyHints(w.P)).size).toBe(1);
+    from = w.server.uploads.length;
+    await reconcileDevices({ ...w.P, rotate: false });
+    await reconcileDevices({ ...w.P, rotate: false });
+    expect(uploadsTo(w.server, X, id(3), from)).toBe(0);
+    expect(w.server.packagesOf(X).filter((p) => hex(p.recipient) === hex(id(3))).length).toBe(1);
+    // A day later it is answered again, once.
+    const later = { ...w.P, now: () => 1 + HINT_RESEND_BACKOFF_MS };
+    expect((await keyHints(later, { unanswered: true })).size).toBe(1);
+    from = w.server.uploads.length;
+    await reconcileDevices({ ...later, rotate: false });
+    await reconcileDevices({ ...later, rotate: false });
+    expect(uploadsTo(w.server, X, id(3), from)).toBe(1);
+  });
+
+  test("A1: a changed hint is answered again", async () => {
+    const w = await world(1);
+    const X = w.resources[0] as ResourceId;
+    const D = await pair(w, w.P, 3, "full");
+    const e = epochOf(w.server, X);
+    losePackages(w.server, X, id(3));
+    await setKeyHints({ ...D, missing: new Map([[X, [e]]]) });
+    await reconcileDevices({ ...w.P, rotate: false });
+    // D lost the key again and says so with another epoch set (here, I's epoch too).
+    losePackages(w.server, X, id(3));
+    const eI = epochOf(w.server, w.I);
+    expect(
+      await setKeyHints({
+        ...D,
+        missing: new Map([
+          [X, [e]],
+          [w.I, [eI]],
+        ]),
+      }),
+    ).toEqual({ kind: "written" });
+    const from = w.server.uploads.length;
+    // X's hint is the same epoch set: answered; I's is new: answered now.
+    await reconcileDevices({ ...w.P, rotate: false });
+    expect(uploadsTo(w.server, X, id(3), from)).toBe(0);
+    expect(uploadsTo(w.server, w.I, id(3), from)).toBe(1);
+  });
+
+  test("A2: a package the server refuses for good is tried once per day, not per reconciliation", async () => {
+    const w = await world(1);
+    const X = w.resources[0] as ResourceId;
+    const D = await pair(w, w.P, 3, "full");
+    const e = epochOf(w.server, X);
+    losePackages(w.server, X, id(3));
+    await setKeyHints({ ...D, missing: new Map([[X, [e]]]) });
+    w.server.fault = (u) =>
+      u.op === "key-package" && hex(parseKeyPackage(u.bytes).payload.recipient) === hex(id(3))
+        ? { nack: "QUOTA_EXCEEDED" }
+        : undefined;
+    const from = w.server.uploads.length;
+    for (let i = 0; i < 3; i++) await reconcileDevices({ ...w.P, rotate: false });
+    expect(uploadsTo(w.server, X, id(3), from)).toBe(1);
+    expect((await keyHints(w.P, { unanswered: true })).size).toBe(0);
   });
 });

@@ -18,6 +18,7 @@ import {
   syncChain,
 } from "./context.js";
 import { identityWriterClass, principalOfRef, principalRefOf, resourceRef } from "./document.js";
+import { hintAnswered } from "./hint-marks.js";
 import { PackageLedger } from "./journal.js";
 import { ChannelPool, IdentityRefused, IdentityUnavailable } from "./network.js";
 import { reconcileDevices, type TargetReconciliation } from "./reconcile.js";
@@ -161,6 +162,15 @@ export async function setKeyHints(
  */
 export async function keyHints(
   o: IdentityFlowOptions,
+  options: {
+    /**
+     * Only the hints this installation has not answered yet: changed since
+     * its reconciliation last re-sealed them, or answered more than
+     * HINT_RESEND_BACKOFF_MS ago (0.5.2, review 419 P2-1). What makes a
+     * managing device's reconciliation due.
+     */
+    readonly unanswered?: boolean;
+  } = {},
 ): Promise<ReadonlyMap<PrincipalId, ReadonlyMap<ResourceId, readonly DataEpoch[]>>> {
   const target = await identityTarget(o);
   const pool = new ChannelPool(o.network);
@@ -185,7 +195,10 @@ export async function keyHints(
           continue;
         }
         const list = sortedUnique(epochs).map((e) => dataEpoch(e));
-        if (list.length > 0) byResource.set(R, list);
+        if (list.length === 0) continue;
+        if (options.unanswered === true && (await hintAnswered(o.storage, R, D, list, o.now())))
+          continue;
+        byResource.set(R, list);
       }
       if (byResource.size > 0) out.set(principalId(D), byResource);
     }

@@ -47,6 +47,7 @@ import {
   principalRefOf,
   resourceRef,
 } from "./document.js";
+import { hintAnswered, recordHintAnswered } from "./hint-marks.js";
 import { newOperationId, OperationJournal, PackageLedger } from "./journal.js";
 import {
   ChannelPool,
@@ -574,7 +575,26 @@ async function reconcileTarget(
   // ledger, except the devices I has revoked and those whose chain passes through one.
   const deks = await fetchDeks(o.storage, o.secrets, channel, chain, o.installation);
   const recipients = keyRecipients(I, chain);
-  const keys = await deliverKeys({ channel, ledger, chain, sender: me, recipients, deks, resend });
+  // §7.1 step 3: a hint is answered once (review 419 P2-1): epochs re-sealed for a device in
+  // this target are not re-sealed again for the same hint until it changes or a day passed.
+  const now = o.now();
+  const answer = new Map<string, ReadonlySet<string>>();
+  for (const [d, epochs] of resend)
+    if (!(await hintAnswered(o.storage, X, principalId(fromHex(d)), epochs, now)))
+      answer.set(d, epochs);
+  const keys = await deliverKeys({
+    channel,
+    ledger,
+    chain,
+    sender: me,
+    recipients,
+    deks,
+    resend: answer,
+  });
+  // Answered: re-sealed, or refused by the coordinator (retried after the backoff).
+  const served = new Set(recipients.map((r) => toHex(r.principalId)));
+  for (const [d, epochs] of answer)
+    if (served.has(d)) await recordHintAnswered(o.storage, X, principalId(fromHex(d)), epochs, now);
   const rotation =
     o.rotate === false
       ? undefined

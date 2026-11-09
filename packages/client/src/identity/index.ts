@@ -66,6 +66,7 @@ export {
   type RosterEntryValue,
   resourceRef,
 } from "./document.js";
+export { HINT_RESEND_BACKOFF_MS } from "./hint-marks.js";
 export {
   type KeyHintsResult,
   keyHints,
