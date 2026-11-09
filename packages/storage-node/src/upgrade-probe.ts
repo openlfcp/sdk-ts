@@ -23,11 +23,20 @@ export function retryAfterMs(value: string | undefined, now = Date.now()): numbe
 /**
  * An UpgradeProbe for Node: pass it as `upgradeProbe` to SyncClient or
  * connectionNetwork (openNodeInstallation does). One HTTP request, only
- * after a WebSocket failed before it opened; `timeoutMs` bounds it.
+ * after a WebSocket failed before it opened; `timeoutMs` bounds all of it.
  */
 export function nodeUpgradeProbe(timeoutMs = 5000): UpgradeProbe {
   return (url, protocols) =>
-    new Promise<UpgradeRefusal | undefined>((resolve) => {
+    new Promise<UpgradeRefusal | undefined>((done) => {
+      // One deadline for the whole probe (name lookup, connect, headers): a socket
+      // timeout alone is reset by every byte a slow server sends.
+      let deadline: NodeJS.Timeout | undefined;
+      let finish: () => void = () => undefined;
+      const resolve = (r: UpgradeRefusal | undefined) => {
+        clearTimeout(deadline);
+        finish();
+        done(r);
+      };
       let u: URL;
       try {
         u = new URL(url);
@@ -76,6 +85,9 @@ export function nodeUpgradeProbe(timeoutMs = 5000): UpgradeProbe {
       });
       req.on("timeout", () => req.destroy());
       req.on("error", () => resolve(undefined));
+      finish = () => req.destroy();
+      deadline = setTimeout(() => resolve(undefined), timeoutMs);
+      deadline.unref();
       req.end();
     });
 }

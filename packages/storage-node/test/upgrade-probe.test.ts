@@ -85,3 +85,35 @@ describe("lfcp-node pair's poll pacing", () => {
     expect(pairPollDelay(5, 2)).toBe(2000);
   });
 });
+
+describe("nodeUpgradeProbe's deadline (501, r2)", () => {
+  it("ends within timeoutMs even when the server trickles bytes that keep the socket alive", async () => {
+    const { createServer: createTcp } = await import("node:net");
+    const timers: NodeJS.Timeout[] = [];
+    const sockets: import("node:net").Socket[] = [];
+    const tcp = createTcp((socket) => {
+      sockets.push(socket);
+      socket.on("error", () => undefined);
+      // A valid status line, then one byte of a header every 50 ms: an idle timeout
+      // never fires, and the headers never end.
+      socket.write("HTTP/1.1 429 Too Many Requests\r\nX-Slow: ");
+      timers.push(setInterval(() => socket.write("a"), 50));
+    });
+    await new Promise<void>((r) => tcp.listen(0, "127.0.0.1", r));
+    const a = tcp.address();
+    if (a === null || typeof a === "string") throw new Error("no port");
+    try {
+      const started = Date.now();
+      const r = await Promise.race([
+        nodeUpgradeProbe(300)(`ws://127.0.0.1:${a.port}/v1/ws`, []),
+        new Promise((res) => setTimeout(() => res("not finished"), 2000)),
+      ]);
+      expect(r).toBeUndefined();
+      expect(Date.now() - started).toBeLessThan(1000);
+    } finally {
+      for (const t of timers) clearInterval(t);
+      for (const s of sockets) s.destroy();
+      await new Promise((r) => tcp.close(r));
+    }
+  });
+});
