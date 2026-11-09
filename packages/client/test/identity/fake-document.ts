@@ -94,6 +94,29 @@ export class FakeIdentityDocument implements IdentityDocumentPort {
     return true;
   }
 
+  /** The device's own hint, as IdentityReplica's `hints` option: only `missing_keys` is written. */
+  readonly keyHints = {
+    write: (
+      author: IdentityAuthor,
+      hints: ReadonlyMap<string, readonly bigint[] | null>,
+    ): Uint8Array => {
+      const key = principalRefOf(author.signer);
+      const entry = this.#devices.get(key);
+      if (entry === undefined) throw new Error(`no device entry ${key}`);
+      const next: Record<string, readonly bigint[]> = { ...(entry.missing_keys ?? {}) } as never;
+      for (const [ref, epochs] of hints)
+        if (epochs === null || epochs.length === 0) delete next[ref];
+        else next[ref] = epochs;
+      this.hintWrites++;
+      // An empty map stands for the removed field (the stand-in merges entries field by field).
+      return this.write(author, [
+        { intent: "device.put", key, entry: { ...entry, missing_keys: next } },
+      ]);
+    },
+  };
+  /** How many hint units were written. */
+  hintWrites = 0;
+
   initialized(): boolean {
     return this.#initialized;
   }

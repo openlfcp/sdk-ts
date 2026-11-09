@@ -79,6 +79,14 @@ export interface IdentityWriteOptions {
    * entry (IDENTITY-PROFILE-01 §7.1 step 4, §8.2). Each entry must exist.
    */
   readonly retire?: readonly string[];
+  /**
+   * The writer's own `missing_keys` hint (IDENTITY-PROFILE-01 §7.1 step 3,
+   * §3 AI5), by ResourceRef: the epochs it lacks, or null to remove that
+   * Resource from the hint. Only `devices[<writer>].missing_keys` is
+   * written, no other field of the entry, which must exist; the field is
+   * removed when no Resource is left in it.
+   */
+  readonly hints?: ReadonlyMap<string, readonly bigint[] | null>;
 }
 
 export type IdentityIntent =
@@ -397,8 +405,10 @@ export class IdentityReplica {
       ? intent
       : [intent as IdentityIntent];
     const retire = options.retire ?? [];
-    if (intents.length === 0 && retire.length === 0)
+    const hints = options.hints ?? new Map<string, readonly bigint[] | null>();
+    if (intents.length === 0 && retire.length === 0 && hints.size === 0)
       throw new LfcpError("PROFILE_INVALID", "no intent to write");
+    const own = principalRef(writer.signer);
     // AI5 (§3) refuses the change anyway; say why before building it.
     for (const i of intents)
       if (
@@ -417,6 +427,7 @@ export class IdentityReplica {
       const doc = A.change(fork, { time: 0 }, (d) => {
         for (const i of intents) applyIntent(d, i, this.#options.root, A.getBackend(d));
         for (const key of retire) retireEntry(d, key);
+        if (hints.size > 0) writeHints(d, own, hints, A.getBackend(d));
       });
       const last = A.getLastLocalChange(doc);
       if (last === null || last === undefined)
@@ -426,6 +437,7 @@ export class IdentityReplica {
       const written = [
         ...intents.map((i) => ("key" in i ? `/${tableOf(i)}/${i.key}` : "")),
         ...retire.map((key) => `/devices/${key}`),
+        ...(hints.size > 0 ? [`/devices/${own}`] : []),
       ];
       for (const base of written) {
         const problem = validation.problems.find(
@@ -506,6 +518,42 @@ function retireEntry(d: Record<string, unknown>, key: string): void {
   if (entry === null || typeof entry !== "object")
     throw new LfcpError("PROFILE_INVALID", `no device entry ${key} to retire`);
   (entry as Record<string, unknown>).revoked = true;
+}
+
+/**
+ * `devices[key].missing_keys[ref] = epochs` (or removed for null) for each
+ * hint, and nothing else of the entry; the field itself is removed when it
+ * is left empty (§7.1 step 3, AI5: `key` is the writer's own entry).
+ */
+function writeHints(
+  d: Record<string, unknown>,
+  key: string,
+  hints: ReadonlyMap<string, readonly bigint[] | null>,
+  backend: ReturnType<typeof A.getBackend>,
+): void {
+  const devices = d.devices as Record<string, unknown> | undefined;
+  if (devices === undefined) refuseIdentity("INVALID_ROOT", "initialize the identity first");
+  const entry = Object.hasOwn(devices, key) ? devices[key] : undefined;
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry))
+    throw new LfcpError("PROFILE_INVALID", `no device entry ${key} to write a hint into`);
+  const e = entry as Record<string, unknown>;
+  const current = e.missing_keys;
+  const map =
+    current !== null && typeof current === "object" && !Array.isArray(current)
+      ? (current as Record<string, unknown>)
+      : undefined;
+  if (map === undefined) {
+    const fresh = [...hints].filter(([, epochs]) => epochs !== null && epochs.length > 0);
+    if (fresh.length === 0) return;
+    e.missing_keys = {};
+  }
+  const target = e.missing_keys as Record<string, unknown>;
+  for (const [ref, epochs] of hints) {
+    if (epochs === null || epochs.length === 0) {
+      if (Object.hasOwn(target, ref)) delete target[ref];
+    } else putValue(target, ref, [...epochs], backend);
+  }
+  if (Object.keys(target).length === 0) delete e.missing_keys;
 }
 
 function putValue(

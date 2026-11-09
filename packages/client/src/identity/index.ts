@@ -55,6 +55,7 @@ export {
   type IdentityAuthor,
   type IdentityDocumentPort,
   type IdentityIntent,
+  type IdentityKeyHintsPort,
   type IdentityRetirementPort,
   type IdentityWriterClass,
   identityPlaintextCodec,
@@ -65,6 +66,13 @@ export {
   type RosterEntryValue,
   resourceRef,
 } from "./document.js";
+export {
+  type KeyHintsResult,
+  keyHints,
+  type ResendKeysResult,
+  resendKeys,
+  setKeyHints,
+} from "./hints.js";
 export {
   type JournalOperation,
   type JournalPhase,

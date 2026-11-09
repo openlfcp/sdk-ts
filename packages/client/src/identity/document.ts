@@ -114,6 +114,24 @@ export interface IdentityDocumentPort {
    * `retire` option).
    */
   readonly retirement?: IdentityRetirementPort;
+  /**
+   * Optional (0.5.2): the writer's own `missing_keys` hint field by field
+   * (§7.1 step 3, §3 AI5), so that writing a hint never writes the entry's
+   * label or other fields. Without it, setKeyHints reports `unsupported`.
+   * IdentityReplica provides it (`write`'s `hints` option).
+   */
+  readonly keyHints?: IdentityKeyHintsPort;
+}
+
+/** IdentityDocumentPort.keyHints. */
+export interface IdentityKeyHintsPort {
+  /**
+   * The plaintext of one change by `author` that writes, in the author's
+   * own entry `devices[<author>]`, `missing_keys[ref] = epochs` for each
+   * hint (null or empty: `ref` removed), the field removed when it is left
+   * empty, and nothing else.
+   */
+  write(author: IdentityAuthor, hints: ReadonlyMap<string, readonly bigint[] | null>): Uint8Array;
 }
 
 /** IdentityDocumentPort.retirement. */

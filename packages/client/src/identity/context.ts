@@ -789,6 +789,12 @@ export async function sealIdentityUnit(options: {
   readonly retire?: readonly string[];
   /** The sequence to use instead of a reservation (a pairing device shared by installations, §5.3). */
   readonly seq?: bigint;
+  /**
+   * The signer's own `missing_keys` hint, by ResourceRef (null: remove that
+   * Resource), written field by field through the port's `keyHints`
+   * capability, alone (no intents, no retirement) (0.5.2, §7.1 step 3, AI5).
+   */
+  readonly hints?: ReadonlyMap<string, readonly bigint[] | null>;
 }): Promise<Uint8Array> {
   const { chain, signer } = options;
   const R = chain.state.resourceId;
@@ -812,12 +818,20 @@ export async function sealIdentityUnit(options: {
   };
   const retire = options.retire ?? [];
   const { doc } = options;
+  const hints = options.hints;
+  if (hints !== undefined && doc.keyHints === undefined)
+    throw new LfcpError("PROFILE_UNSUPPORTED", "the document port cannot write key hints");
   const plaintext =
-    retire.length === 0
-      ? doc.write(author, options.intents)
-      : doc.retirement !== undefined
-        ? doc.retirement.write(author, options.intents, retire)
-        : doc.write(author, [...options.intents, ...retire.flatMap((key) => retiredPut(doc, key))]);
+    hints !== undefined && doc.keyHints !== undefined
+      ? doc.keyHints.write(author, hints)
+      : retire.length === 0
+        ? doc.write(author, options.intents)
+        : doc.retirement !== undefined
+          ? doc.retirement.write(author, options.intents, retire)
+          : doc.write(author, [
+              ...options.intents,
+              ...retire.flatMap((key) => retiredPut(doc, key)),
+            ]);
   return sealDataUnit(
     {
       resourceId: R,

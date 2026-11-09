@@ -48,5 +48,9 @@ export const identityDocument: IdentityDocumentFactory = (
           replica.write(writer(author), intents as readonly ReplicaIntent[], { retire }),
         ),
     },
+    // §7.1 step 3, AI5 (0.5.2): the device's own missing_keys hint, no other field written.
+    keyHints: {
+      write: (author, hints) => identityCodec.encode(replica.write(writer(author), [], { hints })),
+    },
   };
 };
