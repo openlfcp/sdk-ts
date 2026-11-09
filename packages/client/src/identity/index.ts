@@ -90,7 +90,6 @@ export {
   deviceIdentity,
   type PairedResource,
   pairedResources,
-  putResourceRow,
   storePairedResources,
 } from "./local-device.js";
 export {

@@ -112,7 +112,7 @@ Approved: Service (service device).
 
 ```ts
 const node = await openNodeInstallation("/var/lib/notes-bridge");
-const sections = (await pairedResources(node)).filter((p) => p.ready);
+const sections = (await pairedResources(node)).filter((p) => p.ready); // node: { storage, secrets, … }
 const me = await deviceIdentity(node); // { kind: "device", root, deviceKind: 1, mask, scope, label }
 // …open a SyncClient with node.installation, node.storage, node.secrets…
 const status = await revocationStatus({ ...node.flow, resource, url });

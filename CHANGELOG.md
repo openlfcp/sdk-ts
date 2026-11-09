@@ -10,14 +10,17 @@ remove or rename any.
 
 - What a headless device needs after `lfcp-node pair` (MVP 0.5 bridge; spike
   B-001), all offline, from its own storage:
-  - `pairedResources({ storage })` (`@openlfcp/client`): the Resources its
-    pairing brought, with roster name, Data Profile, coordinator and
-    `ready` (chain stored, device registered and active, every epoch key
-    held). Works for installations paired by earlier versions.
+  - `pairedResources({ storage, secrets })` (`@openlfcp/client`): the
+    Resources its pairing brought, with roster name, Data Profile,
+    coordinator and `ready`, by the rules of completePairing's "ready": in
+    the approved scope, the device proven by the approval and registered
+    with its approved kind, mask and scope, its revocation not proven here
+    (revocationStatus), and the key of every Data Epoch in the SecretStore.
+    Works for installations paired by earlier versions.
   - `completePairing({ …, storeResources: true })` also stores a Resource
     row (`storage.resources`, no labels) for each ready candidate;
-    `storePairedResources` does it later for installations paired before;
-    `putResourceRow` is the row they write. Off by default: an application
+    `storePairedResources` does it later for installations paired before,
+    only for the installation that made the request. Off by default: an application
     that stores its own rows with local names (the Obsidian plugin) is not
     affected.
   - `deviceIdentity({ storage, installation })`: the root, this device, and
@@ -78,7 +81,10 @@ remove or rename any.
   a pairing. A file is now named by the SHA-256 of the reference (64 hex
   digits and `.secret`). Files written by 0.5.2 or earlier keep working: a
   file under the old name is read, and it is moved to the new name when it
-  is read or written; `delete` removes both.
+  is read or written; `delete` removes both. The move is a hard link, which
+  never replaces a file: a write or delete by another process on the same
+  directory meanwhile wins. `delete` makes the old name's removal durable
+  before it removes the new one.
 
 ## 0.5.2 — 2026-11-09
 

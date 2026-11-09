@@ -3,6 +3,7 @@ import {
   chmodSync,
   closeSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -122,12 +123,25 @@ function unlinkIfExists(path: string): boolean {
   }
 }
 
+/** Test seams of FileSecretStore; an application passes none. */
+export interface FileSecretStoreOptions {
+  /** The directory fsync's file operations (syncDirectory). */
+  readonly directorySync?: DirectorySyncOps;
+  /** Called when a read is about to move a legacy file: where another process may act. */
+  readonly beforeMigration?: (ref: SecretRef) => void;
+}
+
+/** The errors of a file system without hard links. */
+const NO_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"]);
+
 export class FileSecretStore implements SecretStore {
   readonly #dir: string;
+  readonly #options: FileSecretStoreOptions;
   #counter = 0;
 
   /** Creates the directory (0700) if needed and tightens its mode. */
-  constructor(dir: string) {
+  constructor(dir: string, options: FileSecretStoreOptions = {}) {
+    this.#options = options;
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
     if (!statSync(dir).isDirectory())
@@ -140,7 +154,7 @@ export class FileSecretStore implements SecretStore {
   }
 
   #syncDir(): void {
-    syncDirectory(this.#dir);
+    syncDirectory(this.#dir, process.platform, this.#options.directorySync);
   }
 
   /** Writes `value` under the reference's file: a fsynced temporary file renamed over it. */
@@ -185,29 +199,52 @@ export class FileSecretStore implements SecretStore {
   get(ref: SecretRef): Promise<Uint8Array | undefined> {
     try {
       this.#check(ref);
-      const current = readIfExists(join(this.#dir, secretFileName(ref)));
-      if (current !== undefined) return Promise.resolve(current);
+      const current = join(this.#dir, secretFileName(ref));
+      const value = readIfExists(current);
+      if (value !== undefined) return Promise.resolve(value);
       const legacy = legacyFileName(ref);
       if (legacy === undefined) return Promise.resolve(undefined);
-      const old = readIfExists(join(this.#dir, legacy));
-      if (old === undefined) return Promise.resolve(undefined);
-      // A file of 0.5.2 or earlier: moved to its new name, then the old one goes.
-      this.#write(ref, old);
-      this.#dropLegacy(ref);
-      return Promise.resolve(old);
+      this.#migrate(ref, join(this.#dir, legacy), current);
+      return Promise.resolve(readIfExists(current));
     } catch (e) {
       return Promise.reject(e);
     }
   }
 
+  /**
+   * Moves a file of 0.5.2 or earlier to its new name with a hard link, which
+   * never replaces an existing file (EEXIST) and fails when the legacy file
+   * is gone (ENOENT): another process on the same directory that wrote or
+   * deleted the secret meanwhile wins, and the caller reads the new name
+   * again. Not a copy: a copy of a value read before such a write would put
+   * the older value back. Then the legacy name goes. On a file system
+   * without hard links, a copy that does not replace an existing new file.
+   */
+  #migrate(ref: SecretRef, legacy: string, current: string): void {
+    this.#options.beforeMigration?.(ref);
+    try {
+      linkSync(legacy, current);
+    } catch (e) {
+      const c = code(e);
+      if (c === "EEXIST" || c === "ENOENT") return;
+      if (!NO_LINKS.has(String(c))) throw e;
+      const old = readIfExists(legacy);
+      if (old === undefined || readIfExists(current) !== undefined) return;
+      this.#write(ref, old);
+    }
+    this.#syncDir();
+    this.#dropLegacy(ref);
+  }
+
   delete(ref: SecretRef): Promise<void> {
     try {
       this.#check(ref);
-      // The legacy file first: a crash after it leaves the current value, never an older one.
+      // The legacy file first, made durable before the new one goes: after a crash of the
+      // machine between them, the new value may remain, never only the older one (which a
+      // read would migrate back).
       const legacy = legacyFileName(ref);
-      let removed = legacy !== undefined && unlinkIfExists(join(this.#dir, legacy));
-      removed = unlinkIfExists(join(this.#dir, secretFileName(ref))) || removed;
-      if (removed) this.#syncDir();
+      if (legacy !== undefined && unlinkIfExists(join(this.#dir, legacy))) this.#syncDir();
+      if (unlinkIfExists(join(this.#dir, secretFileName(ref)))) this.#syncDir();
       return Promise.resolve();
     } catch (e) {
       return Promise.reject(e);
