@@ -8,22 +8,24 @@
 import {
   bytesEqual,
   fromHex,
+  hash32,
   type PrincipalId,
   principalId,
   type ResourceId,
   resourceId,
   toHex,
 } from "@openlfcp/core";
-import { type LfcpStorage, principalKeySecretRef } from "@openlfcp/storage";
+import { type LfcpStorage, principalKeySecretRef, type SecretStore } from "@openlfcp/storage";
 import {
-  activeDevice,
   certificateChain,
+  DEVICE_KIND,
   type DeviceKind,
   parseDeviceCertificate,
 } from "@openlfcp/wire";
-import { loadControlChain } from "../storage.js";
+import { loadControlChain, writeBarrier } from "../storage.js";
 import { genesisOwner, type IdentityStorage, type Installation } from "./context.js";
 import { type JournalOperation, OperationJournal } from "./journal.js";
+import { candidateEvidence } from "./pairing-request.js";
 import { localIdentityResource } from "./resource.js";
 
 /** A Resource a pairing brought to this installation (a candidate of its request, §5.3). */
@@ -36,9 +38,11 @@ export interface PairedResource {
   /** Its coordinator. */
   readonly url: string;
   /**
-   * Usable here: its Control Chain is stored with this device registered and
-   * active in it, and the key of every Data Epoch is held. A candidate the
-   * approver left out of the scope, or one still pending, is not ready.
+   * Usable here, as completePairing's "ready": in the approved scope; this
+   * device proven by the approval and registered with its approved kind,
+   * mask and scope; its revocation not proven here (revocationStatus); the
+   * key of every Data Epoch in the SecretStore. A candidate left out of the
+   * scope, still pending, or revoked is not ready.
    */
   readonly ready: boolean;
 }
@@ -62,11 +66,53 @@ async function approvedRequest(storage: Storage): Promise<JournalOperation | und
     .at(-1);
 }
 
-async function isReady(storage: Storage, resource: ResourceId, device: PrincipalId) {
-  const chain = await loadControlChain(storage, resource);
-  if (chain?.kind !== "linear" || activeDevice(chain.state, device) === undefined) return false;
-  const epochs = await storage.control.epochs(resource);
-  return epochs.length > 0 && epochs.every((e) => e.dekRef !== null && e.dekRef !== undefined);
+/** The approved certificate's payload and approval digest, from the journal. */
+function approval(op: JournalOperation) {
+  const root = principalId(fromHex(op.intent.root as string));
+  const result = certificateChain(
+    (op.intent.certificate as string[]).map((c) => parseDeviceCertificate(fromHex(c))),
+    root,
+  ).leaf.payload;
+  return {
+    device: principalId(fromHex(op.intent.device as string)),
+    digest: hash32(fromHex(op.intent.digest as string)),
+    result,
+  };
+}
+
+/**
+ * Usable here, by the rules completePairing reports "ready" with (§5.3
+ * step 8): in the approved scope; the device proven by the approval and
+ * registered with exactly the approved kind, mask and scope
+ * (candidateEvidence); its revocation not proven here (the write barrier
+ * revocationStatus records, which the device's own chain may never show);
+ * and the key of every epoch of the stored chain in the SecretStore, not
+ * only referenced.
+ */
+async function isReady(
+  o: { readonly storage: Storage; readonly secrets: SecretStore },
+  a: ReturnType<typeof approval>,
+  resource: ResourceId,
+): Promise<boolean> {
+  if (
+    a.result.kind !== DEVICE_KIND.PERSONAL &&
+    !a.result.scope.some((r) => bytesEqual(r, resource))
+  )
+    return false;
+  const chain = await loadControlChain(o.storage, resource);
+  if (chain?.kind !== "linear") return false;
+  if (!candidateEvidence(chain, a.device, a.digest, a.result).usable) return false;
+  if ((await writeBarrier(o.storage, resource))?.state === "revocation-proven") return false;
+  const rows = new Map((await o.storage.control.epochs(resource)).map((e) => [String(e.epoch), e]));
+  if (chain.state.epochs.size === 0) return false;
+  for (const epoch of chain.state.epochs.keys()) {
+    const ref = rows.get(epoch)?.dekRef;
+    if (ref === null || ref === undefined) return false;
+    const key = await o.secrets.get(ref);
+    if (key === undefined) return false;
+    key.fill(0);
+  }
+  return true;
 }
 
 /**
@@ -78,10 +124,12 @@ async function isReady(storage: Storage, resource: ResourceId, device: Principal
  */
 export async function pairedResources(o: {
   readonly storage: Storage;
+  /** Where the Data Epoch keys are: a key is held when it is there, not when a row names it. */
+  readonly secrets: SecretStore;
 }): Promise<readonly PairedResource[]> {
   const op = await approvedRequest(o.storage);
   if (op === undefined) return [];
-  const device = principalId(fromHex(op.intent.device as string));
+  const a = approval(op);
   const out: PairedResource[] = [];
   for (const c of op.intent.candidates as CandidateJson[]) {
     const resource = resourceId(fromHex(c.resource));
@@ -91,7 +139,7 @@ export async function pairedResources(o: {
         ...(c.name === undefined ? {} : { name: c.name }),
         profile: c.profile,
         url: c.url,
-        ready: await isReady(o.storage, resource, device),
+        ready: await isReady(o, a, resource),
       }),
     );
   }
@@ -107,8 +155,19 @@ export async function pairedResources(o: {
  */
 export async function storePairedResources(o: {
   readonly storage: Storage & Pick<LfcpStorage, "resources">;
+  readonly secrets: SecretStore;
   readonly installation: Installation;
 }): Promise<readonly ResourceId[]> {
+  const op = await approvedRequest(o.storage);
+  // Only the installation that made the request: its rows name its own Principal.
+  if (
+    op === undefined ||
+    !bytesEqual(
+      principalId(fromHex(op.intent.device as string)),
+      o.installation.signer.descriptor.principalId,
+    )
+  )
+    return [];
   const stored: ResourceId[] = [];
   for (const p of await pairedResources(o)) {
     if (!p.ready || (await o.storage.resources.get(p.resource)) !== undefined) continue;
@@ -118,7 +177,12 @@ export async function storePairedResources(o: {
   return Object.freeze(stored);
 }
 
-/** The Resource row of a Resource whose chain is stored, as `installation`'s Principal. */
+/**
+ * The Resource row of a Resource whose chain is stored, as `installation`'s
+ * Principal. Internal: it checks nothing about the installation's access;
+ * its callers (completePairing for a "ready" candidate, storePairedResources)
+ * do.
+ */
 export async function putResourceRow(
   storage: Pick<LfcpStorage, "control" | "commit">,
   installation: Installation,

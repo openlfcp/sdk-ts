@@ -5,8 +5,9 @@
 
 import { bytesEqual, toHex } from "@openlfcp/core";
 import type { InMemoryLfcpStorage } from "@openlfcp/storage";
-import { DEVICE_KIND } from "@openlfcp/wire";
+import { activeDevice, DEVICE_KIND } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
+import { OperationJournal } from "../../src/identity/journal.js";
 import {
   deviceIdentity,
   pairedResources,
@@ -18,7 +19,10 @@ import {
   pairingRequests,
 } from "../../src/identity/pairing.js";
 import { completePairing, requestPairing } from "../../src/identity/pairing-request.js";
-import { party } from "./support.js";
+import { revocationStatus } from "../../src/identity/proof.js";
+import { revokeDevice } from "../../src/identity/revocation.js";
+import { loadControlChain } from "../../src/storage.js";
+import { party, URL } from "./support.js";
 import { node, pair, world } from "./world.js";
 
 /** The test world's storage is an InMemoryLfcpStorage: its Resource rows. */
@@ -130,5 +134,65 @@ describe("deviceIdentity of a root and of a personal device (504)", { timeout: 6
     expect((await pairedResources(B)).map((p) => [toHex(p.resource), p.ready])).toEqual([
       [toHex(w.resources[0] as Uint8Array), true],
     ]);
+  });
+});
+
+// Review #27 (r2): ready is completePairing's "ready", not "a chain and a key reference".
+describe("what is not ready (504, r2)", { timeout: 60_000 }, () => {
+  const readyOf = async (S: Parameters<typeof pairedResources>[0], X: Uint8Array) =>
+    (await pairedResources(S)).find((p) => toHex(p.resource) === toHex(X))?.ready;
+
+  test("a registration whose approval is not this request's (another digest): not ready, no row", async () => {
+    const { S, X } = await service(false);
+    expect(await readyOf(S, X)).toBe(true);
+    const journal = new OperationJournal(S.storage);
+    const [op] = await journal.list({ kind: "pairing-request" });
+    if (op === undefined) throw new Error("no request");
+    // The certificate registered in X is still active; the approval it must prove is another.
+    await journal.updateIntent(op.id, { digest: "ab".repeat(32) });
+    expect(await readyOf(S, X)).toBe(false);
+    expect(await storePairedResources({ ...S, storage: S.storage as InMemoryLfcpStorage })).toEqual(
+      [],
+    );
+    expect(await rows(S).list()).toEqual([]);
+  });
+
+  test("a Data Epoch key lost from the SecretStore, its row kept: not ready", async () => {
+    const { S, X } = await service(false);
+    const [epoch] = await S.storage.control.epochs(X as never);
+    if (epoch?.dekRef === null || epoch?.dekRef === undefined) throw new Error("no dek ref");
+    await S.secrets.delete(epoch.dekRef);
+    expect((await S.storage.control.epochs(X as never))[0]?.dekRef).toBe(epoch.dekRef);
+    expect(await readyOf(S, X)).toBe(false);
+    expect(await storePairedResources({ ...S, storage: S.storage as InMemoryLfcpStorage })).toEqual(
+      [],
+    );
+  });
+
+  test("a revocation proven by revocationStatus, the local chain still old: not ready", async () => {
+    const { w, S, X } = await service(false);
+    await revokeDevice({ ...w.P, device: party(5).signer.descriptor.principalId, reason: 0n });
+    const status = await revocationStatus({ ...S, resource: X as never, url: URL });
+    expect(status.kind).toBe("revocation-proven");
+    // The device's own stored chain does not show it.
+    const chain = await loadControlChain(S.storage, X as never);
+    if (chain?.kind !== "linear") throw new Error("no chain");
+    expect(activeDevice(chain.state, party(5).signer.descriptor.principalId)).toBeDefined();
+    expect(await readyOf(S, X)).toBe(false);
+    expect(await storePairedResources({ ...S, storage: S.storage as InMemoryLfcpStorage })).toEqual(
+      [],
+    );
+  });
+
+  test("storePairedResources writes nothing for another installation on the same storage", async () => {
+    const { S } = await service(false);
+    const other = { ...S, installation: party(9), storage: S.storage as InMemoryLfcpStorage };
+    expect(await storePairedResources(other)).toEqual([]);
+    expect(await rows(S).list()).toEqual([]);
+  });
+
+  test("the row writer is not public", async () => {
+    const api = await import("../../src/index.js");
+    expect("putResourceRow" in api).toBe(false);
   });
 });

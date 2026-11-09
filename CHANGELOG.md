@@ -10,14 +10,17 @@ remove or rename any.
 
 - What a headless device needs after `lfcp-node pair` (MVP 0.5 bridge; spike
   B-001), all offline, from its own storage:
-  - `pairedResources({ storage })` (`@openlfcp/client`): the Resources its
-    pairing brought, with roster name, Data Profile, coordinator and
-    `ready` (chain stored, device registered and active, every epoch key
-    held). Works for installations paired by earlier versions.
+  - `pairedResources({ storage, secrets })` (`@openlfcp/client`): the
+    Resources its pairing brought, with roster name, Data Profile,
+    coordinator and `ready`, by the rules of completePairing's "ready": in
+    the approved scope, the device proven by the approval and registered
+    with its approved kind, mask and scope, its revocation not proven here
+    (revocationStatus), and the key of every Data Epoch in the SecretStore.
+    Works for installations paired by earlier versions.
   - `completePairing({ …, storeResources: true })` also stores a Resource
     row (`storage.resources`, no labels) for each ready candidate;
-    `storePairedResources` does it later for installations paired before;
-    `putResourceRow` is the row they write. Off by default: an application
+    `storePairedResources` does it later for installations paired before,
+    only for the installation that made the request. Off by default: an application
     that stores its own rows with local names (the Obsidian plugin) is not
     affected.
   - `deviceIdentity({ storage, installation })`: the root, this device, and
