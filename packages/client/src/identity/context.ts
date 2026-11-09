@@ -194,12 +194,18 @@ async function storeChain(
   chain: LinearChain,
   previous: LinearChain | undefined,
 ): Promise<void> {
-  if (previous !== undefined && bytesEqual(previous.state.head, chain.state.head)) return;
   const R = chain.state.resourceId;
+  // Every return of this function, success or nothing to store, is preceded by this read,
+  // after the last awaited read of the chain: a fork recorded until then suspends the flow.
+  // The storage ports read head, records and conflict separately (no combined snapshot).
   const forked = async () => {
     if ((await storage.control.conflict(R)) !== undefined)
       throw new IdentityConflict(R, "the Control Chain is forked (§9.7)");
   };
+  if (previous !== undefined && bytesEqual(previous.state.head, chain.state.head)) {
+    await forked();
+    return;
+  }
   const prefix = previous !== undefined && isPrefixOf(previous, chain);
   let expected = prefix ? previous.state.head : null;
   for (let attempt = 0; ; attempt++) {
@@ -210,9 +216,16 @@ async function storeChain(
     }
     await forked();
     const stored = await loadControlChain(storage, R);
-    // Another session stored this chain, or a later one: nothing to store.
-    if (stored?.kind === "linear" && isPrefixOf(chain, stored)) return;
-    if (!prefix) return;
+    // Another session stored this chain, or a later one: nothing to store, unless a fork was
+    // recorded while the stored chain was read.
+    if (stored?.kind === "linear" && isPrefixOf(chain, stored)) {
+      await forked();
+      return;
+    }
+    if (!prefix) {
+      await forked();
+      return;
+    }
     if (stored !== undefined && (stored.kind !== "linear" || !isPrefixOf(stored, chain))) {
       await recordDivergence(storage, R, chain, stored);
       throw new ControlChainDiverged(R);

@@ -325,4 +325,60 @@ describe("storeChain and a recorded fork (review 417-418 F1)", { timeout: 60_000
     expect(attempts).toBe(5);
     expect(await base.control.conflict(w.I)).toBeUndefined();
   });
+
+  test("R1: a fork recorded while the recovery reads the stored chain: suspended, not accepted", async () => {
+    const { w, I, n, prefixOf } = await longI();
+    const base = device().storage;
+    // Stored: the whole chain, which contains the flow's: the containment path.
+    expect((await saveControlChain(base, I, null)).ok).toBe(true);
+    let recorded = false;
+    const control = new Proxy(base.control, {
+      get(t, k) {
+        const v = Reflect.get(t, k, t) as unknown;
+        if (k === "records" && typeof v === "function")
+          return async (...a: unknown[]) => {
+            // Another session records the fork while loadControlChain reads the records.
+            if (!recorded) {
+              recorded = true;
+              await base.commit([marker(w, I.state.head)]);
+            }
+            return (v as (...x: unknown[]) => unknown).apply(t, a);
+          };
+        return typeof v === "function" ? (v as (...x: unknown[]) => unknown).bind(t) : v;
+      },
+    });
+    const st = new Proxy(base, {
+      get(t, k) {
+        if (k === "control") return control;
+        const v = Reflect.get(t, k, t) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+      },
+    });
+    const last = I.records[n - 1]?.signed.bytes as Uint8Array;
+    await expect(extendChain(st, prefixOf(n - 1), last)).rejects.toThrow(IdentityConflict);
+    expect(recorded).toBe(true);
+    expect(await base.control.conflict(w.I)).toBeDefined();
+  });
+
+  test("R1: a fork recorded while syncChain waits on the coordinator, nothing new: suspended", async () => {
+    const { w, I } = await longI();
+    const st = device().storage;
+    expect((await saveControlChain(st, I, null)).ok).toBe(true);
+    const channel = await w.P.network.connect(w.P.installation.signer, URL);
+    // The coordinator has nothing new; another session records the fork meanwhile.
+    const racing = new Proxy(channel, {
+      get(t, k) {
+        const v = Reflect.get(t, k, t) as unknown;
+        if (k === "control" && typeof v === "function")
+          return async (...a: unknown[]) => {
+            const out = await (v as (...x: unknown[]) => Promise<unknown>).apply(t, a);
+            await st.commit([marker(w, I.state.head)]);
+            return out;
+          };
+        return typeof v === "function" ? (v as (...x: unknown[]) => unknown).bind(t) : v;
+      },
+    }) as typeof channel;
+    await expect(syncChain(st, racing, w.I)).rejects.toThrow(IdentityConflict);
+    expect(await st.control.conflict(w.I)).toBeDefined();
+  });
 });
