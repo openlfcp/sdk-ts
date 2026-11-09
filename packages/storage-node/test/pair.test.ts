@@ -81,7 +81,8 @@ describe("the installation of a state directory", () => {
       const b = await openInstallation(dir, secrets);
       expect(b.signer.descriptor).toEqual(a.signer.descriptor);
       const file = join(dir, "installation.json");
-      expect(statSync(file).mode & 0o777).toBe(0o600);
+      // POSIX permissions: Windows has no mode bits to check.
+      if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
       // The file names the Principal; the keys are only in the SecretStore.
       expect(Object.keys(JSON.parse(readFileSync(file, "utf8")))).toEqual(["principal"]);
     } finally {

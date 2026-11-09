@@ -29,11 +29,55 @@ import { isSecretRef, type SecretRef, type SecretStore } from "@openlfcp/storage
  * are public names, never secret material). A write goes to a temporary
  * file that is fsynced, renamed over the target and followed by an fsync
  * of the directory, so a crash leaves the old value or the new one, never
- * a torn file. There is no list operation, and the store renders as
+ * a torn file. Windows cannot open a directory for fsync (EPERM, EISDIR or
+ * EACCES): there the rename is the last step (syncDirectory). There is no list operation, and the store renders as
  * "[FileSecretStore]" so values cannot leak into logs.
  */
 
 const INSPECT = Symbol.for("nodejs.util.inspect.custom");
+
+/** What syncDirectory needs of node:fs (replaced in tests). */
+export interface DirectorySyncOps {
+  openSync(path: string, flags: string): number;
+  fsyncSync(fd: number): void;
+  closeSync(fd: number): void;
+}
+
+const FS_OPS: DirectorySyncOps = { openSync, fsyncSync, closeSync };
+
+/** The errors Windows gives for opening or fsyncing a directory. */
+const WINDOWS_DIRECTORY_SYNC = new Set(["EPERM", "EISDIR", "EACCES"]);
+
+/**
+ * fsyncs `dir`, so that a rename into it is durable (POSIX). On Windows a
+ * directory cannot be opened or fsynced (EPERM, EISDIR, EACCES), and NTFS
+ * journals the rename itself: those errors are tolerated there, and only
+ * there. Every other error, on every platform, is thrown.
+ */
+export function syncDirectory(
+  dir: string,
+  platform: NodeJS.Platform = process.platform,
+  ops: DirectorySyncOps = FS_OPS,
+): void {
+  let fd: number;
+  try {
+    fd = ops.openSync(dir, "r");
+  } catch (e) {
+    if (platform === "win32" && WINDOWS_DIRECTORY_SYNC.has(String((e as { code?: unknown }).code)))
+      return;
+    throw e;
+  }
+  try {
+    ops.fsyncSync(fd);
+  } catch (e) {
+    if (
+      !(platform === "win32" && WINDOWS_DIRECTORY_SYNC.has(String((e as { code?: unknown }).code)))
+    )
+      throw e;
+  } finally {
+    ops.closeSync(fd);
+  }
+}
 
 const fileName = (ref: SecretRef): string => `${Buffer.from(ref, "utf8").toString("hex")}.secret`;
 
@@ -55,12 +99,7 @@ export class FileSecretStore implements SecretStore {
   }
 
   #syncDir(): void {
-    const fd = openSync(this.#dir, "r");
-    try {
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
+    syncDirectory(this.#dir);
   }
 
   put(ref: SecretRef, value: Uint8Array): Promise<void> {

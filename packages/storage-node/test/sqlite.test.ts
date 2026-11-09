@@ -117,9 +117,13 @@ describe(PACKAGE, () => {
     try {
       const ref = dekSecretRef(R, dataEpoch(1n));
       await t.secrets.put(ref, Uint8Array.of(0xab, 0xcd));
-      expect(statSync(t.secretsDir).mode & 0o777).toBe(0o700);
       const file = join(t.secretsDir, `${Buffer.from(ref).toString("hex")}.secret`);
-      expect(statSync(file).mode & 0o777).toBe(0o600);
+      // POSIX permissions: Windows has no mode bits to check (its ACLs are the user's).
+      if (process.platform !== "win32") {
+        expect(statSync(t.secretsDir).mode & 0o777).toBe(0o700);
+        expect(statSync(file).mode & 0o777).toBe(0o600);
+      }
+      expect(statSync(file).isFile()).toBe(true);
       expect(String(t.secrets)).toBe("[FileSecretStore]");
       expect(JSON.stringify({ s: t.secrets })).toBe('{"s":"[FileSecretStore]"}');
       // A crash between temp file and rename leaves the old value readable.

@@ -79,3 +79,19 @@ jobs:
           LFCP_REQUIRE_LIVE: "1"
           LFCP_SERVER_DIR: ${{ github.workspace }}/server
           LFCP_SERVER_TARGET_DIR: ${{ github.workspace }}/server-target
+
+  # Node storage on Windows (review 414c, decision I29): FileSecretStore's
+  # directory fsync, the SQLite store and `lfcp-node pair`'s state directory.
+  # The live interop tests need the Rust reference server and stay on Linux.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm exec vitest run --project sdk-ts packages/storage-node
