@@ -4,7 +4,7 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
-## 0.5.2 — unreleased
+## 0.5.2 — 2026-11-09
 
 A patch release for two deferred findings of review 414c (decision I29), the
 AI3 positions of mvp-0.4-baseline.5 (I27, I32), and the SDK side of design
