@@ -337,17 +337,18 @@ export async function runControlPhase(
     const state = spec.classify(chain, (id) => sent.has(id));
     if (state !== "pending") {
       const recordId = state === "committed-own" ? ownRecordOn(chain, sent) : undefined;
-      await journal.putPhase(operation, {
-        ...(before ?? {}),
+      // Read and written alone among the journal's writes (updatePhase): the stored facts as
+      // they are at the write, with the spec's on top, so a fact another call wrote meanwhile
+      // (an abandoned delivery, 0.5.2) is kept.
+      await journal.updatePhase(operation, spec.id, (stored) => ({
+        ...(stored ?? before ?? {}),
         id: spec.id,
         kind: spec.kind,
         resource: toHex(R),
         state,
-        // The stored facts as they are now, with the spec's on top: a fact another call
-        // wrote meanwhile (an abandoned delivery, 0.5.2) is kept.
-        ...mergedFacts(phaseOf(await journal.load(operation), spec.id), spec),
+        ...mergedFacts(stored, spec),
         ...(recordId === undefined ? {} : { recordId }),
-      });
+      }));
       return Object.freeze({
         state,
         chain,
@@ -363,19 +364,20 @@ export async function runControlPhase(
     if (!channel.extensions.includes(IDENTITY_EXTENSION) && isDeviceRecord(bytes)) {
       // W §37: no record of type 9 or 10 to a server whose READY lacks identity-01,
       // journaled bytes included (a resumed operation checks the current READY).
-      await journal.putPhase(operation, {
-        ...(before ?? {}),
+      await journal.updatePhase(operation, spec.id, (stored) => ({
+        ...(stored ?? before ?? {}),
         id: spec.id,
         kind: spec.kind,
         resource: toHex(R),
         state: "refused",
         code: IDENTITY_UNSUPPORTED,
-      });
+      }));
       return Object.freeze({ state: "refused", chain, code: IDENTITY_UNSUPPORTED });
     }
     if (!journaled) {
       const id = toHex(validateRecordId(bytes));
-      await journal.putPhase(operation, {
+      // Merged at the write: what build wrote to the phase's facts stays.
+      await journal.updatePhase(operation, spec.id, (stored) => ({
         id: spec.id,
         kind: spec.kind,
         resource: toHex(R),
@@ -383,21 +385,26 @@ export async function runControlPhase(
         bytes: toHex(bytes),
         expectedHead: head,
         sent: [...sent, id],
-        // Read after build: what it wrote to the phase's facts stays.
-        ...mergedFacts(phaseOf(await journal.load(operation), spec.id), spec),
-      });
+        ...mergedFacts(stored, spec),
+      }));
     }
     const answer = await channel.putControl(R, chain.state.head, bytes);
     if (answer.kind === "ack") {
       const next = await extendChain(storage, chain, bytes);
       const recordId = toHex(next.state.head);
-      const phase = phaseOf(await journal.load(operation), spec.id) as JournalPhase;
-      await journal.putPhase(operation, { ...phase, state: "committed-own", recordId });
+      await journal.updatePhase(operation, spec.id, (stored) => ({
+        ...(stored as JournalPhase),
+        state: "committed-own",
+        recordId,
+      }));
       return Object.freeze({ state: "committed-own", chain: next, recordId: next.state.head });
     }
     if (answer.code === "CONTROL_HEAD_MISMATCH") continue;
-    const phase = phaseOf(await journal.load(operation), spec.id) as JournalPhase;
-    await journal.putPhase(operation, { ...phase, state: "refused", code: answer.code });
+    await journal.updatePhase(operation, spec.id, (stored) => ({
+      ...(stored as JournalPhase),
+      state: "refused",
+      code: answer.code,
+    }));
     return Object.freeze({ state: "refused", chain, code: answer.code });
   }
 }

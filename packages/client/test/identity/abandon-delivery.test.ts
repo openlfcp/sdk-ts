@@ -239,3 +239,48 @@ describe("abandon and a rotation of the same phase in flight (review 419 P3-1, P
     expect(hasKey(w.server, Y, id(9), epoch)).toBe(true);
   });
 });
+
+// Review 418r2 R3: the delivery mark's read-modify-write is atomic against abandonDelivery.
+describe("abandon at the journal's write boundary (review 418r2 R3)", { timeout: 120_000 }, () => {
+  test("abandoned while the resume writes the phase row: the abandon is not overwritten", async () => {
+    const { w, Y } = await shared();
+    await refusedRotation(w.server, w.P, Y, "rotate.y");
+    const base = w.P.storage;
+    let abandoning: Promise<string> | undefined;
+    let inAbandon = false;
+    // One storage object for both callers (the journal's queue is per storage).
+    const storage: typeof base = new Proxy(base, {
+      get(t, k) {
+        if (k === "commit")
+          return async (writes: Parameters<typeof base.commit>[0]) => {
+            const row = writes.find(
+              (x) => x.op === "put-local-mark" && x.key === "identity-op:rotate.y",
+            );
+            // The resume's first write of the row: its value is built; abandon starts now and
+            // gets every chance to finish before this commit lands.
+            if (row !== undefined && abandoning === undefined && !inAbandon) {
+              inAbandon = true;
+              abandoning = abandonDelivery({
+                ...w.P,
+                storage,
+                operation: "rotate.y",
+                resource: Y,
+              });
+              await new Promise((r) => setTimeout(r, 50));
+            }
+            return t.commit(writes);
+          };
+        const v = Reflect.get(t, k, t) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+      },
+    });
+    const pool = new ChannelPool(w.P.network);
+    await resumeRotations({ ...w.P, storage, pool });
+    pool.closeAll();
+    expect(abandoning).toBeDefined();
+    expect(await abandoning).toBe("abandoned");
+    const op = await new OperationJournal(base).get("rotate.y");
+    expect(op?.phases.find((p) => p.id.startsWith("rotate:"))?.facts?.delivery).toBe("abandoned");
+    expect(await outstandingDeliveries({ ...w.P, storage: base })).toEqual([]);
+  });
+});

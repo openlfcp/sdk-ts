@@ -477,7 +477,15 @@ export async function rotateAfter(
     (phase?.facts?.delivery === "outstanding" || phase?.facts?.delivery === "abandoned") &&
     keys.skipped.length === 0
   )
-    await setDelivery(journal, o.operation, id, "done");
+    await setDelivery(
+      journal,
+      o.operation,
+      id,
+      "done",
+      undefined,
+      {},
+      (stored) => stored === "outstanding" || stored === "abandoned",
+    );
   return {
     resource: R,
     status: phase?.state === "committed-own" ? "rotated" : "complete",
@@ -494,29 +502,40 @@ async function setDelivery(
   delivery: "outstanding" | "done" | "abandoned",
   epoch?: DataEpoch,
   extra: Readonly<Record<string, string>> = {},
-): Promise<void> {
-  const phase = phaseOf(await journal.load(operation), id) as JournalPhase;
-  await journal.putPhase(operation, {
-    ...phase,
-    facts: {
-      ...phase.facts,
-      delivery,
-      ...(epoch === undefined ? {} : { epoch: String(epoch) }),
-      ...extra,
-    },
+  /** Applied only when the stored mark, read at the write, passes (review 418r2 R3). */
+  when: (stored: string | undefined) => boolean = () => true,
+): Promise<boolean> {
+  let applied = false;
+  await journal.updatePhase(operation, id, (stored) => {
+    const phase = stored as JournalPhase;
+    if (!when(phase.facts?.delivery)) return phase;
+    applied = true;
+    return {
+      ...phase,
+      facts: {
+        ...phase.facts,
+        delivery,
+        ...(epoch === undefined ? {} : { epoch: String(epoch) }),
+        ...extra,
+      },
+    };
   });
+  return applied;
 }
 
 /** Removes the delivery mark of the rotation phase `id`, if any (a new key change on it). */
 async function clearDelivery(journal: OperationJournal, operation: string, id: string) {
   const phase = phaseOf(await journal.load(operation), id);
   if (phase?.facts?.delivery === undefined) return;
-  const facts = Object.fromEntries(
-    Object.entries(phase.facts).filter(
-      ([k]) => k !== "delivery" && k !== "epoch" && k !== "abandonedAt",
-    ),
-  );
-  await journal.putPhase(operation, { ...phase, facts });
+  await journal.updatePhase(operation, id, (stored) => {
+    const now = stored as JournalPhase;
+    const facts = Object.fromEntries(
+      Object.entries(now.facts ?? {}).filter(
+        ([k]) => k !== "delivery" && k !== "epoch" && k !== "abandonedAt",
+      ),
+    );
+    return { ...now, facts };
+  });
 }
 
 /** What abandonDelivery did. */
@@ -556,10 +575,17 @@ export async function abandonDelivery(o: {
   if ((await getPendingDek(o.secrets, o.resource, o.operation)) !== undefined) return "pending";
   if (phase.facts?.delivery === "abandoned") return "abandoned";
   if (phase.facts?.delivery !== "outstanding") return "not-owed";
-  await setDelivery(journal, o.operation, id, "abandoned", undefined, {
-    abandonedAt: String(o.now?.() ?? Date.now()),
-  });
-  return "abandoned";
+  // Decided at the write, alone among the journal's writes: still outstanding then.
+  const applied = await setDelivery(
+    journal,
+    o.operation,
+    id,
+    "abandoned",
+    undefined,
+    { abandonedAt: String(o.now?.() ?? Date.now()) },
+    (stored) => stored === "outstanding" || stored === "abandoned",
+  );
+  return applied ? "abandoned" : "not-owed";
 }
 
 /**
@@ -576,8 +602,15 @@ export async function retryDelivery(o: {
   const id = `rotate:${toHex(o.resource)}`;
   const phase = op === undefined ? undefined : phaseOf(op, id);
   if (phase?.facts?.delivery !== "abandoned") return false;
-  await setDelivery(journal, o.operation, id, "outstanding");
-  return true;
+  return setDelivery(
+    journal,
+    o.operation,
+    id,
+    "outstanding",
+    undefined,
+    {},
+    (stored) => stored === "abandoned",
+  );
 }
 
 /**

@@ -114,12 +114,33 @@ function checkNoSecrets(value: unknown, path = "intent"): void {
   }
 }
 
+/**
+ * The journal's writes per storage, one at a time (0.5.2, review 418r2 R3):
+ * every read-modify-write of an operation row runs under it, so two calls on
+ * the same storage (a resumed rotation and abandonDelivery) never write a
+ * row each read before the other wrote. Keyed by the storage object; every
+ * OperationJournal over it shares the queue.
+ */
+const QUEUES = new WeakMap<object, Promise<unknown>>();
+
 /** The durable operation journal (§9.1). */
 export class OperationJournal {
   readonly #storage: JournalStorage;
 
   constructor(storage: JournalStorage) {
     this.#storage = storage;
+  }
+
+  /** Runs `work` alone among this storage's journal writes. */
+  #locked<T>(work: () => Promise<T>): Promise<T> {
+    const key = this.#storage as object;
+    const before = QUEUES.get(key) ?? Promise.resolve();
+    const next = before.then(work, work);
+    QUEUES.set(
+      key,
+      next.catch(() => undefined),
+    );
+    return next;
   }
 
   async #put(op: JournalOperation): Promise<void> {
@@ -142,10 +163,12 @@ export class OperationJournal {
       phases: [],
       ...op,
     });
-    if ((await this.get(op.id)) !== undefined)
-      throw new Error(`operation ${op.id} is already journaled`);
-    await this.#put(row);
-    return row;
+    return this.#locked(async () => {
+      if ((await this.get(op.id)) !== undefined)
+        throw new Error(`operation ${op.id} is already journaled`);
+      await this.#put(row);
+      return row;
+    });
   }
 
   async get(id: string): Promise<JournalOperation | undefined> {
@@ -168,32 +191,51 @@ export class OperationJournal {
   }
 
   /** Writes the phase (replacing the one with its ID), durably. */
-  async putPhase(id: string, phase: JournalPhase): Promise<JournalOperation> {
-    const op = await this.load(id);
-    const phases = op.phases.some((p) => p.id === phase.id)
-      ? op.phases.map((p) => (p.id === phase.id ? phase : p))
-      : [...op.phases, phase];
-    const next = Object.freeze({ ...op, phases: Object.freeze(phases) });
-    await this.#put(next);
-    return next;
+  putPhase(id: string, phase: JournalPhase): Promise<JournalOperation> {
+    return this.updatePhase(id, phase.id, () => phase);
+  }
+
+  /**
+   * Replaces the phase `phaseId` of operation `id` with `update(stored)`,
+   * where `stored` is the phase as it is when the write happens, read and
+   * written alone among this storage's journal writes (0.5.2). A fact
+   * another call wrote meanwhile (an abandoned delivery) is seen by
+   * `update`, never overwritten by a copy read before it.
+   */
+  updatePhase(
+    id: string,
+    phaseId: string,
+    update: (stored: JournalPhase | undefined) => JournalPhase,
+  ): Promise<JournalOperation> {
+    return this.#locked(async () => {
+      const op = await this.load(id);
+      const phase = update(op.phases.find((p) => p.id === phaseId));
+      const phases = op.phases.some((p) => p.id === phase.id)
+        ? op.phases.map((p) => (p.id === phase.id ? phase : p))
+        : [...op.phases, phase];
+      const next = Object.freeze({ ...op, phases: Object.freeze(phases) });
+      await this.#put(next);
+      return next;
+    });
   }
 
   /** Updates the intent with more public facts (e.g. the session's record IDs). */
-  async updateIntent(
-    id: string,
-    patch: Readonly<Record<string, unknown>>,
-  ): Promise<JournalOperation> {
-    const op = await this.load(id);
-    const next = Object.freeze({ ...op, intent: Object.freeze({ ...op.intent, ...patch }) });
-    await this.#put(next);
-    return next;
+  updateIntent(id: string, patch: Readonly<Record<string, unknown>>): Promise<JournalOperation> {
+    return this.#locked(async () => {
+      const op = await this.load(id);
+      const next = Object.freeze({ ...op, intent: Object.freeze({ ...op.intent, ...patch }) });
+      await this.#put(next);
+      return next;
+    });
   }
 
-  async setStatus(id: string, status: OperationStatus): Promise<JournalOperation> {
-    const op = await this.load(id);
-    const next = Object.freeze({ ...op, status });
-    await this.#put(next);
-    return next;
+  setStatus(id: string, status: OperationStatus): Promise<JournalOperation> {
+    return this.#locked(async () => {
+      const op = await this.load(id);
+      const next = Object.freeze({ ...op, status });
+      await this.#put(next);
+      return next;
+    });
   }
 
   /** Removes a finished operation's row. */

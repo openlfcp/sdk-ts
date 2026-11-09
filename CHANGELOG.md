@@ -92,7 +92,12 @@ in the wire or storage formats changes.
   - Reconciliation (§7.1 step 3) is unchanged.
   - An abandoned mark survives a resume that runs at the same time:
     `runControlPhase` now writes a phase's facts as those stored when it
-    writes, with its own on top (before, it replaced them).
+    writes, with its own on top (before, it replaced them). Every journal
+    write is a read-modify-write run alone among the journal writes on the
+    same storage: the new `OperationJournal.updatePhase`, which `putPhase`,
+    `setStatus`, `updateIntent` and `begin` also use. The delivery mark
+    changes only from the state stored at the write: abandon only an
+    outstanding delivery, try again only an abandoned one.
   - `resumeRotations` resumes a pending key before it looks at the mark.
   - A new key change on an abandoned phase clears the mark.
 
