@@ -131,7 +131,7 @@ The official vectors belong to `openlfcp/spec` and are never copied into
 sdk-ts. `spec.lock` pins the spec version the SDK implements:
 
 ```json
-{ "tag": "mvp-0.4-baseline.4", "commit": "9bea71420071bf4253448041750e6be1f61e5c17" }
+{ "tag": "mvp-0.4-baseline.5", "commit": "1dc648b7693bf031b7fdfaa945477489d2ace4c1" }
 ```
 
 `conformance/spec.mjs` reads spec files with `git show <commit>:<path>`
@@ -183,7 +183,7 @@ and its three corpora, with the clarifications of decisions I8 and I9 (admission
 rule AI5, the epoch number of a `KEY_EPOCH` in §62 class 2). `mvp-0.4-baseline.3`
 is baseline.2 with the depth of admission rule AI2 clarified (IDENTITY-PROFILE-01
 §3: an entry map, and a list or map held in a field of one) and the profile cases
-of that boundary added. `mvp-0.4-baseline.4`, the pinned tag, corrects the ten
+of that boundary added. `mvp-0.4-baseline.4` corrects the ten
 defects of the LFCP-04-415 review with no wire rule change: reconciliation
 propagates only the revocations relevant in a target, so pairing sessions no
 longer spend the root's 64 unbound revocations there, and keeps a refused one
@@ -191,10 +191,13 @@ unpropagated (IDENTITY-PROFILE-01 §7.1 steps 1 and 3, §8.4); step 4 restores
 display entries only for leaf-bound personal and service devices and marks a
 retired entry; and the corpora gain the profile reference's map-type, descriptor
 key, field type and extension checks, the pairing link checks and the uncovered
-server reads. The identity corpora
+server reads. `mvp-0.4-baseline.5`, the pinned tag, decides admission rule AI3
+by the positions §2.1 defines (IDENTITY-PROFILE-01 §3, decisions I27 and I32),
+matches the pairing-link prefix case-insensitively and accepts every W §16
+endpoint a pairing link may carry. The identity corpora
 are read from the pinned tag like the others, each as a suite:
 `conformance/identity/wire.test.ts` runs all 424 cases of
-LFCP-IDENTITY-TEST-VECTORS-01, `profile.test.ts` the 271 of
+LFCP-IDENTITY-TEST-VECTORS-01, `profile.test.ts` the 303 of
 IDENTITY-PROFILE-TEST-VECTORS-01, and `flows.test.ts` the 28 fixtures of
 IDENTITY-FLOW-FIXTURES-01 step by step (a step sdk-ts cannot express on the
 fixture's bytes is reported as not applicable, with its reason, never as a

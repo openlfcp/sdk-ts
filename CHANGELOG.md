@@ -52,6 +52,12 @@ in the wire or storage formats changes.
   admitted, and §4 invalidates the entry, as the mvp-0.4-baseline.5 corpus
   (`identity_doc_f64_below_map_in_list_field`) states.
 
+### Conformance
+
+- Pinned to `mvp-0.4-baseline.5` (spec 1dc648b): the AI3 positions, the
+  case-insensitive pairing-link prefix and the pairing-link endpoint
+  vectors. The identity profile corpus is 303 cases.
+
 ### Added
 
 - CI runs the storage-node tests on Windows.
