@@ -13,6 +13,7 @@ import {
   SqliteLfcpStorage,
   schemaVersion,
 } from "../src/index.js";
+import { secretFileName } from "../src/secrets.js";
 import { tempStore } from "./fixture.js";
 
 const R = resourceId(new Uint8Array(32).fill(1));
@@ -117,7 +118,7 @@ describe(PACKAGE, () => {
     try {
       const ref = dekSecretRef(R, dataEpoch(1n));
       await t.secrets.put(ref, Uint8Array.of(0xab, 0xcd));
-      const file = join(t.secretsDir, `${Buffer.from(ref).toString("hex")}.secret`);
+      const file = join(t.secretsDir, secretFileName(ref));
       // POSIX permissions: Windows has no mode bits to check (its ACLs are the user's).
       if (process.platform !== "win32") {
         expect(statSync(t.secretsDir).mode & 0o777).toBe(0o700);

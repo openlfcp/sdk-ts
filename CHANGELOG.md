@@ -4,6 +4,21 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## Unreleased
+
+### Fixed
+
+- `FileSecretStore` (`@openlfcp/storage-node`) stores references of any
+  length `secretRef` allows. A file was named by the hex of the whole
+  reference, so a reference over 124 characters made `put` and `get` throw
+  `ENAMETOOLONG`: the pending Data Epoch keys of `approvePairing`,
+  `revokeDevice` and every rotation (`pendingDekRef`, about 131 characters)
+  could not be stored, and a managing device on this store could not approve
+  a pairing. A file is now named by the SHA-256 of the reference (64 hex
+  digits and `.secret`). Files written by 0.5.2 or earlier keep working: a
+  file under the old name is read, and it is moved to the new name when it
+  is read or written; `delete` removes both.
+
 ## 0.5.2 — 2026-11-09
 
 A patch release for two deferred findings of review 414c (decision I29), the

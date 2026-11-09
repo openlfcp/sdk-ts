@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -25,8 +26,13 @@ import { isSecretRef, type SecretRef, type SecretStore } from "@openlfcp/storage
  * from a backup) has the keys. OS keychain integration or passphrase
  * encryption is a follow-up.
  *
- * One file per SecretRef, named by the hex of the reference (references
- * are public names, never secret material). A write goes to a temporary
+ * One file per SecretRef, named by the SHA-256 of the reference, in hex
+ * (references are public names, never secret material): 71 ASCII
+ * characters for any reference, within every file system's name limit and
+ * valid on Windows. Before 0.5.3 a file was named by the hex of the whole
+ * reference, which a reference longer than 124 characters could not be
+ * (ENAMETOOLONG); a file under that legacy name is still read, and moved to
+ * its new name when it is read or written (legacyFileName). A write goes to a temporary
  * file that is fsynced, renamed over the target and followed by an fsync
  * of the directory, so a crash leaves the old value or the new one, never
  * a torn file. Windows cannot open a directory for fsync (EPERM, EISDIR or
@@ -79,7 +85,42 @@ export function syncDirectory(
   }
 }
 
-const fileName = (ref: SecretRef): string => `${Buffer.from(ref, "utf8").toString("hex")}.secret`;
+/** The file of a reference: the SHA-256 of its UTF-8 bytes, hex, and `.secret`. */
+export const secretFileName = (ref: SecretRef): string =>
+  `${createHash("sha256").update(ref, "utf8").digest("hex")}.secret`;
+
+/** The longest file name every supported file system takes (NAME_MAX on ext4, APFS, NTFS). */
+const NAME_MAX = 255;
+
+/**
+ * The file name before 0.5.3: the hex of the reference. undefined when
+ * that name is too long to exist (such a reference could never be stored).
+ */
+export function legacyFileName(ref: SecretRef): string | undefined {
+  const name = `${Buffer.from(ref, "utf8").toString("hex")}.secret`;
+  return name.length <= NAME_MAX ? name : undefined;
+}
+
+const code = (e: unknown): unknown => (e as { code?: unknown }).code;
+
+function readIfExists(path: string): Uint8Array | undefined {
+  try {
+    return Uint8Array.from(readFileSync(path));
+  } catch (e) {
+    if (code(e) === "ENOENT") return undefined;
+    throw e;
+  }
+}
+
+function unlinkIfExists(path: string): boolean {
+  try {
+    unlinkSync(path);
+    return true;
+  } catch (e) {
+    if (code(e) === "ENOENT") return false;
+    throw e;
+  }
+}
 
 export class FileSecretStore implements SecretStore {
   readonly #dir: string;
@@ -102,24 +143,39 @@ export class FileSecretStore implements SecretStore {
     syncDirectory(this.#dir);
   }
 
+  /** Writes `value` under the reference's file: a fsynced temporary file renamed over it. */
+  #write(ref: SecretRef, value: Uint8Array): void {
+    const name = secretFileName(ref);
+    this.#counter += 1;
+    const temp = join(this.#dir, `.tmp-${process.pid}-${this.#counter}-${name}`);
+    const fd = openSync(temp, "wx", 0o600);
+    try {
+      writeSync(fd, value);
+      fsyncSync(fd);
+    } catch (e) {
+      closeSync(fd);
+      rmSync(temp, { force: true });
+      throw e;
+    }
+    closeSync(fd);
+    renameSync(temp, join(this.#dir, name));
+    this.#syncDir();
+  }
+
+  /**
+   * Removes the legacy file of `ref` once its value is durable under the new
+   * name: a crash in between leaves both, and the new one is read first.
+   */
+  #dropLegacy(ref: SecretRef): void {
+    const legacy = legacyFileName(ref);
+    if (legacy !== undefined && unlinkIfExists(join(this.#dir, legacy))) this.#syncDir();
+  }
+
   put(ref: SecretRef, value: Uint8Array): Promise<void> {
     try {
       this.#check(ref);
-      const target = join(this.#dir, fileName(ref));
-      this.#counter += 1;
-      const temp = join(this.#dir, `.tmp-${process.pid}-${this.#counter}-${fileName(ref)}`);
-      const fd = openSync(temp, "wx", 0o600);
-      try {
-        writeSync(fd, value);
-        fsyncSync(fd);
-      } catch (e) {
-        closeSync(fd);
-        rmSync(temp, { force: true });
-        throw e;
-      }
-      closeSync(fd);
-      renameSync(temp, target);
-      this.#syncDir();
+      this.#write(ref, value);
+      this.#dropLegacy(ref);
       return Promise.resolve();
     } catch (e) {
       return Promise.reject(e);
@@ -129,9 +185,17 @@ export class FileSecretStore implements SecretStore {
   get(ref: SecretRef): Promise<Uint8Array | undefined> {
     try {
       this.#check(ref);
-      return Promise.resolve(Uint8Array.from(readFileSync(join(this.#dir, fileName(ref)))));
+      const current = readIfExists(join(this.#dir, secretFileName(ref)));
+      if (current !== undefined) return Promise.resolve(current);
+      const legacy = legacyFileName(ref);
+      if (legacy === undefined) return Promise.resolve(undefined);
+      const old = readIfExists(join(this.#dir, legacy));
+      if (old === undefined) return Promise.resolve(undefined);
+      // A file of 0.5.2 or earlier: moved to its new name, then the old one goes.
+      this.#write(ref, old);
+      this.#dropLegacy(ref);
+      return Promise.resolve(old);
     } catch (e) {
-      if ((e as { code?: unknown }).code === "ENOENT") return Promise.resolve(undefined);
       return Promise.reject(e);
     }
   }
@@ -139,12 +203,15 @@ export class FileSecretStore implements SecretStore {
   delete(ref: SecretRef): Promise<void> {
     try {
       this.#check(ref);
-      unlinkSync(join(this.#dir, fileName(ref)));
-      this.#syncDir();
+      // The legacy file first: a crash after it leaves the current value, never an older one.
+      const legacy = legacyFileName(ref);
+      let removed = legacy !== undefined && unlinkIfExists(join(this.#dir, legacy));
+      removed = unlinkIfExists(join(this.#dir, secretFileName(ref))) || removed;
+      if (removed) this.#syncDir();
+      return Promise.resolve();
     } catch (e) {
-      if ((e as { code?: unknown }).code !== "ENOENT") return Promise.reject(e);
+      return Promise.reject(e);
     }
-    return Promise.resolve();
   }
 
   toJSON(): string {
