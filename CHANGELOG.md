@@ -4,6 +4,40 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
+## 0.5.2 — unreleased
+
+A patch release for two deferred findings of review 414c (decision I29). No
+export is removed or renamed, no result union gains a variant, and nothing
+in the wire or storage formats changes.
+
+### Fixed
+
+- Identity flows no longer fail when another session of the same Resource
+  stored their ACKed record first. The coordinator pushes every accepted
+  record to every session, so an open sync session on the same storage could
+  win the local compare-and-set. `approvePairing`, `revokeDevice`,
+  `registerDevice` through `reconcileDevices`, and every rotation's
+  KEY_EPOCH then threw a plain `Error("the Control Chain was not stored:
+  CONTROL_HEAD_MISMATCH")`, although the stored chain held the record. Now
+  the stored chain is read again: one that already contains the flow's
+  chain is accepted, and an older state of it is stored over.
+- What still fails has a class and a stable `code` instead of a message:
+  `ControlChainDiverged` (an `IdentityConflict`, `code:
+  "CONTROL_CHAIN_DIVERGED"`) when the stored chain is another branch, and
+  `ControlChainBusy` (an `IdentityUnavailable`, `code:
+  "CONTROL_HEAD_MISMATCH"`) when other sessions kept moving the head. Code
+  that matched the old message can drop that test. Both classes are new
+  exports.
+- `FileSecretStore` (and so `lfcp-node pair`) works on Windows. The
+  directory fsync after a secret's rename fails there with EPERM, EISDIR
+  or EACCES; on win32 only, those errors are tolerated, because NTFS
+  journals the rename. POSIX keeps the fsync, and every other error still
+  throws.
+
+### Added
+
+- CI runs the storage-node tests on Windows.
+
 ## 0.5.1 — 2026-11-08
 
 A patch release for the holistic review of MVP 0.4 (findings F1 and F2): no
