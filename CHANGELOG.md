@@ -6,6 +6,41 @@ remove or rename any.
 
 ## Unreleased
 
+### Added
+
+- What a headless device needs after `lfcp-node pair` (MVP 0.5 bridge; spike
+  B-001), all offline, from its own storage:
+  - `pairedResources({ storage })` (`@openlfcp/client`): the Resources its
+    pairing brought, with roster name, Data Profile, coordinator and
+    `ready` (chain stored, device registered and active, every epoch key
+    held). Works for installations paired by earlier versions.
+  - `completePairing({ …, storeResources: true })` also stores a Resource
+    row (`storage.resources`, no labels) for each ready candidate;
+    `storePairedResources` does it later for installations paired before;
+    `putResourceRow` is the row they write. Off by default: an application
+    that stores its own rows with local names (the Obsidian plugin) is not
+    affected.
+  - `deviceIdentity({ storage, installation })`: the root, this device, and
+    its approved certificate's kind, mask and scope and label; `kind:
+    "root"` for the installation that created the Identity Resource.
+  - `openNodeInstallation(stateDir)` (`@openlfcp/storage-node`): the SQLite
+    storage, file secret store, Principal and identity flow options of a
+    state directory, as `lfcp-node pair` uses them; `NODE_UNIT_PROFILES`.
+  - `sectionEnd(snapshot, sectionId)`
+    (`@openlfcp/shared-objects/sections`): the `parent`/`after` position
+    after a section's last visible top-level node, to append without a
+    Markdown editor.
+
+### Changed
+
+- `lfcp-node pair` stores a Resource row for each ready section
+  (`storeResources`), so `storage.resources.list()` lists them.
+- `SyncClient.canWrite` (and every write check) answers `reason: "revoked"`
+  once this device's revocation is proven (the write barrier
+  `revocationStatus` records, IDENTITY-PROFILE-01 §8.6), instead of
+  `"server-refused"`, also after the server lets the device in again. The
+  union is unchanged.
+
 ### Fixed
 
 - `FileSecretStore` (`@openlfcp/storage-node`) stores references of any
