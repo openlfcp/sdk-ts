@@ -10,6 +10,12 @@ export const PACKAGE = "@openlfcp/storage-node";
 export { identityDocument } from "./identity-document.js";
 export { openInstallation } from "./installation.js";
 export {
+  NODE_UNIT_PROFILES,
+  type NodeInstallation,
+  type NodeInstallationOptions,
+  openNodeInstallation,
+} from "./node-installation.js";
+export {
   main,
   PAIR_EXIT,
   PAIR_USAGE,

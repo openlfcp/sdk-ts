@@ -12,6 +12,7 @@ import {
   toBase64url,
   toHex,
 } from "@openlfcp/core";
+import type { LfcpStorage } from "@openlfcp/storage";
 import {
   activeDevice,
   type CertificateChain,
@@ -50,6 +51,7 @@ import {
   resourceRef,
 } from "./document.js";
 import { newOperationId, OperationJournal, pairingSecretRef, phaseOf } from "./journal.js";
+import { putResourceRow } from "./local-device.js";
 import {
   ChannelPool,
   IDENTITY_EXTENSION,
@@ -472,13 +474,31 @@ export function candidateEvidence(
   });
 }
 
+/** The Resource rows of a storage given `storeResources` (a full LfcpStorage has them). */
+function resourceRows(storage: object): LfcpStorage["resources"] {
+  const rows = (storage as Partial<Pick<LfcpStorage, "resources">>).resources;
+  if (rows === undefined) throw new Error("storeResources needs a storage with Resource rows");
+  return rows;
+}
+
 /**
  * §5.3 steps 8 and 11: learns the session's result and the status of
  * every candidate. Resumable at any point from the persisted candidates
  * (and while `J` is active, from the link's secret in the SecretStore).
  */
 export async function completePairing(
-  o: FlowOptions & { readonly operation: string; readonly document: IdentityDocumentFactory },
+  o: FlowOptions & {
+    readonly operation: string;
+    readonly document: IdentityDocumentFactory;
+    /**
+     * Also store a Resource row (`storage.resources`) for every ready
+     * candidate that has none, as this installation's Principal and without
+     * labels (putResourceRow): what a headless device lists its Resources
+     * from. Off by default: an application that stores its own rows, with
+     * its own local names, keeps doing so (pairedResources lists them too).
+     */
+    readonly storeResources?: boolean;
+  },
 ): Promise<PairingOutcome> {
   const journal = new OperationJournal(o.storage);
   let op = await journal.load(o.operation);
@@ -623,7 +643,15 @@ export async function completePairing(
       };
       const named = p.name === undefined ? {} : { name: p.name };
       try {
-        out.push({ resource: p.resource, status: await status(), ...named });
+        const st = await status();
+        if (
+          st === "ready" &&
+          o.storeResources === true &&
+          !bytesEqual(p.resource, I) &&
+          (await resourceRows(o.storage).get(p.resource)) === undefined
+        )
+          await putResourceRow(o.storage, o.installation, p.resource);
+        out.push({ resource: p.resource, status: st, ...named });
       } catch (e) {
         if (e instanceof IdentityUnavailable || e instanceof IdentityRefused)
           out.push({ resource: p.resource, status: "unreachable", ...named });

@@ -86,6 +86,13 @@ export {
   pendingDekRef,
 } from "./journal.js";
 export {
+  type DeviceIdentity,
+  deviceIdentity,
+  type PairedResource,
+  pairedResources,
+  storePairedResources,
+} from "./local-device.js";
+export {
   ChannelPool,
   type ConnectionNetworkOptions,
   connectionNetwork,

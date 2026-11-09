@@ -17,13 +17,20 @@ import {
   cancelPairing,
   createIdentityResource,
   createPairingSession,
+  deviceIdentity,
   IdentityRefused,
+  pairedResources,
   pairingRequests,
   syncChain,
 } from "@openlfcp/client";
 import { toHex } from "@openlfcp/core";
 import { InMemoryLfcpStorage } from "@openlfcp/storage";
-import { FileSecretStore, openInstallation, PAIR_EXIT } from "@openlfcp/storage-node";
+import {
+  FileSecretStore,
+  openInstallation,
+  openNodeInstallation,
+  PAIR_EXIT,
+} from "@openlfcp/storage-node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { waitFor } from "./harness.js";
 import { hostResource, installation } from "./identity-live.js";
@@ -84,7 +91,8 @@ describe("lfcp-node pair against the Rust reference server", { timeout: 300_000 
       session.link.reveal(),
     );
     try {
-      await waitFor("the fingerprint", () => /Fingerprint: \S+/.test(cli.output()), 60_000);
+      // The request line comes after the fingerprint (two writes): wait for both.
+      await waitFor("the request line", () => /Requested: .*\n/.test(cli.output()), 60_000);
       const shown = /Fingerprint: (\S+)/.exec(cli.output())?.[1];
       expect(cli.output()).toContain('"bridge" (service) asks to join Notes, Tasks');
       // The link is a bearer secret: it is never printed.
@@ -121,6 +129,34 @@ describe("lfcp-node pair against the Rust reference server", { timeout: 300_000 
       expect(cli.output()).toContain("  Tasks: not granted");
     } finally {
       await cli.kill();
+    }
+
+    // 504: the state directory lists what the pairing brought, offline.
+    const node = await openNodeInstallation(state);
+    try {
+      expect((await node.storage.resources.list()).map((r) => toHex(r.resourceId))).toEqual([
+        toHex(notes.resource),
+      ]);
+      expect(
+        (await pairedResources(node))
+          .map((p) => [p.name, p.ready, toHex(p.resource)])
+          // In the request's order, which is the roster's: not fixed.
+          .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      ).toEqual([
+        ["Notes", true, toHex(notes.resource)],
+        ["Tasks", false, toHex(tasks.resource)],
+      ]);
+      const me = await deviceIdentity(node);
+      if (me?.kind !== "device") throw new Error(String(me?.kind));
+      expect([me.deviceKind, me.mask, me.scope.map(toHex), me.label]).toEqual([
+        1,
+        [1n, 2n],
+        [toHex(notes.resource)],
+        "bridge",
+      ]);
+      expect(toHex(me.root)).toBe(toHex(P.installation.signer.descriptor.principalId));
+    } finally {
+      node.close();
     }
 
     // The bridge, with the installation the command created: Notes opens, Mail and I do not.

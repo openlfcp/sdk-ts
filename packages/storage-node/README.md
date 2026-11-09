@@ -105,6 +105,31 @@ Approved: Service (service device).
   is rejected or the request refused; 2 rejected by the managing device; 3
   still waiting; 4 unknown sections; 64 usage.
 
+## After pairing: the installation of a state directory
+
+```ts
+const node = await openNodeInstallation("/var/lib/notes-bridge");
+const sections = (await pairedResources(node)).filter((p) => p.ready); // node: { storage, secrets, … }
+const me = await deviceIdentity(node); // { kind: "device", root, deviceKind: 1, mask, scope, label }
+// …open a SyncClient with node.installation, node.storage, node.secrets…
+const status = await revocationStatus({ ...node.flow, resource, url });
+node.close();
+```
+
+- `openNodeInstallation(dir)` opens what `lfcp-node pair` made (and creates
+  it on the first run): `storage` (SQLite), `secrets` (`FileSecretStore`),
+  `installation` (its Principal) and `flow`, the options every identity
+  flow of `@openlfcp/client` takes.
+- `lfcp-node pair` stores a Resource row for each ready section, so
+  `storage.resources.list()` lists them; `pairedResources` (from
+  `@openlfcp/client`) also gives their roster names and works for state
+  directories paired by 0.5.2, and `storePairedResources` writes their rows.
+  A revoked section is no longer `ready`: ask `revocationStatus` for every
+  paired Resource, not only the ready ones.
+- `deviceIdentity` tells the device what it was approved as: kind, mask and
+  scope never change (N8): adding a section means pairing a new
+  installation and revoking this one.
+
 ## Secrets
 
 ```ts
