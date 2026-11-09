@@ -31,8 +31,34 @@ remove or rename any.
     after a section's last visible top-level node, to append without a
     Markdown editor.
 
+- Fewer WebSockets for the identity flows (decision I18: a server admits 20
+  new WebSockets per minute and address):
+  - `connectionNetwork({ …, keepAliveMs })` (`@openlfcp/client`) reuses one
+    session per (Principal, coordinator) across flow calls, concurrent ones
+    included; an idle session is kept alive by the §38 heartbeat and closed
+    after `keepAliveMs`; a session the server closed is never reused. The
+    network's new optional `close()` ends the kept sessions. Without
+    `keepAliveMs` (the default) every call opens its own WebSocket, as before.
+  - `openNodeInstallation` uses it (`keepAliveMs`, default
+    `DEFAULT_KEEP_ALIVE_MS` = 60 s) and closes it in `close()`.
+- A WebSocket upgrade refused with HTTP 429 can be told apart (the platform
+  WebSocket does not report the status): an `upgradeProbe` option of
+  `connectionNetwork`, `SyncClient` and `LfcpConnection` asks the server
+  after a failed upgrade. `IdentityUnavailable` then has `reason:
+  "rate-limited"` and `retryAfterMs`; the SyncClient connection event has
+  `rateLimited`, and the next attempt waits at least the Retry-After.
+  `nodeUpgradeProbe()` (`@openlfcp/storage-node`) is the probe for Node;
+  `openNodeInstallation` passes it. Types `UpgradeProbe`, `UpgradeRefusal`.
+
 ### Changed
 
+- `lfcp-node pair` checks the result after 4, 8, 15, then every 30 seconds
+  (`PAIR_POLL_BACKOFF_MS`, from the start whenever the result changes),
+  instead of every 5 seconds; `--poll` still sets a fixed interval. With
+  the kept sessions, a pairing that waits 90 s for its approval opens 2
+  WebSockets instead of 21.
+- An identity session keeps only the replies to its own requests; pushes
+  and stale replies are dropped (a reused session would hold them all).
 - `lfcp-node pair` stores a Resource row for each ready section
   (`storeResources`), so `storage.resources.list()` lists them.
 - `SyncClient.canWrite` (and every write check) answers `reason: "revoked"`

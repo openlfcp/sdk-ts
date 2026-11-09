@@ -101,6 +101,9 @@ Approved: Service (service device).
   (default 600) bounds how long the command waits, and a timeout is never a
   decision. Run the same command again to resume: the request is journaled,
   and after the approval the link is no longer needed.
+- The result is checked after 4, 8, 15, then every 30 seconds (`--poll`
+  sets a fixed interval), on one kept session per Principal: a pairing
+  stays far below the server's 20 new WebSockets per minute and address.
 - Exit codes: 0 approved and every section ready or not granted; 1 the link
   is rejected or the request refused; 2 rejected by the managing device; 3
   still waiting; 4 unknown sections; 64 usage.
@@ -126,6 +129,11 @@ node.close();
   directories paired by 0.5.2, and `storePairedResources` writes their rows.
   A revoked section is no longer `ready`: ask `revocationStatus` for every
   paired Resource, not only the ready ones.
+- The identity flows of `node.flow` reuse their sessions for
+  `keepAliveMs` (default 60 s); `node.close()` ends them, so the process can
+  exit. A refused upgrade is `IdentityUnavailable` with `reason:
+  "rate-limited"` and `retryAfterMs` (`nodeUpgradeProbe`); pass
+  `upgradeProbe: nodeUpgradeProbe()` to a `SyncClient` as well.
 - `deviceIdentity` tells the device what it was approved as: kind, mask and
   scope never change (N8): adding a section means pairing a new
   installation and revoking this one.
