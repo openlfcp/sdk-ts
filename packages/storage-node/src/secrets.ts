@@ -129,6 +129,8 @@ export interface FileSecretStoreOptions {
   readonly directorySync?: DirectorySyncOps;
   /** Called when a read is about to move a legacy file: where another process may act. */
   readonly beforeMigration?: (ref: SecretRef) => void;
+  /** The hard link of a migration (node:fs linkSync). */
+  readonly link?: (existing: string, created: string) => void;
 }
 
 /** The errors of a file system without hard links. */
@@ -204,8 +206,7 @@ export class FileSecretStore implements SecretStore {
       if (value !== undefined) return Promise.resolve(value);
       const legacy = legacyFileName(ref);
       if (legacy === undefined) return Promise.resolve(undefined);
-      this.#migrate(ref, join(this.#dir, legacy), current);
-      return Promise.resolve(readIfExists(current));
+      return Promise.resolve(this.#migrate(ref, join(this.#dir, legacy), current));
     } catch (e) {
       return Promise.reject(e);
     }
@@ -217,23 +218,27 @@ export class FileSecretStore implements SecretStore {
    * is gone (ENOENT): another process on the same directory that wrote or
    * deleted the secret meanwhile wins, and the caller reads the new name
    * again. Not a copy: a copy of a value read before such a write would put
-   * the older value back. Then the legacy name goes. On a file system
-   * without hard links, a copy that does not replace an existing new file.
+   * the older value back. Then the legacy name goes. Returns the value.
+   *
+   * On a file system without hard links nothing is moved: the legacy value
+   * is returned as read, and the file stays until the next put of the
+   * reference writes the new name and removes it. A copy there could not be
+   * published without replacing a newer file or undoing a delete (no atomic
+   * "create if absent" of a complete file exists without links).
    */
-  #migrate(ref: SecretRef, legacy: string, current: string): void {
+  #migrate(ref: SecretRef, legacy: string, current: string): Uint8Array | undefined {
     this.#options.beforeMigration?.(ref);
     try {
-      linkSync(legacy, current);
+      (this.#options.link ?? linkSync)(legacy, current);
     } catch (e) {
       const c = code(e);
-      if (c === "EEXIST" || c === "ENOENT") return;
-      if (!NO_LINKS.has(String(c))) throw e;
-      const old = readIfExists(legacy);
-      if (old === undefined || readIfExists(current) !== undefined) return;
-      this.#write(ref, old);
+      if (c === "EEXIST" || c === "ENOENT") return readIfExists(current);
+      if (NO_LINKS.has(String(c))) return readIfExists(legacy);
+      throw e;
     }
     this.#syncDir();
     this.#dropLegacy(ref);
+    return readIfExists(current);
   }
 
   delete(ref: SecretRef): Promise<void> {

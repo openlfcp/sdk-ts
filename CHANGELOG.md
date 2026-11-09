@@ -19,7 +19,8 @@ remove or rename any.
   file under the old name is read, and it is moved to the new name when it
   is read or written; `delete` removes both. The move is a hard link, which
   never replaces a file: a write or delete by another process on the same
-  directory meanwhile wins. `delete` makes the old name's removal durable
+  directory meanwhile wins. On a file system without hard links the old file
+  is read and kept as it is, until the next `put` of that reference. `delete` makes the old name's removal durable
   before it removes the new one.
 
 ## 0.5.2 — 2026-11-09
