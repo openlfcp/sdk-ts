@@ -134,20 +134,76 @@ export async function syncChain(
   return chain;
 }
 
+/** `a`'s records are the first records of `b` (`b` equals or extends `a`). */
+const isPrefixOf = (a: LinearChain, b: LinearChain): boolean =>
+  a.records.length <= b.records.length &&
+  a.records.every((r, i) => bytesEqual(r.signed.id, b.records[i]?.signed.id ?? new Uint8Array()));
+
+/** How often storeChain re-reads a head another session moved before it gives up. */
+const STORE_RETRIES = 4;
+
+/**
+ * The stored Control Chain of a Resource diverges from the one this flow
+ * validated (another session stored a competing branch): local storage holds
+ * a fork (§9.7). An IdentityConflict, so every flow treats it as one; `code`
+ * is stable.
+ */
+export class ControlChainDiverged extends IdentityConflict {
+  readonly code = "CONTROL_CHAIN_DIVERGED";
+  constructor(resource: ResourceId) {
+    super(resource, "the stored Control Chain diverges from the validated one (§9.7)");
+    this.name = "ControlChainDiverged";
+  }
+}
+
+/**
+ * Other sessions kept moving the stored head of a Resource while this flow
+ * stored its chain: try again later. An IdentityUnavailable (the operation is
+ * journaled and resumes); `code` is stable.
+ */
+export class ControlChainBusy extends IdentityUnavailable {
+  readonly code = "CONTROL_HEAD_MISMATCH";
+  readonly resource: ResourceId;
+  constructor(resource: ResourceId) {
+    super("the stored Control Head kept moving while the chain was stored");
+    this.name = "ControlChainBusy";
+    this.resource = resource;
+  }
+}
+
+/**
+ * Stores `chain` over `previous` with the storage's compare-and-set. Another
+ * session of the same Resource (an open sync session, another flow) may have
+ * stored first, e.g. the very record this flow just had ACKed (W §47: the
+ * coordinator pushes it to every session). On that local refusal the stored
+ * chain is read again: one that already contains `chain` is accepted, one
+ * that `chain` extends is replaced (compare-and-set on its head, a bounded
+ * number of times: ControlChainBusy), and one that diverges is a fork
+ * (ControlChainDiverged). A chain that does not extend `previous` is stored
+ * only where nothing newer is (as before 0.5.2: a refusal leaves it).
+ */
 async function storeChain(
   storage: IdentityStorage,
   chain: LinearChain,
   previous: LinearChain | undefined,
 ): Promise<void> {
   if (previous !== undefined && bytesEqual(previous.state.head, chain.state.head)) return;
-  const prefix =
-    previous !== undefined &&
-    previous.records.length <= chain.records.length &&
-    previous.records.every((r, i) =>
-      bytesEqual(r.signed.id, chain.records[i]?.signed.id ?? new Uint8Array()),
-    );
-  const r = await saveControlChain(storage, chain, prefix ? previous.state.head : null);
-  if (!r.ok && prefix) throw new Error(`the Control Chain was not stored: ${r.reason}`);
+  const R = chain.state.resourceId;
+  const prefix = previous !== undefined && isPrefixOf(previous, chain);
+  let expected = prefix ? previous.state.head : null;
+  for (let attempt = 0; ; attempt++) {
+    const r = await saveControlChain(storage, chain, expected);
+    if (r.ok) return;
+    const stored = await loadControlChain(storage, R);
+    // Another session stored this chain, or a later one: nothing to store.
+    if (stored?.kind === "linear" && isPrefixOf(chain, stored)) return;
+    if (!prefix) return;
+    if (stored !== undefined && (stored.kind !== "linear" || !isPrefixOf(stored, chain)))
+      throw new ControlChainDiverged(R);
+    if (attempt >= STORE_RETRIES) throw new ControlChainBusy(R);
+    // An older state of the same chain: store over it.
+    expected = stored === undefined ? null : stored.state.head;
+  }
 }
 
 /** Validates `chain` extended with `record` (e.g. after an ACK) and stores it. */

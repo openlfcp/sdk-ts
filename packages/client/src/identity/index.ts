@@ -11,6 +11,8 @@ export {
   selfRegistrationRecord,
 } from "./accept.js";
 export {
+  ControlChainBusy,
+  ControlChainDiverged,
   type DocumentWrite,
   deliverKeys,
   extendChain,
