@@ -247,3 +247,70 @@ describe("a refused upgrade (501, G6)", () => {
     }
   });
 });
+
+// Review #28 (r2).
+describe("connectionNetwork reuse, races (501, r2)", () => {
+  it("close() ends a session still connecting: its connect rejects at once, its socket is closed", async () => {
+    let socket: (WebSocketLike & { closed?: boolean }) | undefined;
+    // The server accepts the WebSocket and never answers the handshake.
+    const silent: WebSocketFactory = () => {
+      const ws: WebSocketLike & { closed?: boolean } = {
+        binaryType: "arraybuffer",
+        protocol: "lfcp-1",
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send: () => undefined,
+        close: () => {
+          ws.closed = true;
+        },
+      };
+      socket = ws;
+      queueMicrotask(() => ws.onopen?.({}));
+      return ws;
+    };
+    const c = clock();
+    const net = connectionNetwork({
+      now: c.now,
+      webSocket: silent,
+      keepAliveMs: 60_000,
+      timers: c.timers,
+    });
+    const pending = net.connect(party(1).signer, URL).then(
+      () => "connected",
+      (e: unknown) => (e instanceof IdentityUnavailable ? "unavailable" : String(e)),
+    );
+    await settle();
+    net.close?.();
+    const outcome = await Promise.race([
+      pending,
+      new Promise((r) => setTimeout(() => r("still waiting"), 200)),
+    ]);
+    expect(outcome).toBe("unavailable");
+    expect(socket?.closed).toBe(true);
+  });
+
+  it("several calls after the kept session was dropped open exactly one new session", async () => {
+    const s = server();
+    const c = clock();
+    const net = connectionNetwork({
+      now: c.now,
+      webSocket: s.factory,
+      keepAliveMs: 60_000,
+      timers: c.timers,
+    });
+    (await net.connect(party(1).signer, URL)).close();
+    s.current.drop();
+    await settle();
+    const channels = await Promise.all([1, 2, 3].map(() => net.connect(party(1).signer, URL)));
+    expect(s.sockets.length).toBe(2);
+    const answers = await Promise.all(channels.map((ch) => ch.open(generateResourceId())));
+    expect(answers.map((a) => a.kind)).toEqual(["opened", "opened", "opened"]);
+    for (const ch of channels) ch.close();
+    // The new session is the kept one: close() reaches it.
+    net.close?.();
+    await settle();
+    expect(s.current.closed).not.toBeNull();
+  });
+});

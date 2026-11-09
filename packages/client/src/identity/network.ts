@@ -477,9 +477,11 @@ const globalTimers = {
   },
 };
 
-/** A session kept for reuse: its users, and the timer that closes it once idle. */
+/** A session kept for reuse, from its creation: its users, and the timer that closes it once idle. */
 interface Kept {
-  readonly session: Promise<RequestSession>;
+  readonly session: RequestSession;
+  /** Resolves when it is READY; rejects (and the entry is forgotten) when it cannot be. */
+  readonly ready: Promise<RequestSession>;
   users: number;
   idleSince: number | null;
   timer: unknown;
@@ -537,27 +539,33 @@ export function connectionNetwork(options: ConnectionNetworkOptions): IdentityNe
   };
   return {
     close() {
+      // Also a session still connecting: its connect rejects now, not at a timeout.
       for (const [key, k] of [...kept]) {
         forget(key, k);
-        k.session.then((s) => s.close()).catch(() => undefined);
+        k.session.close();
       }
     },
     async connect(signer, url) {
       const key = `${toHex(signer.descriptor.principalId)} ${url}`;
+      // The choice is made before any await: concurrent calls share one entry,
+      // and a closed session is replaced exactly once.
       let k = kept.get(key);
-      if (k !== undefined) {
-        const s = await k.session.catch(() => undefined);
-        if (s === undefined || s.closed) {
-          forget(key, k);
-          k = undefined;
-        }
+      if (k?.session.closed === true) {
+        forget(key, k);
+        k = undefined;
       }
       if (k === undefined) {
-        const session = connected(open(signer, url));
-        const fresh: Kept = { session, users: 0, idleSince: null, timer: undefined };
+        const session = open(signer, url);
+        const fresh: Kept = {
+          session,
+          ready: connected(session),
+          users: 0,
+          idleSince: null,
+          timer: undefined,
+        };
         kept.set(key, fresh);
         // A failed connection is not kept.
-        session.catch(() => forget(key, fresh));
+        fresh.ready.catch(() => forget(key, fresh));
         k = fresh;
       }
       const entry = k;
@@ -566,7 +574,7 @@ export function connectionNetwork(options: ConnectionNetworkOptions): IdentityNe
       timers.clearTimeout(entry.timer);
       let s: RequestSession;
       try {
-        s = await entry.session;
+        s = await entry.ready;
       } catch (e) {
         entry.users--;
         throw e;
