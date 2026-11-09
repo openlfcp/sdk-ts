@@ -183,4 +183,12 @@ describe("FileSecretStore on a file system without hard links", () => {
       expect(files()).toEqual(other === "put" ? [secretFileName(ref)] : []);
     }
   });
+
+  it("a put of another process during the read is what the read returns, not undefined", async () => {
+    writeFileSync(join(dir, legacyFileName(ref) as string), bytes(14), { mode: 0o600 });
+    const them = new FileSecretStore(dir);
+    // Their put writes the new name and removes the legacy file before this read looks again.
+    const store = new FileSecretStore(dir, { link: noLinks(() => void them.put(ref, bytes(15))) });
+    expect(await store.get(ref)).toEqual(bytes(15));
+  });
 });
