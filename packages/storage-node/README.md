@@ -18,11 +18,14 @@ on it. The Obsidian plugin does not use it: Obsidian has its own adapter
 
 ## Scope
 
-Part of the OpenLFCP TypeScript SDK, which implements the OpenLFCP MVP 0.1
-subset of [LFCP-WIRE-01](https://github.com/openlfcp/spec/blob/main/wire/LFCP-WIRE-01.md)
-at `mvp-0.1-baseline.9`, not every deferred WIRE-01 feature. It does not
-claim full LFCP-WIRE-01 conformance. This is the MVP 0.1 release
-(`0.1.3`, npm dist-tag `latest`). Until 1.0, minor versions may change APIs.
+Part of the OpenLFCP TypeScript SDK (npm dist-tag `latest`, released with
+the other `@openlfcp/*` packages at one version; see the
+[CHANGELOG](https://github.com/openlfcp/sdk-ts/blob/main/CHANGELOG.md)).
+The SDK implements a subset of
+[LFCP-WIRE-01](https://github.com/openlfcp/spec/blob/main/wire/LFCP-WIRE-01.md)
+and the Identity Profile at the spec baseline in `spec.lock`, not every
+deferred WIRE-01 feature; it does not claim full LFCP-WIRE-01 conformance.
+Until 1.0, minor versions may change APIs.
 
 ## SQLite
 
@@ -115,8 +118,12 @@ await secrets.put(dekSecretRef(resource, epoch), dekBytes);
 > as that user, as root, or from a backup has the keys. OS keychain integration
 > or passphrase-based encryption is a follow-up.
 
-- One file per `SecretRef`, named by the hex of the reference (references are
-  public names, never secret material).
+- One file per `SecretRef`, named by the SHA-256 of the reference in hex
+  (references are public names, never secret material): 71 characters for
+  any reference, within every file system's name limit and valid on
+  Windows. Up to 0.5.2 the name was the hex of the whole reference, which a
+  reference over 124 characters could not have; such a file is still read
+  and is moved to its new name when it is read or written.
 - Writes go to a temporary file that is fsynced, renamed over the target and
   followed by a directory fsync. A crash leaves the old value or the new one,
   never a torn file.
