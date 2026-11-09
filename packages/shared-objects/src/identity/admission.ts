@@ -234,11 +234,32 @@ export class IdentityAdmission {
         ((path.length === 2 && key === "missing_keys") ||
           (path.length >= 3 && path[2] === "missing_keys"));
       if (hint && path[1] !== own) found.add("UNAUTHORIZED_WRITER");
-      // AI3 checks structural value kinds, leaving scalar field semantics to §4.
+      // AI3 (decisions I27, I32) checks the kind of value written at the positions §2.1
+      // defines, and only there, leaving field types to §4: an entry (`roster[k]`,
+      // `devices[k]`, `requests[k]`), a named field of an entry, a hint entry (a key of
+      // the map in `devices[k].missing_keys`), and a list element (of a list held in
+      // `endpoints`, `scope` or `missing_keys[X]`). Not checked: `extensions`, unknown
+      // fields and root keys, and anything below a map or list held where §2.1 defines
+      // a scalar, or below a map held where it defines a list.
+      const field = String(path[2]);
+      const listField =
+        path.length === 3 &&
+        (field === "endpoints" || field === "scope") &&
+        FIELDS[top]?.has(field) === true;
+      // A list held at missing_keys[X]: X is a key of the map held in missing_keys.
+      const hintList =
+        path.length === 4 &&
+        top === "devices" &&
+        field === "missing_keys" &&
+        typeof path[3] === "string";
+      const listElement = parent.type === "list" && (listField || hintList);
+      const hintEntry =
+        path.length === 3 && top === "devices" && field === "missing_keys" && parent.type === "map";
       const defined =
         (path.length === 1 && TABLES.has(top)) ||
-        (path.length === 2 && key !== undefined && FIELDS[top]?.has(key)) ||
-        (path.length >= 3 && ["endpoints", "scope", "missing_keys"].includes(String(path[2])));
+        (path.length === 2 && key !== undefined && FIELDS[top]?.has(key) === true) ||
+        hintEntry ||
+        listElement;
       if (defined && op.action !== "del") {
         const scalar =
           op.action === "set" &&
@@ -247,8 +268,9 @@ export class IdentityAdmission {
             (op.datatype === "uint" &&
               ((typeof op.value === "number" && Number.isSafeInteger(op.value) && op.value >= 0) ||
                 (typeof op.value === "bigint" && op.value >= 0n && op.value <= UINT64_MAX))));
-        if (!scalar && made !== "map" && made !== "list") found.add("INVALID_FIELD_TYPE");
-        if (parent.type === "list" && !scalar) found.add("INVALID_FIELD_TYPE");
+        // A list element admits a scalar only; the other positions also a map or a list.
+        if (!scalar && (listElement || (made !== "map" && made !== "list")))
+          found.add("INVALID_FIELD_TYPE");
       }
       if (!restricted) continue;
       if (op.action === "del") found.add("UNAUTHORIZED_WRITER");
