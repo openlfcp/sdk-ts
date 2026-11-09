@@ -6,8 +6,9 @@ remove or rename any.
 
 ## 0.5.2 — unreleased
 
-A patch release for two deferred findings of review 414c (decision I29). No
-export is removed or renamed, no result union gains a variant, and nothing
+A patch release for two deferred findings of review 414c (decision I29), the
+AI3 positions of mvp-0.4-baseline.5 (I27, I32), and the SDK side of design
+419 (decision I31). No export is removed or renamed, no result union gains a variant, and nothing
 in the wire or storage formats changes.
 
 ### Fixed
@@ -43,9 +44,39 @@ in the wire or storage formats changes.
   journals the rename. POSIX keeps the fsync, and every other error still
   throws.
 
+- Identity admission (IDENTITY-PROFILE-01 §3 AI3, decisions I27 and I32)
+  now checks value kinds only at the positions §2.1 defines: an entry, a
+  named field, a hint entry and a list element of `endpoints`, `scope` or
+  `missing_keys[X]`. Before, a map written into a list field
+  (`endpoints = {a: 1.5}`) was refused for its contents. Now it is
+  admitted, and §4 invalidates the entry, as the mvp-0.4-baseline.5 corpus
+  (`identity_doc_f64_below_map_in_list_field`) states.
+
 ### Added
 
 - CI runs the storage-node tests on Windows.
+- **Key hints** (§7.1 step 3, §3 AI5; design 419 (a)):
+  - `setKeyHints` writes this device's own `devices[<me>].missing_keys`,
+    the epochs it lacks by Resource, and clears it when the keys arrive. It
+    writes only that field, through the new optional `keyHints`
+    capability of `IdentityDocumentPort` (`IdentityKeyHintsPort`).
+    `IdentityReplica.write` gains the matching `hints` option, and
+    storage-node's `identityDocument` provides the capability.
+  - `keyHints` reads the hints of the root's active devices, for a managing
+    device to decide that reconciliation is due. Reconciliation already
+    re-seals hinted epochs.
+  - `resendKeys` is "Re-send keys" for one device: it clears this
+    installation's ledger for that device and reconciles without rotation.
+    It serves Read devices, which cannot write a hint.
+- **Abandoned deliveries** (design 419 (c)):
+  - `abandonDelivery` marks an owed delivery, one that keeps being
+    refused, as abandoned. It refuses (`pending`) while the rotation's key
+    still waits in its pending slot.
+  - `retryDelivery` makes it owed again.
+  - `resumeRotations` skips abandoned deliveries;
+    `outstandingDeliveries(o, { includeAbandoned: true })` lists them, with
+    `abandoned: true`.
+  - Reconciliation (§7.1 step 3) is unchanged.
 
 ## 0.5.1 — 2026-11-08
 
