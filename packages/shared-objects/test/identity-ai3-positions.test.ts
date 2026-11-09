@@ -67,6 +67,19 @@ test("AI3 decides by position as sdk-rs does, beyond the corpus", () => {
       },
       "admitted",
     ],
+    // `scope` is no roster field (only requests[k] and devices[k] define it): not checked
+    // (review 417-418, sdk-rs pins the same).
+    [
+      "signed int -1 in a list at roster[X].scope",
+      (d) => {
+        d.roster[resourceRef].scope = [];
+        // A signed int (datatype int) -1, as the backend writes it: Automerge's JS proxy
+        // would write -1 as an f64 and a wrapped Int as a map.
+        const list = A.getObjectId(d.roster[resourceRef].scope) as string;
+        A.getBackend(d as never).insert(list, 0, -1, "int");
+      },
+      "admitted",
+    ],
     [
       "signed int as an element of own missing_keys[X]",
       (d) => d.devices[me].missing_keys[resourceRef].insertAt(0, 3),
