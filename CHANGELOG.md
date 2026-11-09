@@ -73,7 +73,8 @@ in the wire or storage formats changes.
     when the hint changes, or after `HINT_RESEND_BACKOFF_MS` (one day). A
     hint nobody clears therefore no longer makes every reconciliation seal
     and upload a new package. `keyHints(o, { unanswered: true })` lists only
-    the hints not answered yet.
+    the hints not answered yet, and `hintAnswered` tells one hint by its
+    Resource, device and epochs.
 - **Abandoned deliveries** (design 419 (c)):
   - `abandonDelivery` marks an owed delivery, one that keeps being
     refused, as abandoned. It refuses (`pending`) while the rotation's key
