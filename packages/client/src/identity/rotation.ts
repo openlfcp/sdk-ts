@@ -466,8 +466,12 @@ export async function rotateAfter(
     deks: send,
   });
   const phase = phaseOf(await journal.load(o.operation), id);
-  // Every eligible reader has every package (a refused one stays owed, and is resumed).
-  if (phase?.facts?.delivery === "outstanding" && keys.skipped.length === 0)
+  // Every eligible reader has every package (a refused one stays owed, and is resumed); an
+  // abandoned delivery that a replay completed is done too.
+  if (
+    (phase?.facts?.delivery === "outstanding" || phase?.facts?.delivery === "abandoned") &&
+    keys.skipped.length === 0
+  )
     await setDelivery(journal, o.operation, id, "done");
   return {
     resource: R,
@@ -482,8 +486,9 @@ async function setDelivery(
   journal: OperationJournal,
   operation: string,
   id: string,
-  delivery: "outstanding" | "done",
+  delivery: "outstanding" | "done" | "abandoned",
   epoch?: DataEpoch,
+  extra: Readonly<Record<string, string>> = {},
 ): Promise<void> {
   const phase = phaseOf(await journal.load(operation), id) as JournalPhase;
   await journal.putPhase(operation, {
@@ -492,8 +497,70 @@ async function setDelivery(
       ...phase.facts,
       delivery,
       ...(epoch === undefined ? {} : { epoch: String(epoch) }),
+      ...extra,
     },
   });
+}
+
+/** What abandonDelivery did. */
+export type AbandonDeliveryResult =
+  /** The delivery is abandoned: no longer resumed nor listed as owed (only with includeAbandoned). */
+  | "abandoned"
+  /**
+   * Refused: the rotation's new DEK still waits in its pending slot (its
+   * KEY_EPOCH may be committed and the key not adopted yet, §9.1). Leaving
+   * it would strand the only copy of the key; it is resumed as before.
+   */
+  | "pending"
+  /** No owed delivery of this operation on this Resource (delivered, never marked, or unknown). */
+  | "not-owed";
+
+/**
+ * "Stop trying" (design 419 (c)): marks the owed delivery of `operation`'s
+ * rotation of `resource` as abandoned, a client-local scheduling decision:
+ * resumeRotations no longer resumes it and outstandingDeliveries no longer
+ * lists it (unless asked to). Nothing is sent or deleted, and IDENTITY-
+ * PROFILE-01 §7.1 step 3 is untouched: a reconciliation still seals every
+ * own-root epoch its ledger lacks. retryDelivery undoes it.
+ */
+export async function abandonDelivery(o: {
+  readonly storage: IdentityStorage;
+  readonly secrets: FlowOptions["secrets"];
+  readonly operation: string;
+  readonly resource: ResourceId;
+  /** Milliseconds since the epoch, recorded as `abandonedAt` (display only). */
+  readonly now?: () => number;
+}): Promise<AbandonDeliveryResult> {
+  const journal = new OperationJournal(o.storage);
+  const op = await journal.get(o.operation);
+  const id = `rotate:${toHex(o.resource)}`;
+  const phase = op === undefined ? undefined : phaseOf(op, id);
+  if (phase === undefined) return "not-owed";
+  if ((await getPendingDek(o.secrets, o.resource, o.operation)) !== undefined) return "pending";
+  if (phase.facts?.delivery === "abandoned") return "abandoned";
+  if (phase.facts?.delivery !== "outstanding") return "not-owed";
+  await setDelivery(journal, o.operation, id, "abandoned", undefined, {
+    abandonedAt: String(o.now?.() ?? Date.now()),
+  });
+  return "abandoned";
+}
+
+/**
+ * "Try again": an abandoned delivery is owed again (outstanding), so the
+ * next resumeRotations resumes it. False when it was not abandoned.
+ */
+export async function retryDelivery(o: {
+  readonly storage: IdentityStorage;
+  readonly operation: string;
+  readonly resource: ResourceId;
+}): Promise<boolean> {
+  const journal = new OperationJournal(o.storage);
+  const op = await journal.get(o.operation);
+  const id = `rotate:${toHex(o.resource)}`;
+  const phase = op === undefined ? undefined : phaseOf(op, id);
+  if (phase?.facts?.delivery !== "abandoned") return false;
+  await setDelivery(journal, o.operation, id, "outstanding");
+  return true;
 }
 
 /**
@@ -555,6 +622,8 @@ export interface OutstandingDelivery {
    * cannot be decided and only other roots' readers are listed.
    */
   readonly recipients: readonly string[];
+  /** Set when the delivery was abandoned (abandonDelivery); listed only with includeAbandoned. */
+  readonly abandoned?: true;
 }
 
 /**
@@ -565,19 +634,27 @@ export interface OutstandingDelivery {
  */
 export async function outstandingDeliveries(
   o: Pick<FlowOptions, "storage" | "installation"> & { readonly identityChain?: LinearChain },
+  options: {
+    /** List abandoned deliveries too, each with `abandoned: true` (0.5.2). */
+    readonly includeAbandoned?: boolean;
+  } = {},
 ): Promise<readonly OutstandingDelivery[]> {
   const ledger = new PackageLedger(o.storage);
   const me = o.installation.signer.descriptor.principalId;
   const out: OutstandingDelivery[] = [];
   for (const op of await new OperationJournal(o.storage).list())
     for (const phase of op.phases) {
-      if (phase.kind !== "rotate" || phase.facts?.delivery !== "outstanding") continue;
-      if (phase.facts.epoch === undefined) continue;
+      const delivery = phase.facts?.delivery;
+      const abandoned = delivery === "abandoned";
+      if (phase.kind !== "rotate" || (delivery !== "outstanding" && !abandoned)) continue;
+      if (abandoned && options.includeAbandoned !== true) continue;
+      if (phase.facts?.epoch === undefined) continue;
+      const mark = abandoned ? ({ abandoned: true } as const) : {};
       const R = resourceId(fromHex(phase.resource));
       const epoch = dataEpoch(BigInt(phase.facts.epoch));
       const stored = await loadControlChain(o.storage, R);
       if (stored?.kind !== "linear") {
-        out.push(Object.freeze({ operation: op.id, resource: R, epoch, recipients: [] }));
+        out.push(Object.freeze({ operation: op.id, resource: R, epoch, recipients: [], ...mark }));
         continue;
       }
       let identity: LinearChain | undefined;
@@ -603,6 +680,7 @@ export async function outstandingDeliveries(
           resource: R,
           epoch,
           recipients: Object.freeze(recipients),
+          ...mark,
         }),
       );
     }
@@ -705,6 +783,8 @@ export async function resumeRotations(
     for (const phase of op.phases) {
       if (phase.kind !== "rotate" || phase.facts?.revokedAt === undefined) continue;
       const R = resourceId(fromHex(phase.resource));
+      // An abandoned delivery is not resumed (abandonDelivery refuses while a key is pending).
+      if (phase.facts.delivery === "abandoned") continue;
       if (
         phase.facts.delivery !== "outstanding" &&
         (await getPendingDek(o.secrets, R, op.id)) === undefined

@@ -180,6 +180,8 @@ export {
   writeRosterEntry,
 } from "./roster.js";
 export {
+  type AbandonDeliveryResult,
+  abandonDelivery,
   deliveryIdentity,
   type ExposingRevocation,
   exposingRevocationsSince,
@@ -191,6 +193,7 @@ export {
   type RotationStatus,
   type RotatorTest,
   resumeRotations,
+  retryDelivery,
   rotateAfter,
   rotatorTest,
   verifiedFrontier,
