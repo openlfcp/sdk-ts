@@ -26,7 +26,6 @@ describe("lfcp-node pair arguments", () => {
       sections: ["Notes", "Tasks"],
       platform: "server",
       wait: 600,
-      poll: 5,
     });
   });
 

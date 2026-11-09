@@ -87,8 +87,31 @@ export interface ConnectionEvents {
   /** A message after READY that the handshake does not consume. */
   message(message: AnyMessage): void;
   /** The connection is gone (DISCONNECTED); `reason` is for humans and never carries payloads. */
-  closed(reason: string): void;
+  /**
+   * The connection is gone. `refusal`: the server refused the WebSocket
+   * upgrade with HTTP 429, as the `upgradeProbe` learned.
+   */
+  closed(reason: string, refusal?: UpgradeRefusal): void;
 }
+
+/** A WebSocket upgrade the server refused for its rate limit (HTTP 429, decision I18). */
+export interface UpgradeRefusal {
+  readonly status: 429;
+  /** The Retry-After header, in milliseconds, when the server sent one. */
+  readonly retryAfterMs?: number;
+}
+
+/**
+ * Asks the server why an upgrade to `url` failed, where the platform
+ * WebSocket does not say (browsers and Node's undici give no HTTP status):
+ * undefined when it is not a 429. Called only after a WebSocket failed
+ * before it opened. `@openlfcp/storage-node` has one for Node
+ * (nodeUpgradeProbe).
+ */
+export type UpgradeProbe = (
+  url: string,
+  protocols: readonly string[],
+) => Promise<UpgradeRefusal | undefined>;
 
 export interface ConnectionOptions extends ClientHandshakeConfig {
   readonly url: string;
@@ -101,6 +124,8 @@ export interface ConnectionOptions extends ClientHandshakeConfig {
    * READY never raises the receive limit above it.
    */
   readonly maxMessageBytes?: number;
+  /** Learns a refused upgrade's HTTP 429 after the WebSocket failed before it opened. */
+  readonly upgradeProbe?: UpgradeProbe;
 }
 
 const BYTES = (data: unknown): Uint8Array | string | undefined => {
@@ -171,12 +196,46 @@ export class LfcpConnection {
       if (socket === this.#socket) this.#receive(ev.data);
     };
     socket.onclose = (ev) => {
-      if (socket === this.#socket)
-        this.#drop("CONNECTION_LOST", `the WebSocket closed (${ev.code})`, false);
+      if (socket !== this.#socket) return;
+      if (this.#state === "CONNECTING")
+        this.#failedUpgrade(socket, `the WebSocket closed (${ev.code})`);
+      else this.#drop("CONNECTION_LOST", `the WebSocket closed (${ev.code})`, false);
     };
     socket.onerror = () => {
-      if (socket === this.#socket) this.#drop("CONNECTION_LOST", "the WebSocket failed");
+      if (socket !== this.#socket) return;
+      if (this.#state === "CONNECTING") this.#failedUpgrade(socket, "the WebSocket failed");
+      else this.#drop("CONNECTION_LOST", "the WebSocket failed");
     };
+  }
+
+  /**
+   * The WebSocket failed before it opened: with an upgrade probe, the
+   * server is asked whether it refused the upgrade with 429 before the loss
+   * is reported. The connection stays CONNECTING meanwhile.
+   */
+  #failedUpgrade(socket: WebSocketLike, reason: string): void {
+    const probe = this.#options.upgradeProbe;
+    if (probe === undefined) {
+      this.#drop("CONNECTION_LOST", reason);
+      return;
+    }
+    socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
+    probe(this.#options.url, [LFCP_SUBPROTOCOL]).then(
+      (refusal) => {
+        if (socket !== this.#socket) return;
+        if (refusal === undefined) this.#drop("CONNECTION_LOST", reason);
+        else
+          this.#drop(
+            "CONNECTION_LOST",
+            `the server refused the WebSocket upgrade: rate limited (HTTP 429${refusal.retryAfterMs === undefined ? "" : `, retry after ${refusal.retryAfterMs} ms`})`,
+            true,
+            refusal,
+          );
+      },
+      () => {
+        if (socket === this.#socket) this.#drop("CONNECTION_LOST", reason);
+      },
+    );
   }
 
   #apply(step: ClientStep): void {
@@ -292,7 +351,12 @@ export class LfcpConnection {
     this.#drop("CONNECTION_LOST", reason);
   }
 
-  #drop(event: ClientConnectionEvent, reason: string, closeSocket = true): void {
+  #drop(
+    event: ClientConnectionEvent,
+    reason: string,
+    closeSocket = true,
+    refusal?: UpgradeRefusal,
+  ): void {
     const socket = this.#socket;
     this.#socket = null;
     this.#session = null;
@@ -310,7 +374,8 @@ export class LfcpConnection {
     if (this.#state !== "DISCONNECTED") this.#move("CONNECTION_LOST");
     if (!this.#closedReported) {
       this.#closedReported = true;
-      this.#events.closed(reason);
+      if (refusal === undefined) this.#events.closed(reason);
+      else this.#events.closed(reason, refusal);
     }
   }
 }

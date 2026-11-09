@@ -10,6 +10,7 @@ export const PACKAGE = "@openlfcp/storage-node";
 export { identityDocument } from "./identity-document.js";
 export { openInstallation } from "./installation.js";
 export {
+  DEFAULT_KEEP_ALIVE_MS,
   NODE_UNIT_PROFILES,
   type NodeInstallation,
   type NodeInstallationOptions,
@@ -18,10 +19,12 @@ export {
 export {
   main,
   PAIR_EXIT,
+  PAIR_POLL_BACKOFF_MS,
   PAIR_USAGE,
   type PairArguments,
   type PairEnvironment,
   pair,
+  pairPollDelay,
   parsePairArguments,
 } from "./pair.js";
 export { MIGRATIONS, migrate, SCHEMA_VERSION, schemaVersion } from "./schema.js";
@@ -31,3 +34,4 @@ export {
   type SqliteLocalState,
   type SqliteStorageOptions,
 } from "./sqlite.js";
+export { nodeUpgradeProbe, retryAfterMs } from "./upgrade-probe.js";

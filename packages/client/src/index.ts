@@ -30,6 +30,8 @@ export {
   LFCP_SUBPROTOCOL,
   LfcpConnection,
   platformWebSocket,
+  type UpgradeProbe,
+  type UpgradeRefusal,
   type WebSocketFactory,
   type WebSocketLike,
 } from "./connection.js";
