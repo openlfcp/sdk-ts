@@ -84,7 +84,13 @@ import {
 } from "./batch-status.js";
 import type { ProfileCheckpointer } from "./checkpoint.js";
 import { readClaimJournal } from "./claim-journal.js";
-import { ConnectionNotReady, LfcpConnection, type WebSocketFactory } from "./connection.js";
+import {
+  ConnectionNotReady,
+  LfcpConnection,
+  type UpgradeProbe,
+  type UpgradeRefusal,
+  type WebSocketFactory,
+} from "./connection.js";
 import { EngineGuard, isEngineTrap, snapshotItem } from "./engine-guard.js";
 import type { AckOutcome, NackOutcome, OutboundQueue, StaleOutboundUnit } from "./outbound.js";
 import { resourceSyncState, snapshotFrontier } from "./outbound.js";
@@ -307,6 +313,12 @@ export interface SyncClientOptions {
   readonly credential?: Uint8Array;
   readonly dataProfiles?: readonly string[];
   /**
+   * Learns a refused upgrade's HTTP 429 (decision I18), which the platform
+   * WebSocket does not report: the connection event then carries
+   * `rateLimited`, and the next attempt waits at least its Retry-After.
+   */
+  readonly upgradeProbe?: UpgradeProbe;
+  /**
    * Whether to publish a Snapshot of a LIVE Resource now, asked on every
    * tick with the number of units merged since the last one, received or
    * committed here (a section's only writer reaches it too); no automatic
@@ -317,7 +329,13 @@ export interface SyncClientOptions {
 
 /** What the session reports to the application. */
 export type SyncEvent =
-  | { readonly type: "connection"; readonly state: ClientConnectionState; readonly reason?: string }
+  | {
+      readonly type: "connection";
+      readonly state: ClientConnectionState;
+      readonly reason?: string;
+      /** The server refused the upgrade for its rate limit (HTTP 429, I18): learned by the upgradeProbe. */
+      readonly rateLimited?: UpgradeRefusal;
+    }
   | {
       readonly type: "resource-state";
       readonly resourceId: ResourceId;
@@ -648,12 +666,13 @@ export class SyncClient {
         ...(options.webSocket === undefined ? {} : { webSocket: options.webSocket }),
         ...(options.credential === undefined ? {} : { credential: options.credential }),
         ...(options.dataProfiles === undefined ? {} : { dataProfiles: options.dataProfiles }),
+        ...(options.upgradeProbe === undefined ? {} : { upgradeProbe: options.upgradeProbe }),
       },
       {
         state: (state) => this.#emit({ type: "connection", state }),
         ready: (ready) => this.#serial(() => this.#onReady(ready)),
         message: (m) => this.#serial(() => this.#onMessage(m)),
-        closed: (reason) => this.#serial(() => this.#onClosed(reason)),
+        closed: (reason, refusal) => this.#serial(() => this.#onClosed(reason, refusal)),
       },
     );
   }
@@ -1264,8 +1283,13 @@ export class SyncClient {
     for (const ctx of this.#resources.values()) if (ctx.wanted) await this.#sendOpen(ctx);
   }
 
-  async #onClosed(reason: string): Promise<void> {
-    this.#emit({ type: "connection", state: "DISCONNECTED", reason });
+  async #onClosed(reason: string, refusal?: UpgradeRefusal): Promise<void> {
+    this.#emit({
+      type: "connection",
+      state: "DISCONNECTED",
+      reason,
+      ...(refusal === undefined ? {} : { rateLimited: refusal }),
+    });
     this.#readyDurability = null;
     await this.#refreshBatches();
     for (const r of this.#requests.values())
@@ -1282,7 +1306,9 @@ export class SyncClient {
     await this.#o.outbound.connectionLost(iso(this.#o.now()));
     if (this.#stopped) return;
     this.#attempt += 1;
-    const delay = (this.#o.reconnect ?? defaultReconnect)(this.#attempt);
+    const policy = (this.#o.reconnect ?? defaultReconnect)(this.#attempt);
+    // I18: never sooner than the server's Retry-After (another refused upgrade would be wasted).
+    const delay = policy === null ? null : Math.max(policy, refusal?.retryAfterMs ?? 0);
     this.#reconnectAt = delay === null ? null : this.#o.now() + delay;
   }
 
