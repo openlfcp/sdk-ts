@@ -9,11 +9,9 @@
 // Public @openlfcp/client API only: requestPairing, completePairing and
 // the operation journal, over SQLite storage and a file SecretStore.
 
-import { mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import {
   completePairing,
-  connectionNetwork,
   type IdentityNetwork,
   MASK_PRESETS,
   OperationJournal,
@@ -23,10 +21,7 @@ import {
 } from "@openlfcp/client";
 import { toBase64url } from "@openlfcp/core";
 import { DEVICE_KIND, deviceFingerprint } from "@openlfcp/wire";
-import { identityDocument } from "./identity-document.js";
-import { openInstallation } from "./installation.js";
-import { FileSecretStore } from "./secrets.js";
-import { SqliteLfcpStorage } from "./sqlite.js";
+import { openNodeInstallation } from "./node-installation.js";
 
 /** Exit codes of `lfcp-node pair`. */
 export const PAIR_EXIT = Object.freeze({
@@ -148,12 +143,6 @@ export interface PairEnvironment {
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-/** A reply timeout that does not keep the process alive once the command is done. */
-const replyTimeout = (ms: number) =>
-  new Promise<void>((r) => {
-    setTimeout(r, ms).unref();
-  });
-
 /** The preset a certificate's kind and mask are, by IDENTITY-PROFILE-01 §5.4. */
 function presetOf(kind: number, mask: readonly bigint[]): string {
   const same = (a: readonly bigint[]) =>
@@ -179,13 +168,12 @@ export async function pair(args: PairArguments, env: PairEnvironment): Promise<n
   const out = env.out;
   const now = env.now ?? (() => Date.now());
   const sleep = env.sleep ?? defaultSleep;
-  const network = env.network ?? connectionNetwork({ now, timeout: () => replyTimeout(30_000) });
-  mkdirSync(args.state, { recursive: true, mode: 0o700 });
-  const secrets = new FileSecretStore(join(args.state, "secrets"));
-  const storage = SqliteLfcpStorage.open(join(args.state, "lfcp.sqlite"));
+  const node = await openNodeInstallation(args.state, {
+    now,
+    ...(env.network === undefined ? {} : { network: env.network }),
+  });
+  const { installation, storage, flow } = node;
   try {
-    const installation = await openInstallation(args.state, secrets);
-    const flow = { installation, storage, secrets, network, now, document: identityDocument };
     const fingerprint = deviceFingerprint(installation.signer.descriptor.principalId);
     const journal = new OperationJournal(storage);
     // A request already made by this installation is resumed from the journal, link or not.
@@ -241,7 +229,8 @@ export async function pair(args: PairArguments, env: PairEnvironment): Promise<n
       last = line;
     };
     for (;;) {
-      const r: PairingOutcome = await completePairing({ ...flow, operation });
+      // The ready sections get Resource rows: what the bridge lists them from (storage.resources).
+      const r: PairingOutcome = await completePairing({ ...flow, operation, storeResources: true });
       if (r.kind === "rejected") {
         say("Rejected: the managing device cancelled the session.");
         return PAIR_EXIT.REJECTED;
@@ -271,7 +260,7 @@ export async function pair(args: PairArguments, env: PairEnvironment): Promise<n
       await sleep(args.poll * 1000);
     }
   } finally {
-    storage.close();
+    node.close();
   }
 }
 
