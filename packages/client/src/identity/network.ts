@@ -15,7 +15,13 @@ import {
   type LiveActorHave,
   type Signer,
 } from "@openlfcp/wire";
-import { LfcpConnection, type WebSocketFactory } from "../connection.js";
+import {
+  ConnectionNotReady,
+  LfcpConnection,
+  type UpgradeProbe,
+  type UpgradeRefusal,
+  type WebSocketFactory,
+} from "../connection.js";
 
 /**
  * The network port of the identity flows (IDENTITY-PROFILE-01 §§5–9).
@@ -81,13 +87,33 @@ export interface IdentityChannel {
 export interface IdentityNetwork {
   /** An authenticated session as `signer` to the coordinator at `url`; throws IdentityUnavailable. */
   connect(signer: Signer, url: string): Promise<IdentityChannel>;
+  /**
+   * Closes the sessions a network keeps for reuse (connectionNetwork's
+   * keepAliveMs), also ones a flow still uses (its requests become
+   * unavailable): call it when the application is done, so that no open
+   * WebSocket keeps the process alive. A later call opens a new session.
+   */
+  close?(): void;
 }
 
 /** The coordinator could not be reached or the session ended: a timeout is never a decision (§6). */
 export class IdentityUnavailable extends Error {
-  constructor(message: string) {
+  /**
+   * `"rate-limited"`: the coordinator refused the WebSocket upgrade with HTTP
+   * 429 (its new-connections-per-address limit, decision I18), as the
+   * network's `upgradeProbe` learned; undefined for any other cause, or
+   * without a probe (a browser's WebSocket does not tell).
+   */
+  readonly reason: "rate-limited" | undefined;
+  /** The server's Retry-After, in milliseconds, when it sent one. */
+  readonly retryAfterMs: number | undefined;
+
+  constructor(message: string, refusal?: UpgradeRefusal) {
+    // The connection's reason already says "rate limited (HTTP 429, …)".
     super(message);
     this.name = "IdentityUnavailable";
+    this.reason = refusal === undefined ? undefined : "rate-limited";
+    this.retryAfterMs = refusal?.retryAfterMs;
   }
 }
 
@@ -140,8 +166,11 @@ const MAX_EPOCHS_PER_GET = 256;
 class RequestSession implements IdentityChannel {
   readonly #connection: LfcpConnection;
   readonly #inbox: AnyMessage[] = [];
+  /** The message IDs of the requests waiting for replies: anything else is dropped. */
+  readonly #pending = new Set<string>();
   #waiters: (() => void)[] = [];
   #closed: string | null = null;
+  #refusal: UpgradeRefusal | undefined;
   #extensions: readonly string[] | null = null;
   readonly #timeout: (() => Promise<unknown>) | undefined;
 
@@ -150,6 +179,7 @@ class RequestSession implements IdentityChannel {
     signer: Signer;
     now: () => number;
     webSocket?: WebSocketFactory;
+    upgradeProbe?: UpgradeProbe;
     timeout?: () => Promise<unknown>;
   }) {
     this.#timeout = options.timeout;
@@ -159,6 +189,7 @@ class RequestSession implements IdentityChannel {
         signer: options.signer,
         now: options.now,
         ...(options.webSocket === undefined ? {} : { webSocket: options.webSocket }),
+        ...(options.upgradeProbe === undefined ? {} : { upgradeProbe: options.upgradeProbe }),
       },
       {
         state: () => undefined,
@@ -167,11 +198,16 @@ class RequestSession implements IdentityChannel {
           this.#wake();
         },
         message: (m) => {
+          // A reply to a request of ours; a push (an accepted record of a Resource this
+          // session opened, §69) or a stale reply is not kept: a reused session would
+          // otherwise hold every push it ever got.
+          if (m.correlationId === undefined || !this.#pending.has(toHex(m.correlationId))) return;
           this.#inbox.push(m);
           this.#wake();
         },
-        closed: (reason) => {
+        closed: (reason, refusal) => {
           this.#closed = reason;
+          this.#refusal = refusal;
           this.#wake();
         },
       },
@@ -180,6 +216,16 @@ class RequestSession implements IdentityChannel {
 
   get extensions(): readonly string[] {
     return this.#extensions ?? [];
+  }
+
+  /** The connection closed (the server, the network, or close()): it is not used again. */
+  get closed(): boolean {
+    return this.#closed !== null;
+  }
+
+  /** The §38 heartbeat of an idle session kept for reuse; false when it is dead. */
+  tick(now: number): boolean {
+    return this.#connection.tick(now);
   }
 
   #wake(): void {
@@ -203,6 +249,7 @@ class RequestSession implements IdentityChannel {
       if (this.#closed !== null)
         throw new IdentityUnavailable(
           `the connection closed while waiting for ${what}: ${this.#closed}`,
+          this.#refusal,
         );
       if (timedOut) throw new IdentityUnavailable(`timed out waiting for ${what}`);
       await new Promise<void>((resolve) => this.#waiters.push(resolve));
@@ -220,18 +267,35 @@ class RequestSession implements IdentityChannel {
     what: string,
     done: (reply: AnyMessage) => boolean = () => true,
   ): Promise<AnyMessage[]> {
-    this.#connection.send(m);
     const id = toHex(m.messageId);
-    const replies: AnyMessage[] = [];
-    for (;;) {
-      const reply = await this.#until(() => {
-        const i = this.#inbox.findIndex(
-          (r) => r.correlationId !== undefined && toHex(r.correlationId) === id,
-        );
-        return i === -1 ? undefined : this.#inbox.splice(i, 1)[0];
-      }, what);
-      replies.push(reply);
-      if (reply.type === "NACK" || done(reply)) return replies;
+    this.#pending.add(id);
+    try {
+      try {
+        this.#connection.send(m);
+      } catch (e) {
+        // Closed between two requests (a reused session the server dropped): unavailable, retried.
+        if (e instanceof ConnectionNotReady)
+          throw new IdentityUnavailable(`the connection closed before ${what} was asked`);
+        throw e;
+      }
+      const replies: AnyMessage[] = [];
+      for (;;) {
+        const reply = await this.#until(() => {
+          const i = this.#inbox.findIndex(
+            (r) => r.correlationId !== undefined && toHex(r.correlationId) === id,
+          );
+          return i === -1 ? undefined : this.#inbox.splice(i, 1)[0];
+        }, what);
+        replies.push(reply);
+        if (reply.type === "NACK" || done(reply)) return replies;
+      }
+    } finally {
+      this.#pending.delete(id);
+      // Replies that came after the last one awaited (none should) are dropped with it.
+      for (let i = this.#inbox.length - 1; i >= 0; i--) {
+        const c = this.#inbox[i]?.correlationId;
+        if (c !== undefined && toHex(c) === id) this.#inbox.splice(i, 1);
+      }
     }
   }
 
@@ -378,26 +442,167 @@ export interface ConnectionNetworkOptions {
    * decision (§6). Without it a request waits until the connection closes.
    */
   readonly timeout?: () => Promise<unknown>;
+  /**
+   * Reuse a session per (Principal, coordinator) across flow calls (decision
+   * I18: the server admits 20 new WebSockets per minute and address): a
+   * session no flow uses any more stays open this long, kept alive by the
+   * §38 heartbeat, for the next call. 0 (the default) closes it when its
+   * flow ends, as before. A session the server closed is never reused.
+   */
+  readonly keepAliveMs?: number;
+  /** Learns why an upgrade failed (e.g. HTTP 429), where the platform WebSocket does not say. */
+  readonly upgradeProbe?: UpgradeProbe;
+  /** Timers of the kept sessions (default: the global ones, unref'ed where the runtime has it). */
+  readonly timers?: {
+    readonly setTimeout: (fn: () => void, ms: number) => unknown;
+    readonly clearTimeout: (handle: unknown) => void;
+  };
 }
 
-/** The identity network over LfcpConnection: one session per (Principal, coordinator). */
+/** How often a kept session's heartbeat runs (the server's interval is READY's, ≥ 1 s). */
+const KEPT_TICK_MS = 1000;
+
+/** The runtime's timers (every supported platform has them), unref'ed where it can be. */
+const globalTimers = {
+  setTimeout: (fn: () => void, ms: number): unknown => {
+    const g = globalThis as unknown as {
+      setTimeout: (fn: () => void, ms: number) => { unref?: () => void };
+    };
+    const h = g.setTimeout(fn, ms);
+    h.unref?.();
+    return h;
+  },
+  clearTimeout: (h: unknown): void => {
+    (globalThis as unknown as { clearTimeout: (h: unknown) => void }).clearTimeout(h);
+  },
+};
+
+/** A session kept for reuse: its users, and the timer that closes it once idle. */
+interface Kept {
+  readonly session: Promise<RequestSession>;
+  users: number;
+  idleSince: number | null;
+  timer: unknown;
+}
+
+/**
+ * The identity network over LfcpConnection: one session per (Principal,
+ * coordinator) and flow call, or, with `keepAliveMs`, one per (Principal,
+ * coordinator) shared by every call while it is in use or recently was.
+ * A shared session carries concurrent requests: replies are matched by
+ * correlation ID.
+ */
 export function connectionNetwork(options: ConnectionNetworkOptions): IdentityNetwork {
-  return {
-    async connect(signer, url) {
-      const s = new RequestSession({
-        url,
-        signer,
-        now: options.now,
-        ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
-        ...(options.webSocket === undefined ? {} : { webSocket: options.webSocket }),
-      });
-      try {
-        await s.connect();
-      } catch (e) {
+  const open = (signer: Signer, url: string) =>
+    new RequestSession({
+      url,
+      signer,
+      now: options.now,
+      ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
+      ...(options.webSocket === undefined ? {} : { webSocket: options.webSocket }),
+      ...(options.upgradeProbe === undefined ? {} : { upgradeProbe: options.upgradeProbe }),
+    });
+  const connected = async (s: RequestSession) => {
+    try {
+      await s.connect();
+    } catch (e) {
+      s.close();
+      throw e;
+    }
+    return s;
+  };
+  const keepAlive = options.keepAliveMs ?? 0;
+  if (keepAlive <= 0)
+    return { connect: (signer, url) => connected(open(signer, url)), close: () => undefined };
+
+  const timers = options.timers ?? globalTimers;
+  const kept = new Map<string, Kept>();
+  const forget = (key: string, k: Kept) => {
+    if (kept.get(key) === k) kept.delete(key);
+    timers.clearTimeout(k.timer);
+  };
+  /** While idle: the heartbeat, and the close once idle for keepAliveMs. */
+  const watch = (key: string, k: Kept, s: RequestSession) => {
+    k.timer = timers.setTimeout(() => {
+      if (k.users > 0 || k.idleSince === null) return;
+      const now = options.now();
+      // Expired first: a PING sent right before the close would be answered after it.
+      if (s.closed || now - k.idleSince >= keepAlive || !s.tick(now)) {
+        forget(key, k);
         s.close();
+        return;
+      }
+      watch(key, k, s);
+    }, KEPT_TICK_MS);
+  };
+  return {
+    close() {
+      for (const [key, k] of [...kept]) {
+        forget(key, k);
+        k.session.then((s) => s.close()).catch(() => undefined);
+      }
+    },
+    async connect(signer, url) {
+      const key = `${toHex(signer.descriptor.principalId)} ${url}`;
+      let k = kept.get(key);
+      if (k !== undefined) {
+        const s = await k.session.catch(() => undefined);
+        if (s === undefined || s.closed) {
+          forget(key, k);
+          k = undefined;
+        }
+      }
+      if (k === undefined) {
+        const session = connected(open(signer, url));
+        const fresh: Kept = { session, users: 0, idleSince: null, timer: undefined };
+        kept.set(key, fresh);
+        // A failed connection is not kept.
+        session.catch(() => forget(key, fresh));
+        k = fresh;
+      }
+      const entry = k;
+      entry.users++;
+      entry.idleSince = null;
+      timers.clearTimeout(entry.timer);
+      let s: RequestSession;
+      try {
+        s = await entry.session;
+      } catch (e) {
+        entry.users--;
         throw e;
       }
-      return s;
+      let released = false;
+      return lease(s, () => {
+        if (released) return;
+        released = true;
+        entry.users--;
+        if (entry.users > 0) return;
+        if (s.closed || kept.get(key) !== entry) {
+          forget(key, entry);
+          s.close();
+          return;
+        }
+        entry.idleSince = options.now();
+        watch(key, entry, s);
+      });
     },
+  };
+}
+
+/** A user's handle on a shared session: close() releases it instead of closing the session. */
+function lease(s: RequestSession, release: () => void): IdentityChannel {
+  return {
+    get extensions() {
+      return s.extensions;
+    },
+    host: (g) => s.host(g),
+    open: (r) => s.open(r),
+    control: (r, start) => s.control(r, start),
+    putControl: (r, head, record) => s.putControl(r, head, record),
+    keyPackages: (r, recipient, epochs) => s.keyPackages(r, recipient, epochs),
+    putKeyPackage: (r, bytes) => s.putKeyPackage(r, bytes),
+    dataUnits: (r, ranges) => s.dataUnits(r, ranges),
+    putDataUnit: (r, bytes) => s.putDataUnit(r, bytes),
+    close: release,
   };
 }
