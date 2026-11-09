@@ -30,7 +30,9 @@ in the wire or storage formats changes.
   exports.
 - A fork the storage already knows about suspends that recovery (§9.7). A
   flow refuses to accept or replace a stored chain while the Resource's
-  conflict marker is set (`IdentityConflict`). Its commits no longer clear
+  conflict marker is set (`IdentityConflict`). The marker is read before
+  every return, after the last read of the chain, including when nothing
+  needs storing. Its commits no longer clear
   the marker, even one another writer records meanwhile:
   `saveControlChain(…, { clearConflict: false })` is a new option, and the
   default still clears. A diverging stored chain is recorded as a conflict
