@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   closeSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -25,8 +27,13 @@ import { isSecretRef, type SecretRef, type SecretStore } from "@openlfcp/storage
  * from a backup) has the keys. OS keychain integration or passphrase
  * encryption is a follow-up.
  *
- * One file per SecretRef, named by the hex of the reference (references
- * are public names, never secret material). A write goes to a temporary
+ * One file per SecretRef, named by the SHA-256 of the reference, in hex
+ * (references are public names, never secret material): 71 ASCII
+ * characters for any reference, within every file system's name limit and
+ * valid on Windows. Before 0.5.3 a file was named by the hex of the whole
+ * reference, which a reference longer than 124 characters could not be
+ * (ENAMETOOLONG); a file under that legacy name is still read, and moved to
+ * its new name when it is read or written (legacyFileName). A write goes to a temporary
  * file that is fsynced, renamed over the target and followed by an fsync
  * of the directory, so a crash leaves the old value or the new one, never
  * a torn file. Windows cannot open a directory for fsync (EPERM, EISDIR or
@@ -79,14 +86,64 @@ export function syncDirectory(
   }
 }
 
-const fileName = (ref: SecretRef): string => `${Buffer.from(ref, "utf8").toString("hex")}.secret`;
+/** The file of a reference: the SHA-256 of its UTF-8 bytes, hex, and `.secret`. */
+export const secretFileName = (ref: SecretRef): string =>
+  `${createHash("sha256").update(ref, "utf8").digest("hex")}.secret`;
+
+/** The longest file name every supported file system takes (NAME_MAX on ext4, APFS, NTFS). */
+const NAME_MAX = 255;
+
+/**
+ * The file name before 0.5.3: the hex of the reference. undefined when
+ * that name is too long to exist (such a reference could never be stored).
+ */
+export function legacyFileName(ref: SecretRef): string | undefined {
+  const name = `${Buffer.from(ref, "utf8").toString("hex")}.secret`;
+  return name.length <= NAME_MAX ? name : undefined;
+}
+
+const code = (e: unknown): unknown => (e as { code?: unknown }).code;
+
+function readIfExists(path: string): Uint8Array | undefined {
+  try {
+    return Uint8Array.from(readFileSync(path));
+  } catch (e) {
+    if (code(e) === "ENOENT") return undefined;
+    throw e;
+  }
+}
+
+function unlinkIfExists(path: string): boolean {
+  try {
+    unlinkSync(path);
+    return true;
+  } catch (e) {
+    if (code(e) === "ENOENT") return false;
+    throw e;
+  }
+}
+
+/** Test seams of FileSecretStore; an application passes none. */
+export interface FileSecretStoreOptions {
+  /** The directory fsync's file operations (syncDirectory). */
+  readonly directorySync?: DirectorySyncOps;
+  /** Called when a read is about to move a legacy file: where another process may act. */
+  readonly beforeMigration?: (ref: SecretRef) => void;
+  /** The hard link of a migration (node:fs linkSync). */
+  readonly link?: (existing: string, created: string) => void;
+}
+
+/** The errors of a file system without hard links. */
+const NO_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"]);
 
 export class FileSecretStore implements SecretStore {
   readonly #dir: string;
+  readonly #options: FileSecretStoreOptions;
   #counter = 0;
 
   /** Creates the directory (0700) if needed and tightens its mode. */
-  constructor(dir: string) {
+  constructor(dir: string, options: FileSecretStoreOptions = {}) {
+    this.#options = options;
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
     if (!statSync(dir).isDirectory())
@@ -99,27 +156,42 @@ export class FileSecretStore implements SecretStore {
   }
 
   #syncDir(): void {
-    syncDirectory(this.#dir);
+    syncDirectory(this.#dir, process.platform, this.#options.directorySync);
+  }
+
+  /** Writes `value` under the reference's file: a fsynced temporary file renamed over it. */
+  #write(ref: SecretRef, value: Uint8Array): void {
+    const name = secretFileName(ref);
+    this.#counter += 1;
+    const temp = join(this.#dir, `.tmp-${process.pid}-${this.#counter}-${name}`);
+    const fd = openSync(temp, "wx", 0o600);
+    try {
+      writeSync(fd, value);
+      fsyncSync(fd);
+    } catch (e) {
+      closeSync(fd);
+      rmSync(temp, { force: true });
+      throw e;
+    }
+    closeSync(fd);
+    renameSync(temp, join(this.#dir, name));
+    this.#syncDir();
+  }
+
+  /**
+   * Removes the legacy file of `ref` once its value is durable under the new
+   * name: a crash in between leaves both, and the new one is read first.
+   */
+  #dropLegacy(ref: SecretRef): void {
+    const legacy = legacyFileName(ref);
+    if (legacy !== undefined && unlinkIfExists(join(this.#dir, legacy))) this.#syncDir();
   }
 
   put(ref: SecretRef, value: Uint8Array): Promise<void> {
     try {
       this.#check(ref);
-      const target = join(this.#dir, fileName(ref));
-      this.#counter += 1;
-      const temp = join(this.#dir, `.tmp-${process.pid}-${this.#counter}-${fileName(ref)}`);
-      const fd = openSync(temp, "wx", 0o600);
-      try {
-        writeSync(fd, value);
-        fsyncSync(fd);
-      } catch (e) {
-        closeSync(fd);
-        rmSync(temp, { force: true });
-        throw e;
-      }
-      closeSync(fd);
-      renameSync(temp, target);
-      this.#syncDir();
+      this.#write(ref, value);
+      this.#dropLegacy(ref);
       return Promise.resolve();
     } catch (e) {
       return Promise.reject(e);
@@ -129,22 +201,60 @@ export class FileSecretStore implements SecretStore {
   get(ref: SecretRef): Promise<Uint8Array | undefined> {
     try {
       this.#check(ref);
-      return Promise.resolve(Uint8Array.from(readFileSync(join(this.#dir, fileName(ref)))));
+      const current = join(this.#dir, secretFileName(ref));
+      const value = readIfExists(current);
+      if (value !== undefined) return Promise.resolve(value);
+      const legacy = legacyFileName(ref);
+      if (legacy === undefined) return Promise.resolve(undefined);
+      return Promise.resolve(this.#migrate(ref, join(this.#dir, legacy), current));
     } catch (e) {
-      if ((e as { code?: unknown }).code === "ENOENT") return Promise.resolve(undefined);
       return Promise.reject(e);
     }
+  }
+
+  /**
+   * Moves a file of 0.5.2 or earlier to its new name with a hard link, which
+   * never replaces an existing file (EEXIST) and fails when the legacy file
+   * is gone (ENOENT): another process on the same directory that wrote or
+   * deleted the secret meanwhile wins, and the caller reads the new name
+   * again. Not a copy: a copy of a value read before such a write would put
+   * the older value back. Then the legacy name goes. Returns the value.
+   *
+   * On a file system without hard links nothing is moved: the legacy value
+   * is returned as read, and the file stays until the next put of the
+   * reference writes the new name and removes it. A copy there could not be
+   * published without replacing a newer file or undoing a delete (no atomic
+   * "create if absent" of a complete file exists without links).
+   */
+  #migrate(ref: SecretRef, legacy: string, current: string): Uint8Array | undefined {
+    this.#options.beforeMigration?.(ref);
+    try {
+      (this.#options.link ?? linkSync)(legacy, current);
+    } catch (e) {
+      const c = code(e);
+      if (c === "EEXIST" || c === "ENOENT") return readIfExists(current);
+      // A put of another process may have written the new name and removed the legacy one.
+      if (NO_LINKS.has(String(c))) return readIfExists(legacy) ?? readIfExists(current);
+      throw e;
+    }
+    this.#syncDir();
+    this.#dropLegacy(ref);
+    return readIfExists(current);
   }
 
   delete(ref: SecretRef): Promise<void> {
     try {
       this.#check(ref);
-      unlinkSync(join(this.#dir, fileName(ref)));
-      this.#syncDir();
+      // The legacy file first, made durable before the new one goes: after a crash of the
+      // machine between them, the new value may remain, never only the older one (which a
+      // read would migrate back).
+      const legacy = legacyFileName(ref);
+      if (legacy !== undefined && unlinkIfExists(join(this.#dir, legacy))) this.#syncDir();
+      if (unlinkIfExists(join(this.#dir, secretFileName(ref)))) this.#syncDir();
+      return Promise.resolve();
     } catch (e) {
-      if ((e as { code?: unknown }).code !== "ENOENT") return Promise.reject(e);
+      return Promise.reject(e);
     }
-    return Promise.resolve();
   }
 
   toJSON(): string {
