@@ -400,6 +400,20 @@ export interface SectionSnapshot {
   };
 }
 
+/**
+ * The position at the end of a section, after its last visible top-level
+ * node (or first, in an empty section): where an application without a
+ * Markdown editor appends a node, e.g. a `task.create_in_section` of a
+ * bridge. `sectionId` is the section's ID (`validate().sectionId`).
+ */
+export function sectionEnd(
+  snapshot: Pick<SectionSnapshot, "order">,
+  sectionId: string,
+): { readonly parent: string; readonly after: string | null } {
+  const top = snapshot.order.filter((e) => e.parent === sectionId);
+  return Object.freeze({ parent: sectionId, after: top.at(-1)?.id ?? null });
+}
+
 /** A batch validated and changed on a copy (SectionReplica.stage): applied only on request. */
 export interface StagedSectionChange {
   readonly change: SectionLocalChange;

@@ -51,6 +51,7 @@ export {
   type SectionSnapshotNode,
   type SectionUnit,
   type StagedSectionChange,
+  sectionEnd,
   type TextEdit,
 } from "./replica.js";
 export {
