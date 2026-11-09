@@ -303,6 +303,19 @@ export interface PhaseOutcome {
 const MAX_HEAD_RETRIES = 8;
 
 /**
+ * A phase's facts to write: those stored now, then the spec's (0.5.2; before,
+ * the spec's replaced them). Facts other calls keep in the phase, such as a
+ * rotation's delivery mark, survive every reclassification.
+ */
+function mergedFacts(
+  stored: JournalPhase | undefined,
+  spec: ControlPhaseSpec,
+): { readonly facts?: Readonly<Record<string, string>> } {
+  if (stored?.facts === undefined && spec.facts === undefined) return {};
+  return { facts: { ...stored?.facts, ...spec.facts } };
+}
+
+/**
  * Runs one Control Plane phase durably (§9.1–§9.3). The phase is
  * classified on the synchronised chain first; while it is `pending`, the
  * exact bytes are persisted before they are sent: the same bytes again
@@ -330,7 +343,9 @@ export async function runControlPhase(
         kind: spec.kind,
         resource: toHex(R),
         state,
-        ...(spec.facts === undefined ? {} : { facts: spec.facts }),
+        // The stored facts as they are now, with the spec's on top: a fact another call
+        // wrote meanwhile (an abandoned delivery, 0.5.2) is kept.
+        ...mergedFacts(phaseOf(await journal.load(operation), spec.id), spec),
         ...(recordId === undefined ? {} : { recordId }),
       });
       return Object.freeze({
@@ -368,7 +383,8 @@ export async function runControlPhase(
         bytes: toHex(bytes),
         expectedHead: head,
         sent: [...sent, id],
-        ...(spec.facts === undefined ? {} : { facts: spec.facts }),
+        // Read after build: what it wrote to the phase's facts stays.
+        ...mergedFacts(phaseOf(await journal.load(operation), spec.id), spec),
       });
     }
     const answer = await channel.putControl(R, chain.state.head, bytes);

@@ -2,7 +2,7 @@ import { type PrincipalId, type ResourceId, toHex } from "@openlfcp/core";
 import { decodeControlRecord, parseKeyPackage, signControlRecord } from "@openlfcp/wire";
 import { describe, expect, test } from "vitest";
 import { deliverKeys, heldDeks, syncChain } from "../../src/identity/context.js";
-import { OperationJournal, PackageLedger } from "../../src/identity/journal.js";
+import { getPendingDek, OperationJournal, PackageLedger } from "../../src/identity/journal.js";
 import { ChannelPool, IdentityUnavailable } from "../../src/identity/network.js";
 import {
   abandonDelivery,
@@ -162,5 +162,80 @@ describe("abandonDelivery and retryDelivery", { timeout: 120_000 }, () => {
     // A row as 0.5.1 writes it: delivery outstanding, nothing else new.
     expect((await outstandingDeliveries(w.P)).length).toBe(1);
     expect((await resume(w.P)).map((o) => o.status)).toEqual(["rotated"]);
+  });
+});
+
+// Review 419 round 2, P3-1 and P3-2 (the reviewer's probes C2 and C1).
+describe("abandon and a rotation of the same phase in flight (review 419 P3-1, P3-2)", {
+  timeout: 120_000,
+}, () => {
+  test("C2: abandoned while a resume of the phase waits on the network: it stays abandoned", async () => {
+    const { w, Y } = await shared();
+    await refusedRotation(w.server, w.P, Y, "rotate.y");
+    // The resume is held at its first network call until the abandon is written.
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let armed = true;
+    const network = {
+      connect: async (...a: Parameters<typeof w.P.network.connect>) => {
+        const ch = await w.P.network.connect(...a);
+        return new Proxy(ch, {
+          get(t, k, r) {
+            const v = Reflect.get(t, k, r) as unknown;
+            if (typeof v !== "function") return v;
+            return async (...args: unknown[]) => {
+              if (armed) {
+                armed = false;
+                await gate;
+              }
+              return (v as (...x: unknown[]) => unknown).apply(t, args);
+            };
+          },
+        });
+      },
+    } as typeof w.P.network;
+    const pool = new ChannelPool(network);
+    const resuming = resumeRotations({ ...w.P, network, pool });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await abandonDelivery({ ...w.P, operation: "rotate.y", resource: Y })).toBe("abandoned");
+    release();
+    await resuming;
+    pool.closeAll();
+    const op = await new OperationJournal(w.P.storage).get("rotate.y");
+    expect(op?.phases.find((p) => p.id.startsWith("rotate:"))?.facts?.delivery).toBe("abandoned");
+    expect(await outstandingDeliveries(w.P)).toEqual([]);
+  });
+
+  test("C1: an abandoned phase rotated again, its KEY_EPOCH answer lost: the new key is adopted and handed on", async () => {
+    const { w, Y } = await shared();
+    await refusedRotation(w.server, w.P, Y, "rotate.y");
+    expect(await abandonDelivery({ ...w.P, operation: "rotate.y", resource: Y })).toBe("abandoned");
+    w.server.fault = (e) =>
+      e.op === "control" && decodeControlRecord(e.bytes).body.type === "KEY_EPOCH"
+        ? "drop-answer"
+        : undefined;
+    const channel = await w.P.network.connect(w.P.installation.signer, URL);
+    const chain = await syncChain(w.P.storage, channel, Y);
+    await expect(
+      rotateAfter({
+        ...w.P,
+        channel,
+        operation: "rotate.y",
+        resource: Y,
+        revokedAt: chain.state.seq,
+      }),
+    ).rejects.toThrow(IdentityUnavailable);
+    w.server.fault = () => undefined;
+    const epoch = w.server.chain(Y).state.epoch.epoch;
+    const op = await new OperationJournal(w.P.storage).get("rotate.y");
+    // The new key change is not the abandoned one.
+    expect(op?.phases.find((p) => p.id.startsWith("rotate:"))?.facts?.delivery).toBeUndefined();
+    expect(await getPendingDek(w.P.secrets, Y, "rotate.y")).toBeDefined();
+    expect((await resume(w.P)).map((o) => o.status)).toEqual(["rotated"]);
+    expect(await getPendingDek(w.P.secrets, Y, "rotate.y")).toBeUndefined();
+    expect((await heldDeks(w.P.secrets, w.server.chain(Y))).has(String(epoch))).toBe(true);
+    expect(hasKey(w.server, Y, id(9), epoch)).toBe(true);
   });
 });

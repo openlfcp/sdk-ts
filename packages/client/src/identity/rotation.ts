@@ -385,8 +385,9 @@ export async function rotateAfter(
     kind: "rotate",
     resource: R,
     // The delivery mark and the Identity Resource survive every reclassification.
+    // Only what this run decides: runControlPhase keeps the phase's other stored facts (the
+    // delivery mark, which another call may set meanwhile: abandoned, 0.5.2).
     facts: {
-      ...prior?.facts,
       revokedAt: String(o.revokedAt),
       ...(identity === undefined ? {} : { identity: toHex(identity.state.resourceId) }),
     },
@@ -413,7 +414,11 @@ export async function rotateAfter(
         deks: await fetchDeks(o.storage, o.secrets, o.channel, chain, o.installation),
         ...profileFor(o, chain),
       });
-      const dek = (await getPendingDek(o.secrets, R, o.operation)) ?? generateResourceDEK();
+      const pending = await getPendingDek(o.secrets, R, o.operation);
+      const dek = pending ?? generateResourceDEK();
+      // A new key change on this phase: an earlier one's delivery mark (an abandoned one
+      // included) is not this one's; it gets its own once committed.
+      if (pending === undefined) await clearDelivery(journal, o.operation, id);
       // The DEK before the record that commits to it (§9.1).
       await putPendingDek(o.secrets, R, o.operation, dek);
       return rotateEpoch(chain.state, me, {
@@ -500,6 +505,14 @@ async function setDelivery(
       ...extra,
     },
   });
+}
+
+/** Removes the delivery mark of the rotation phase `id`, if any (a new key change on it). */
+async function clearDelivery(journal: OperationJournal, operation: string, id: string) {
+  const phase = phaseOf(await journal.load(operation), id);
+  if (phase?.facts?.delivery === undefined) return;
+  const { delivery: _d, epoch: _e, abandonedAt: _a, ...facts } = phase.facts;
+  await journal.putPhase(operation, { ...phase, facts });
 }
 
 /** What abandonDelivery did. */
@@ -783,13 +796,10 @@ export async function resumeRotations(
     for (const phase of op.phases) {
       if (phase.kind !== "rotate" || phase.facts?.revokedAt === undefined) continue;
       const R = resourceId(fromHex(phase.resource));
-      // An abandoned delivery is not resumed (abandonDelivery refuses while a key is pending).
-      if (phase.facts.delivery === "abandoned") continue;
-      if (
-        phase.facts.delivery !== "outstanding" &&
-        (await getPendingDek(o.secrets, R, op.id)) === undefined
-      )
-        continue;
+      // A pending DEK is resumed first, whatever the mark says (§9.1: the KEY_EPOCH may be
+      // committed with the key not adopted); an abandoned delivery is not resumed.
+      const pending = (await getPendingDek(o.secrets, R, op.id)) !== undefined;
+      if (!pending && phase.facts.delivery !== "outstanding") continue;
       const stored = await loadControlChain(o.storage, R);
       if (stored?.kind !== "linear") continue;
       try {
