@@ -511,7 +511,11 @@ async function setDelivery(
 async function clearDelivery(journal: OperationJournal, operation: string, id: string) {
   const phase = phaseOf(await journal.load(operation), id);
   if (phase?.facts?.delivery === undefined) return;
-  const { delivery: _d, epoch: _e, abandonedAt: _a, ...facts } = phase.facts;
+  const facts = Object.fromEntries(
+    Object.entries(phase.facts).filter(
+      ([k]) => k !== "delivery" && k !== "epoch" && k !== "abandonedAt",
+    ),
+  );
   await journal.putPhase(operation, { ...phase, facts });
 }
 
