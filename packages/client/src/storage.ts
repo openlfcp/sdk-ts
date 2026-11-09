@@ -200,11 +200,17 @@ export async function localControlChain(
  * the head (compare-and-set against `expected`), the epoch history (keeping
  * known DEK references), the route, and no conflict. A head that moved
  * meanwhile writes nothing and returns CONTROL_HEAD_MISMATCH.
+ *
+ * `clearConflict: false` (0.5.2) leaves the stored conflict marker out of
+ * the batch: a fork recorded by another writer, even one recorded after the
+ * caller's last read, is never cleared by this commit (§9.7). The default
+ * clears it, as a chosen branch does.
  */
 export async function saveControlChain(
   storage: Pick<LfcpStorage, "control" | "commit">,
   chain: Extract<ChainResult, { kind: "linear" }>,
   expected: ControlRecordId | null,
+  options: { readonly clearConflict?: boolean } = {},
 ): Promise<CommitResult> {
   const s = chain.state;
   const known = new Map(
@@ -253,7 +259,9 @@ export async function saveControlChain(
         source: s.head,
       },
     },
-    { op: "set-control-conflict", resourceId: s.resourceId, conflict: null },
+    ...(options.clearConflict === false
+      ? []
+      : [{ op: "set-control-conflict" as const, resourceId: s.resourceId, conflict: null }]),
   ]);
 }
 

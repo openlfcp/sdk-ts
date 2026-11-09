@@ -178,9 +178,16 @@ export class ControlChainBusy extends IdentityUnavailable {
  * coordinator pushes it to every session). On that local refusal the stored
  * chain is read again: one that already contains `chain` is accepted, one
  * that `chain` extends is replaced (compare-and-set on its head, a bounded
- * number of times: ControlChainBusy), and one that diverges is a fork
- * (ControlChainDiverged). A chain that does not extend `previous` is stored
- * only where nothing newer is (as before 0.5.2: a refusal leaves it).
+ * number of times: ControlChainBusy), and one that diverges is a fork: it is
+ * recorded (the conflict marker, as syncChain records one) before
+ * ControlChainDiverged is thrown. A chain that does not extend `previous`
+ * is stored only where nothing newer is (as before 0.5.2: a refusal leaves
+ * it).
+ *
+ * A fork already recorded for the Resource (§9.7) suspends the flow: the
+ * commits here never clear the conflict marker (even one another writer
+ * records meanwhile), and a marker found after a commit, or before a
+ * stored chain is accepted or replaced, is an IdentityConflict.
  */
 async function storeChain(
   storage: IdentityStorage,
@@ -189,21 +196,53 @@ async function storeChain(
 ): Promise<void> {
   if (previous !== undefined && bytesEqual(previous.state.head, chain.state.head)) return;
   const R = chain.state.resourceId;
+  const forked = async () => {
+    if ((await storage.control.conflict(R)) !== undefined)
+      throw new IdentityConflict(R, "the Control Chain is forked (§9.7)");
+  };
   const prefix = previous !== undefined && isPrefixOf(previous, chain);
   let expected = prefix ? previous.state.head : null;
   for (let attempt = 0; ; attempt++) {
-    const r = await saveControlChain(storage, chain, expected);
-    if (r.ok) return;
+    const r = await saveControlChain(storage, chain, expected, { clearConflict: false });
+    if (r.ok) {
+      await forked();
+      return;
+    }
+    await forked();
     const stored = await loadControlChain(storage, R);
     // Another session stored this chain, or a later one: nothing to store.
     if (stored?.kind === "linear" && isPrefixOf(chain, stored)) return;
     if (!prefix) return;
-    if (stored !== undefined && (stored.kind !== "linear" || !isPrefixOf(stored, chain)))
+    if (stored !== undefined && (stored.kind !== "linear" || !isPrefixOf(stored, chain))) {
+      await recordDivergence(storage, R, chain, stored);
       throw new ControlChainDiverged(R);
+    }
     if (attempt >= STORE_RETRIES) throw new ControlChainBusy(R);
     // An older state of the same chain: store over it.
     expected = stored === undefined ? null : stored.state.head;
   }
+}
+
+/**
+ * Records the fork between `chain` and the stored chain as the Resource's
+ * conflict marker (§9.7), as syncChain does, so that later calls are
+ * suspended too, not only this one.
+ */
+async function recordDivergence(
+  storage: IdentityStorage,
+  R: ResourceId,
+  chain: LinearChain,
+  stored: Exclude<Awaited<ReturnType<typeof loadControlChain>>, undefined>,
+): Promise<void> {
+  const all = new Map<string, Uint8Array>();
+  const storedRecords =
+    stored.kind === "linear"
+      ? stored.records.map((r) => r.signed.bytes)
+      : (await storage.control.records(R)).map((r) => r.bytes);
+  for (const b of [...storedRecords, ...chain.records.map((r) => r.signed.bytes)])
+    all.set(toHex(sha256(b)), b);
+  const both = validateControlChain([...all.values()]);
+  if (both.kind === "conflict") await saveControlConflict(storage, R, both);
 }
 
 /** Validates `chain` extended with `record` (e.g. after an ACK) and stores it. */
