@@ -17,7 +17,10 @@ remove or rename any.
   a pairing. A file is now named by the SHA-256 of the reference (64 hex
   digits and `.secret`). Files written by 0.5.2 or earlier keep working: a
   file under the old name is read, and it is moved to the new name when it
-  is read or written; `delete` removes both.
+  is read or written; `delete` removes both. The move is a hard link, which
+  never replaces a file: a write or delete by another process on the same
+  directory meanwhile wins. `delete` makes the old name's removal durable
+  before it removes the new one.
 
 ## 0.5.2 — 2026-11-09
 

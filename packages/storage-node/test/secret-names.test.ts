@@ -4,7 +4,17 @@
 // stored or even looked up: ENAMETOOLONG. Now the name is the SHA-256 of the
 // reference; files under the old name are read and moved.
 
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pendingDekRef } from "@openlfcp/client";
@@ -87,5 +97,55 @@ describe("FileSecretStore file names", () => {
     expect(legacyFileName(longest)).toBeUndefined();
     expect(legacyFileName(secretRef("resource-dek", "a".repeat(99)))).toBeDefined();
     expect(legacyFileName(secretRef("resource-dek", "a".repeat(100)))).toBeUndefined();
+  });
+});
+
+// Review #26 (r2): two processes on one directory, and the order of deletes on disk.
+describe("FileSecretStore migration against another writer", () => {
+  const ref = secretRef("resource-dek", "cafe.3");
+
+  it("a put that lands while a read migrates the legacy file wins", async () => {
+    writeFileSync(join(dir, legacyFileName(ref) as string), bytes(6), { mode: 0o600 });
+    const other = new FileSecretStore(dir);
+    // The other process writes after this one decided to migrate, before it moves the file.
+    const store = new FileSecretStore(dir, {
+      beforeMigration: () => void other.put(ref, bytes(7)),
+    });
+    expect(await store.get(ref)).toEqual(bytes(7));
+    expect(await new FileSecretStore(dir).get(ref)).toEqual(bytes(7));
+    expect(files()).toEqual([secretFileName(ref)]);
+  });
+
+  it("a delete that lands while a read migrates is not undone", async () => {
+    writeFileSync(join(dir, legacyFileName(ref) as string), bytes(8), { mode: 0o600 });
+    const other = new FileSecretStore(dir);
+    const store = new FileSecretStore(dir, {
+      beforeMigration: () => void other.delete(ref),
+    });
+    expect(await store.get(ref)).toBeUndefined();
+    expect(files()).toEqual([]);
+  });
+
+  it("delete makes the legacy unlink durable before it removes the new name", async () => {
+    const legacy = join(dir, legacyFileName(ref) as string);
+    const current = join(dir, secretFileName(ref));
+    const seen: [boolean, boolean][] = [];
+    const store = new FileSecretStore(dir, {
+      directorySync: {
+        openSync: (p, f) => {
+          seen.push([existsSync(legacy), existsSync(current)]);
+          return openSync(p, f);
+        },
+        fsyncSync,
+        closeSync,
+      },
+    });
+    await store.put(ref, bytes(9));
+    writeFileSync(legacy, bytes(1), { mode: 0o600 });
+    seen.length = 0;
+    await store.delete(ref);
+    // A directory fsync while the legacy name is gone and the new one still there.
+    expect(seen).toContainEqual([false, true]);
+    expect(seen.at(-1)).toEqual([false, false]);
   });
 });
