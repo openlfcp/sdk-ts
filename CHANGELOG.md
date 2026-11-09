@@ -28,6 +28,13 @@ in the wire or storage formats changes.
   "CONTROL_HEAD_MISMATCH"`) when other sessions kept moving the head. Code
   that matched the old message can drop that test. Both classes are new
   exports.
+- A fork the storage already knows about suspends that recovery (§9.7). A
+  flow refuses to accept or replace a stored chain while the Resource's
+  conflict marker is set (`IdentityConflict`). Its commits no longer clear
+  the marker, even one another writer records meanwhile:
+  `saveControlChain(…, { clearConflict: false })` is a new option, and the
+  default still clears. A diverging stored chain is recorded as a conflict
+  before `ControlChainDiverged` is thrown, so later calls are suspended too.
 - `FileSecretStore` (and so `lfcp-node pair`) works on Windows. The
   directory fsync after a secret's rename fails there with EPERM, EISDIR
   or EACCES; on win32 only, those errors are tolerated, because NTFS
