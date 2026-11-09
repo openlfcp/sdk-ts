@@ -233,7 +233,8 @@ export class FileSecretStore implements SecretStore {
     } catch (e) {
       const c = code(e);
       if (c === "EEXIST" || c === "ENOENT") return readIfExists(current);
-      if (NO_LINKS.has(String(c))) return readIfExists(legacy);
+      // A put of another process may have written the new name and removed the legacy one.
+      if (NO_LINKS.has(String(c))) return readIfExists(legacy) ?? readIfExists(current);
       throw e;
     }
     this.#syncDir();
