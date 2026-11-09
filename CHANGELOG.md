@@ -68,6 +68,12 @@ in the wire or storage formats changes.
   - `resendKeys` is "Re-send keys" for one device: it clears this
     installation's ledger for that device and reconciles without rotation.
     It serves Read devices, which cannot write a hint.
+  - A hint is answered once. Reconciliation re-seals a device's hinted
+    epochs, and records the epoch set and the time. It does so again only
+    when the hint changes, or after `HINT_RESEND_BACKOFF_MS` (one day). A
+    hint nobody clears therefore no longer makes every reconciliation seal
+    and upload a new package. `keyHints(o, { unanswered: true })` lists only
+    the hints not answered yet.
 - **Abandoned deliveries** (design 419 (c)):
   - `abandonDelivery` marks an owed delivery, one that keeps being
     refused, as abandoned. It refuses (`pending`) while the rotation's key
@@ -77,6 +83,11 @@ in the wire or storage formats changes.
     `outstandingDeliveries(o, { includeAbandoned: true })` lists them, with
     `abandoned: true`.
   - Reconciliation (§7.1 step 3) is unchanged.
+  - An abandoned mark survives a resume that runs at the same time:
+    `runControlPhase` now writes a phase's facts as those stored when it
+    writes, with its own on top (before, it replaced them).
+  - `resumeRotations` resumes a pending key before it looks at the mark.
+  - A new key change on an abandoned phase clears the mark.
 
 ## 0.5.1 — 2026-11-08
 
