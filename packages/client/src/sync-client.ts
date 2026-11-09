@@ -118,6 +118,7 @@ import {
   loadControlChain,
   saveControlChain,
   saveControlConflict,
+  writeBarrier,
 } from "./storage.js";
 import {
   type AccessState,
@@ -2195,6 +2196,11 @@ export class SyncClient {
     const at =
       verified !== null && bytesEqual(verified.head, view.state.head) ? verified.at : this.#o.now();
     const access = writeAccess(view, this.#o.signer.descriptor.principalId, dek !== undefined, at);
+    // IDENTITY-PROFILE-01 §8.6: this device's revocation was proven here (revocationStatus).
+    // It is permanent (N5) and the device's own chain may never show it: the
+    // server stops its pushes before pushing the record.
+    if ((await writeBarrier(this.#o.storage, resource))?.state === "revocation-proven")
+      return Object.freeze({ ...access, allowed: false, reason: "revoked" as const });
     // LFCP-02-115: the server refuses us the Resource; the local chain is not the last word.
     return refusal === null
       ? access

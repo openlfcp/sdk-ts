@@ -19,6 +19,11 @@ export type WriteDeniedReason =
   | "not-member"
   | "read-only"
   | "key-unavailable"
+  /**
+   * This principal's grant was revoked in the local chain, or (a device of a
+   * person) its revocation was proven here (IDENTITY-PROFILE-01 §8.6, the
+   * write barrier revocationStatus records): permanent.
+   */
   | "revoked"
   | "unknown"
   /**

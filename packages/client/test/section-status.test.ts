@@ -48,6 +48,7 @@ import {
   type StatusEvent,
   SyncClient,
   saveControlChain,
+  setWriteBarrier,
 } from "../src/index.js";
 import { FakeServer, settle } from "./fake-server.js";
 
@@ -913,5 +914,43 @@ describe("a refusal of the Resource (LFCP-02-115)", () => {
     expect(after.access).toMatchObject({ allowed: true, reason: null, serverRefusal: null });
     expect(after.batches.map((b) => b.status)).toEqual(["accepted"]);
     expect(after.catchUp.state).toBe("current-at-checkpoint");
+  });
+  it("a proven revocation of this device is reported as revoked, also when the server lets it in (504, §8.6)", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(235);
+    serve(server, chain);
+    const onServe = server.onMessage;
+    let refusing = true;
+    server.onMessage = (m, s) => {
+      if (refusing && m.type === "RESOURCE_OPEN") {
+        s.reply(m, "NACK", { code: ERROR_CODE.AUTHORIZATION_FAILED });
+        return [];
+      }
+      return onServe(m, s);
+    };
+    const d = await device(server, chain);
+    d.sync.start();
+    await settle(200);
+    await d.sync.idle();
+    expect((await d.sync.canWrite(chain.R)).reason).toBe("server-refused");
+    // revocationStatus proved the revocation and recorded the write barrier.
+    await setWriteBarrier(d.storage, chain.R, {
+      state: "revocation-proven",
+      record: "00".repeat(32),
+      reason: "0",
+    });
+    expect(await d.sync.canWrite(chain.R)).toMatchObject({ allowed: false, reason: "revoked" });
+    // Permanent (N5): a server that answers again changes nothing.
+    refusing = false;
+    d.reopen();
+    await settle(200);
+    await d.sync.idle();
+    expect(await d.sync.canWrite(chain.R)).toMatchObject({ allowed: false, reason: "revoked" });
+    await expect(
+      d.sync.commit(chain.R, ["after"], { operationId: "op-revoked" }),
+    ).rejects.toMatchObject({ code: "NOT_WRITABLE", access: { reason: "revoked" } });
+    // An access-refused barrier is not a proof: the reason stays the server's.
+    await setWriteBarrier(d.storage, chain.R, { state: "access-refused" });
+    expect((await d.sync.canWrite(chain.R)).reason).not.toBe("revoked");
   });
 });
