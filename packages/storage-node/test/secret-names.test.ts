@@ -149,3 +149,38 @@ describe("FileSecretStore migration against another writer", () => {
     expect(seen.at(-1)).toEqual([false, false]);
   });
 });
+
+// Review #26 r2: without hard links a migration cannot publish safely; it does not try.
+describe("FileSecretStore on a file system without hard links", () => {
+  const ref = secretRef("resource-dek", "f00d.4");
+  const noLinks = (during?: () => void) => () => {
+    during?.();
+    throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });
+  };
+
+  it("reads a legacy file without moving it; the next put writes the new name and removes it", async () => {
+    writeFileSync(join(dir, legacyFileName(ref) as string), bytes(10), { mode: 0o600 });
+    const store = new FileSecretStore(dir, { link: noLinks() });
+    expect(await store.get(ref)).toEqual(bytes(10));
+    expect(files()).toEqual([legacyFileName(ref)]);
+    await store.put(ref, bytes(11));
+    expect(files()).toEqual([secretFileName(ref)]);
+    expect(await store.get(ref)).toEqual(bytes(11));
+  });
+
+  it("a put or a delete of another process during the read is never undone", async () => {
+    for (const other of ["put", "delete"] as const) {
+      rmSync(dir, { recursive: true, force: true });
+      dir = mkdtempSync(join(tmpdir(), "lfcp-secret-names-"));
+      writeFileSync(join(dir, legacyFileName(ref) as string), bytes(12), { mode: 0o600 });
+      const them = new FileSecretStore(dir);
+      const store = new FileSecretStore(dir, {
+        link: noLinks(() => void (other === "put" ? them.put(ref, bytes(13)) : them.delete(ref))),
+      });
+      await store.get(ref);
+      const after = await new FileSecretStore(dir).get(ref);
+      expect([other, after]).toEqual([other, other === "put" ? bytes(13) : undefined]);
+      expect(files()).toEqual(other === "put" ? [secretFileName(ref)] : []);
+    }
+  });
+});
