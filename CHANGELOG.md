@@ -4,7 +4,14 @@ All eight `@openlfcp/*` packages are released together, at one version.
 Until 1.0, a minor version may change APIs; a patch version does not
 remove or rename any.
 
-## Unreleased
+## 0.6.0 — 2026-11-11
+
+A minor release for the MVP 0.5 bridge (sdk-ts tasks 503, 504 and 501): the
+public API a headless device needs after pairing, fewer identity WebSockets
+and HTTP 429 told apart, and secret references of any length in
+`FileSecretStore`. No export is removed or renamed and no public union gains
+a variant; `lfcp-node pair` polls with a backoff and stores Resource rows,
+and `canWrite` answers `revoked` once a revocation is proven (Changed).
 
 ### Added
 
