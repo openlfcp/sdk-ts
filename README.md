@@ -335,7 +335,7 @@ building or testing a consumer, and again after changing the SDK.
 
 ## Publication
 
-`0.5.2` is on npm under the `latest` tag (`pnpm add @openlfcp/client`); the
+`0.6.0` is on npm under the `latest` tag (`pnpm add @openlfcp/client`); the
 0.2 betas stay under `beta`.
 
 The packages are named `@openlfcp/*` from the start, but they are published
