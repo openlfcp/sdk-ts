@@ -403,3 +403,27 @@ describe("DataUnitApplier.receiveBatch", () => {
     expect(throwing).toEqual(["a", "b"]);
   });
 });
+
+describe("DataUnitApplier: the Control state at a unit's control_ref (SERVICE-CONTROL-PROFILE-01 §2.3)", () => {
+  it("gives the profile C's state at the unit's head, on receipt and on replay", async () => {
+    const seen: (bigint | undefined)[] = [];
+    const handler: DataProfileHandler<string> = {
+      ...textHandler([]),
+      apply: (unit) => {
+        seen.push(unit.control?.seq);
+        return { merged: [unit.unitId], objects: [], diagnostics: [] };
+      },
+      has: () => false,
+    };
+    const storage = new InMemoryLfcpStorage();
+    const applier = new DataUnitApplier({
+      storage,
+      dek: () => DEK0,
+      handlers: [handler as DataProfileHandler<unknown>],
+    });
+    const [u] = await units("one");
+    await applier.receive(VIEW, (u as { bytes: Uint8Array }).bytes);
+    await applier.replayStored(VIEW);
+    expect(seen).toEqual([VIEW.state.seq, VIEW.state.seq]);
+  });
+});
