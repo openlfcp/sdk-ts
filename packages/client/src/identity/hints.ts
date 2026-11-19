@@ -226,6 +226,14 @@ export async function resendKeys(
   o: IdentityFlowOptions & {
     readonly device: PrincipalId;
     readonly resource?: ResourceId;
+    /**
+     * SERVICE-CONTROL-PROFILE-01 §7.4, passed to reconcileDevices: a client
+     * that implements that profile MUST pass it here too (see
+     * reconcileDevices' `controlResources`).
+     */
+    readonly controlResources?: NonNullable<
+      Parameters<typeof reconcileDevices>[0]["controlResources"]
+    >;
   },
 ): Promise<ResendKeysResult> {
   const cleared = await new PackageLedger(o.storage).clear(o.device, o.resource);

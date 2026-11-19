@@ -81,6 +81,7 @@ import {
   batchStatuses,
   recordEvidence,
   type UnitEvidence,
+  unitAcknowledged,
 } from "./batch-status.js";
 import type { ProfileCheckpointer } from "./checkpoint.js";
 import { readClaimJournal } from "./claim-journal.js";
@@ -939,6 +940,22 @@ export class SyncClient {
     return correlated && onRoute && durability >= ACCEPTANCE_DURABILITY
       ? { kind: "accepted" }
       : { kind: "unconfirmed" };
+  }
+
+  /**
+   * Whether the coordinator acknowledged Data Unit `unitId` of `resource`:
+   * a unit of another actor this client stored was accepted by LFCP before
+   * it reached it; one of this client's own units needs an ACK that named
+   * it (durable acceptance evidence or not), recorded with its evidence
+   * and kept after its receipt is released. A batch's `evidence-unavailable`
+   * alone (a server below durability 2) is not an ACK; a terminal NACK or a
+   * re-offer after a loss takes it back. False for a unit not stored here.
+   */
+  async unitAcknowledged(resource: ResourceId, unitId: DataUnitId): Promise<boolean> {
+    const unit = await this.#o.storage.dataUnits.get(unitId);
+    if (unit === undefined || !bytesEqual(unit.resourceId, resource)) return false;
+    if (!bytesEqual(unit.actor, this.#o.signer.descriptor.principalId)) return unit.accepted;
+    return unitAcknowledged(this.#o.storage, resource, toHex(unitId));
   }
 
   /** Records `evidence` for units (hex) of `resource` and reports the batches it changed. */

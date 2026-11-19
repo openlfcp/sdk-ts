@@ -17,6 +17,7 @@ import { type PrincipalId, type ResourceId, toBase64url, toHex } from "@openlfcp
 import {
   type ControlRecord,
   type ControlState,
+  type DeviceCertificate,
   deviceFingerprint,
   encodePrincipalDescriptor,
   parseControlRecord,
@@ -29,14 +30,18 @@ import {
   type ControlRevocationCause,
   cancelPairing,
   completePairing,
+  controlNames,
   controlRevocationTargets,
   createIdentityResource,
   createPairingSession,
   OperationJournal,
   type PairingRequestValue,
   pairingRequests,
+  reconcileDevices,
   requestPairing,
+  resendKeys,
   resumeApproval,
+  SERVICE_CONTROL_PROFILE_ID,
   type SectionApprovalInput,
   type ServiceControlPort,
   sectionApprovalDecision,
@@ -44,7 +49,13 @@ import {
 import type { Fault, UploadEvent } from "../../packages/client/test/identity/memory-coordinator.js";
 import { MemoryCoordinator } from "../../packages/client/test/identity/memory-coordinator.js";
 import { party, pid, URL } from "../../packages/client/test/identity/support.js";
-import { hostResource, node, pair, world } from "../../packages/client/test/identity/world.js";
+import {
+  addToRoster,
+  hostResource,
+  node,
+  pair,
+  world,
+} from "../../packages/client/test/identity/world.js";
 import { type CommitFault, T0, TestControl } from "./control-port.js";
 
 const uid = (n: number) => `0196f2a0-0000-7000-8000-${String(n).padStart(12, "0")}`;
@@ -54,10 +65,23 @@ const BASE = pid(30);
 const D_N = 7;
 const D = pid(D_N);
 
-async function setup() {
+async function setup(o: { readonly controlInRoster?: boolean; readonly archived?: boolean } = {}) {
   const w = await world(2);
   const [X, Y] = w.resources as unknown as [ResourceId, ResourceId];
-  const control = new TestControl(R);
+  // C hosted and listed in the roster (§1), for the reconciliation order of §7.4.
+  let hosted: ResourceId | undefined;
+  if (o.controlInRoster === true) {
+    const h = await hostResource(w.server, w.P, SERVICE_CONTROL_PROFILE_ID);
+    // An archived entry stays in the roster (IDENTITY §4 rule 6).
+    const entry = {
+      ...h.entry,
+      endpoints: [...h.entry.endpoints],
+      ...(o.archived === true ? { archived: true } : {}),
+    };
+    await addToRoster(w.P, w.I, h.resource, entry);
+    hosted = h.resource;
+  }
+  const control = new TestControl(R, hosted);
   // B, the base installation, approved by fingerprint before (A§4.1).
   control.write(R, "root", [
     {
@@ -802,5 +826,315 @@ describe("a cancel interrupted at each step is finished from the journal (A§4.3
       written: { kind: "acknowledged" },
     });
     expect(cancelsOf(t)).toBe(1);
+  });
+});
+
+describe("the reconciliation order of a client that implements the profile (§7.4)", {
+  timeout: 120_000,
+}, () => {
+  /** D consumed and bound in I (A1, A2), A3 not written: C was not synchronised for it. */
+  async function boundWithoutApproval(o: { readonly archived?: boolean } = {}) {
+    const t = await setup({ controlInRoster: true, ...o });
+    await bridgeRequests(t);
+    servicePairs(t);
+    const [review] = await pairingRequests({ ...t.w.P, session: t.s.session });
+    if (review === undefined) throw new Error("no request");
+    const port = t.control.port(R, "root");
+    const r = await approvePairing({
+      ...t.w.P,
+      review,
+      preset: "service",
+      scope: [t.X],
+      control: { ...port, state: () => undefined },
+      approvalRecord: { role: "section", origin: t.rid, generation: 1 },
+    });
+    expect(r.kind).toBe("approval-record-pending");
+    expect(grantsOf(t, t.X)).toBe(0);
+    return { t, port };
+  }
+  type View = Pick<ServiceControlPort, "state" | "requestHistory" | "acknowledged">;
+  const reconcile = (
+    t: T,
+    view: (r: ResourceId) => View | undefined,
+    only?: readonly ResourceId[],
+  ) =>
+    reconcileDevices({ ...t.w.P, controlResources: view, ...(only === undefined ? {} : { only }) });
+  const viewOf = (t: T, port: View) => (r: ResourceId) =>
+    toHex(r) === toHex(t.control.resource) ? port : undefined;
+  const forX = (t: T, r: Awaited<ReturnType<typeof reconcileDevices>>) =>
+    r.targets.find((x) => toHex(x.resource) === toHex(t.X));
+  const deferredIn = (t: T, r: Awaited<ReturnType<typeof reconcileDevices>>) =>
+    forX(t, r)?.deferred?.map((d) => ref(d.device));
+  const reasonsIn = (t: T, r: Awaited<ReturnType<typeof reconcileDevices>>) =>
+    forX(t, r)?.deferred?.map((d) => d.reason);
+  const names = (t: T, port: Pick<ServiceControlPort, "requestHistory">, I = chainI(t)) => [
+    ...controlNames(I, t.control.resource, port.requestHistory()),
+  ];
+  const chainI = (t: T) => t.w.server.chain(t.w.I);
+  const noApproval = (t: T) =>
+    `the control Resource ${toHex(t.control.resource)} names it and holds no approval for it yet`;
+  /** The approval A3 would have written, by another managing client (here: the root, by hand). */
+  function writeApproval(t: T) {
+    const leaf = chainI(t).state.devices.get(toHex(D))?.chain?.leaf;
+    if (leaf === undefined) throw new Error("D is not bound in I");
+    t.control.write(R, "root", [
+      {
+        intent: "approval.create",
+        approval: {
+          role: "section",
+          resource: toBase64url(t.X),
+          principal: ref(D),
+          certDigest: toBase64url(leaf.payloadDigest),
+          certId: toBase64url(leaf.id),
+          generation: 1,
+          origin: t.rid,
+          at: T0,
+        },
+      },
+    ]);
+  }
+
+  test("C names D without an approval: deferred; once approvals[D] is present: registered", async () => {
+    const { t, port } = await boundWithoutApproval();
+    expect(names(t, port)).toEqual([toHex(D)]);
+    const first = await reconcile(t, viewOf(t, port));
+    expect(deferredIn(t, first)).toEqual([ref(D)]);
+    expect(reasonsIn(t, first)).toEqual([noApproval(t)]);
+    expect(grantsOf(t, t.X)).toBe(0);
+    writeApproval(t);
+    const second = await reconcile(t, viewOf(t, port));
+    expect(forX(t, second)?.deferred).toBeUndefined();
+    expect(grantsOf(t, t.X)).toBe(1);
+  });
+
+  test("a control Resource not synchronised, or not open here: every kind-1 registration waits", async () => {
+    const { t, port } = await boundWithoutApproval();
+    t.control.synchronised = false;
+    const r = await reconcile(t, () => port);
+    expect(forX(t, r)?.deferred?.map((d) => [ref(d.device), d.reason])).toEqual([
+      [ref(D), `the control Resource ${toHex(t.control.resource)} is not synchronised`],
+    ]);
+    t.control.synchronised = true;
+    const closed = await reconcile(t, () => undefined);
+    expect(deferredIn(t, closed)).toEqual([ref(D)]);
+    expect(grantsOf(t, t.X)).toBe(0);
+  });
+
+  test("without controlResources (a client that does not implement the profile) D is registered", async () => {
+    const { t } = await boundWithoutApproval();
+    const r = await reconcileDevices(t.w.P);
+    expect(forX(t, r)?.deferred).toBeUndefined();
+    expect(grantsOf(t, t.X)).toBe(1);
+  });
+
+  test("Re-send keys reconciles through the same gate", async () => {
+    const { t, port } = await boundWithoutApproval();
+    const r = await resendKeys({ ...t.w.P, device: D, controlResources: viewOf(t, port) });
+    expect(
+      r.targets.find((x) => toHex(x.resource) === toHex(t.X))?.deferred?.map((d) => ref(d.device)),
+    ).toEqual([ref(D)]);
+    expect(grantsOf(t, t.X)).toBe(0);
+  });
+
+  // R1: every control Resource of the roster, archived or not, whatever `only` selects.
+  test("an archived C still gates: not open, D waits; synchronised and naming D without an approval, D waits", async () => {
+    const { t, port } = await boundWithoutApproval({ archived: true });
+    const closed = await reconcile(t, () => undefined);
+    expect(reasonsIn(t, closed)).toEqual([
+      `the control Resource ${toHex(t.control.resource)} is not synchronised`,
+    ]);
+    const open = await reconcile(t, viewOf(t, port));
+    expect(reasonsIn(t, open)).toEqual([noApproval(t)]);
+    expect(grantsOf(t, t.X)).toBe(0);
+    writeApproval(t);
+    expect(forX(t, await reconcile(t, viewOf(t, port)))?.deferred).toBeUndefined();
+    expect(grantsOf(t, t.X)).toBe(1);
+  });
+
+  test("`only` without C reconciles X alone, and C still gates D's registration there", async () => {
+    const { t, port } = await boundWithoutApproval();
+    const r = await reconcile(t, viewOf(t, port), [t.X]);
+    expect(r.targets.map((x) => toHex(x.resource))).toEqual([toHex(t.X)]);
+    expect(reasonsIn(t, r)).toEqual([noApproval(t)]);
+    const closed = await reconcile(t, () => undefined, [t.X]);
+    expect(deferredIn(t, closed)).toEqual([ref(D)]);
+    expect(grantsOf(t, t.X)).toBe(0);
+  });
+
+  // R2: the requests of C's history, by their creator; the Principal from I's chain only.
+  test("A3 missing, the service writes a final failed and deletes requests[rid]: D still waits", async () => {
+    const { t, port } = await boundWithoutApproval();
+    t.control.write(BASE, "service-device", [
+      { intent: "event.put", id: t.rid, state: "failed", code: "not_permitted", at: T0 },
+    ]);
+    t.control.write(BASE, "service-device", [
+      { intent: "delete", container: "requests", key: t.rid },
+    ]);
+    const state = t.control.replica.validate();
+    expect(state.requests[t.rid]).toBeUndefined();
+    expect(state.pairing[t.rid]?.principal).toBe(ref(D));
+    expect(port.requestHistory().map((h) => [h.rid, h.present])).toEqual([[t.rid, false]]);
+    expect(names(t, port)).toEqual([toHex(D)]);
+    const r = await reconcile(t, viewOf(t, port));
+    expect(reasonsIn(t, r)).toEqual([noApproval(t)]);
+    expect(grantsOf(t, t.X)).toBe(0);
+  });
+
+  test("a request not created by root or personal names nothing: D is registered", async () => {
+    const { t, port } = await boundWithoutApproval();
+    for (const writerClass of ["service", "other"] as const) {
+      const forged: View = {
+        ...port,
+        requestHistory: () =>
+          port
+            .requestHistory()
+            .map((h) => ({ ...h, creators: h.creators.map((c) => ({ ...c, writerClass })) })),
+      };
+      expect(names(t, forged), writerClass).toEqual([]);
+    }
+    const forged: View = {
+      ...port,
+      requestHistory: () =>
+        port.requestHistory().map((h) => ({
+          ...h,
+          creators: h.creators.map((c) => ({ ...c, writerClass: "service" as const })),
+        })),
+    };
+    const r = await reconcile(t, viewOf(t, forged));
+    expect(forX(t, r)?.deferred).toBeUndefined();
+    expect(grantsOf(t, t.X)).toBe(1);
+  });
+
+  test("pairing[rid] naming a device the chain does not prove for rid defers nothing (ignored)", async () => {
+    const t = await setup({ controlInRoster: true });
+    // D pairs through another session J2, which no request of C names; pairing[rid] (whose
+    // request links the J of t.s, never consumed) names D all the same.
+    const s2 = await createPairingSession(t.w.P);
+    if (s2.kind !== "created") throw new Error(s2.kind);
+    const asked = await requestPairing({
+      ...t.bridge,
+      link: s2.link,
+      label: "Reminders · Groceries",
+      kind: 1,
+      scope: [t.X],
+    });
+    if (asked.kind !== "requested") throw new Error(asked.kind);
+    servicePairs(t);
+    const [review] = await pairingRequests({ ...t.w.P, session: s2.session });
+    if (review === undefined) throw new Error("no request");
+    const port = t.control.port(R, "root");
+    const r = await approvePairing({
+      ...t.w.P,
+      review,
+      preset: "service",
+      scope: [t.X],
+      control: { ...port, state: () => undefined },
+      approvalRecord: { role: "section", origin: t.rid, generation: 1 },
+    });
+    expect(r.kind).toBe("approval-record-pending");
+    expect(t.control.replica.validate().pairing[t.rid]?.principal).toBe(ref(D));
+    expect(chainI(t).state.devices.has(toHex(D))).toBe(true);
+    expect(names(t, port)).toEqual([]);
+    const done = await reconcile(t, viewOf(t, port));
+    expect(forX(t, done)?.deferred).toBeUndefined();
+    expect(grantsOf(t, t.X)).toBe(1);
+  });
+
+  // R3: A3 counts once the server accepted it.
+  test("this client's A3 queued: D deferred, no DEVICE_GRANT in X; once acknowledged: registered", async () => {
+    const t = await setup({ controlInRoster: true });
+    await bridgeRequests(t);
+    servicePairs(t);
+    const port = t.control.port(R, "root", () => "queued");
+    expect(await approve(t, port)).toMatchObject({
+      kind: "approval",
+      approval: { kind: "approval-record-pending" },
+    });
+    // Present in this client's state, not accepted by the coordinator.
+    expect(t.control.replica.validate().approvals[ref(D)]).toBeDefined();
+    expect(await port.acknowledged("approvals", ref(D))).toBe(false);
+    const queued = await reconcile(t, viewOf(t, port));
+    expect(reasonsIn(t, queued)).toEqual([
+      `the control Resource ${toHex(t.control.resource)} names it and its approval for it is not accepted by the server yet`,
+    ]);
+    expect(grantsOf(t, t.X)).toBe(0);
+    t.control.acknowledge();
+    expect(await port.acknowledged("approvals", ref(D))).toBe(true);
+    const acked = await reconcile(t, viewOf(t, port));
+    expect(forX(t, acked)?.deferred).toBeUndefined();
+    expect(grantsOf(t, t.X)).toBe(1);
+  });
+
+  // Conditions 2 and 3 of the Section rule, each broken in I's chain as the reconciler reads it.
+  test("C does not name D when the chain breaks condition 2 or 3", async () => {
+    const { t, port } = await boundWithoutApproval();
+    const I = chainI(t);
+    expect(names(t, port, I)).toEqual([toHex(D)]);
+    const J = t.s.pairingDevice;
+    type Leaf = DeviceCertificate;
+    const withLeaf = (patch: (leaf: Leaf) => Leaf): typeof I => ({
+      ...I,
+      records: I.records.map((r) =>
+        r.body.type === "DEVICE_GRANT" &&
+        r.body.pairingDevice !== undefined &&
+        r.body.pairingDevice !== null &&
+        toHex(r.body.pairingDevice) === toHex(J)
+          ? ({
+              ...r,
+              body: { ...r.body, chain: { ...r.body.chain, leaf: patch(r.body.chain.leaf) } },
+            } as typeof r)
+          : r,
+      ),
+    });
+    const withConsume = (
+      patch: (v: NonNullable<ReturnType<typeof I.state.revoked.get>>) => unknown,
+    ): typeof I => ({
+      ...I,
+      state: {
+        ...I.state,
+        revoked: new Map(
+          [...I.state.revoked].map(([k, v]) => [k, k.endsWith(toHex(J)) ? patch(v) : v]),
+        ) as typeof I.state.revoked,
+      },
+    });
+    const other = new Uint8Array(32).fill(0xee);
+    const cases: [string, typeof I][] = [
+      ["J revoked with reason 0, not consumed", withConsume((v) => ({ ...v, reason: 0n }))],
+      ["the consume carries another digest", withConsume((v) => ({ ...v, approval: other }))],
+      [
+        "the granted leaf has another digest",
+        withLeaf((l) => ({ ...l, payloadDigest: other as typeof l.payloadDigest })),
+      ],
+      [
+        "scope is not [X]",
+        withLeaf((l) => ({ ...l, payload: { ...l.payload, scope: [t.X, t.Y] } })),
+      ],
+      ["scope is [Y]", withLeaf((l) => ({ ...l, payload: { ...l.payload, scope: [t.Y] } }))],
+      ["kind is not 1", withLeaf((l) => ({ ...l, payload: { ...l.payload, kind: 0 } }))],
+      ["another mask", withLeaf((l) => ({ ...l, payload: { ...l.payload, mask: [1n] } }))],
+      [
+        "mask {1, 2, 3}",
+        withLeaf((l) => ({ ...l, payload: { ...l.payload, mask: [1n, 2n, 3n] } })),
+      ],
+      [
+        "another root",
+        withLeaf((l) => ({
+          ...l,
+          payload: { ...l.payload, root: other as typeof l.payload.root },
+        })),
+      ],
+    ];
+    for (const [why, chain] of cases) expect(names(t, port, chain), why).toEqual([]);
+    // Condition 1: the request's binding is not the granted scope, or it is not pair-section.
+    for (const [why, patch] of [
+      ["binding = Y", { binding: toBase64url(t.Y) }],
+      ["op = preview", { op: "preview" }],
+      ["a link without a pairing device", { args: { link: "lfcp-pair:nothing" } }],
+    ] as const) {
+      const history = port
+        .requestHistory()
+        .map((h) => ({ ...h, request: { ...h.request, ...patch } }));
+      expect([...controlNames(I, t.control.resource, history)], why).toEqual([]);
+    }
   });
 });

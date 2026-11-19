@@ -1,10 +1,11 @@
-import { type PrincipalId, toHex } from "@openlfcp/core";
+import { dataUnitId, type PrincipalId, resourceId, toHex } from "@openlfcp/core";
 import { describe, expect, test } from "vitest";
 import { fetchDeks, loadIdentityDocument, syncChain } from "../../src/identity/context.js";
 import { resourceRef } from "../../src/identity/document.js";
 import {
   createServiceControl,
   SERVICE_CONTROL_PROFILE,
+  serviceControlPort,
   serviceControlRosterName,
   serviceControlSignerFacts,
 } from "../../src/service-control.js";
@@ -85,5 +86,54 @@ describe("serviceControlSignerFacts (§2.3 at control_ref)", () => {
     const facts = serviceControlSignerFacts(state, A.installation.signer.descriptor.principalId);
     expect(facts.device).toEqual({ kind: 0, root: id(1), boundInC: true, active: true });
     expect(serviceControlSignerFacts(state, id(9)).device).toBeUndefined();
+  });
+});
+
+describe("serviceControlPort.acknowledged (SERVICE-CONTROL-PROFILE-01 §7.1, IDENTITY §9.1)", () => {
+  const unit = (n: number) => dataUnitId(new Uint8Array(32).fill(n));
+  /** A port whose entry was created by changes carried by `creators` (hash → units), `acked` the units ACKed. */
+  function portWith(creators: Record<string, readonly number[]>, acked: readonly number[]) {
+    const resource = resourceId(new Uint8Array(32).fill(9));
+    const asked: string[] = [];
+    const port = serviceControlPort({
+      resource,
+      client: {
+        commit: async () => ({}) as never,
+        statusSnapshot: async () => ({ batches: [] }) as never,
+        unitAcknowledged: async (r, u) => {
+          expect(toHex(r)).toBe(toHex(resource));
+          asked.push(toHex(u));
+          return acked.some((n) => toHex(unit(n)) === toHex(u));
+        },
+      },
+      profile: {
+        state: () => ({ approvals: {}, requests: {}, pairing: {}, cancels: {} }),
+        replica: {
+          creatorsOf: () =>
+            Object.keys(creators).map((hash) => ({
+              hash,
+              signer: id(1),
+              writerClass: "root" as const,
+            })),
+          requestHistory: () => [],
+        },
+        unitsOf: (hash) => (creators[hash] ?? []).map(unit),
+      },
+    });
+    return { port, asked };
+  }
+
+  test("only an acknowledged unit of a creating change counts", async () => {
+    const key = "p:x";
+    expect(await portWith({ a: [1] }, []).port.acknowledged("approvals", key)).toBe(false);
+    expect(await portWith({ a: [1] }, [1]).port.acknowledged("approvals", key)).toBe(true);
+    // Staged, not committed yet: no unit carries it.
+    expect(await portWith({ a: [] }, [1]).port.acknowledged("approvals", key)).toBe(false);
+    // No value.
+    expect(await portWith({}, [1]).port.acknowledged("approvals", key)).toBe(false);
+    // Two equal approvals (§5 rule 3): another client's acknowledged one counts.
+    const two = portWith({ a: [1], b: [3] }, [3]);
+    expect(await two.port.acknowledged("approvals", key)).toBe(true);
+    expect(two.asked).toEqual([toHex(unit(1)), toHex(unit(3))]);
   });
 });

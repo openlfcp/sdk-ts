@@ -27,6 +27,13 @@ export class TestControl {
   /** A shared event log the test also appends identity uploads to, to check A3 before A4. */
   readonly events: string[] = [];
   synchronised = true;
+  /**
+   * Changes committed through a port whose commit reported `queued`: durable
+   * at the writer, not accepted by the coordinator yet (§9.1). A later
+   * commit of the same operation that is acknowledged, or acknowledge(),
+   * accepts them.
+   */
+  readonly unacknowledged = new Set<string>();
 
   constructor(
     readonly root: PrincipalId,
@@ -50,35 +57,49 @@ export class TestControl {
     return this.replica.write({ signer, signerClass: cls, actorSeq }, intents);
   }
 
+  /** The coordinator accepts every change still queued (the held DATA_PUT goes out). */
+  acknowledge(): void {
+    this.unacknowledged.clear();
+  }
+
   /** The approving client's port: its writes are of class `cls`, each operation committed once. */
   port(
     who: PrincipalId,
     cls: ServiceControlSignerClass,
     fault: () => CommitFault = () => undefined,
   ): ServiceControlPort {
-    const done = new Map<string, string>();
+    const done = new Map<string, { intents: string; hash: string | undefined }>();
     return {
       resource: this.resource,
       state: () => (this.synchronised ? this.replica.validate() : undefined),
       creatorsOf: (container, key): readonly ServiceControlCreator[] =>
         this.replica.creatorsOf(container, key),
+      requestHistory: () => this.replica.requestHistory(),
+      acknowledged: async (container, key) =>
+        this.replica.creatorsOf(container, key).some((c) => !this.unacknowledged.has(c.hash)),
       commit: async (intents, operation): Promise<ServiceControlCommitOutcome> => {
         const f = fault();
         if (f === "crash-before-commit") throw new Error("crashed before the commit");
-        const known = done.get(operation);
+        let known = done.get(operation);
         if (known === undefined) {
           const list = intents as readonly ServiceControlIntent[];
+          let hash: string | undefined;
           try {
-            this.write(who, cls, list);
+            hash = this.write(who, cls, list)?.hash;
           } catch (e) {
             const diagnostic = (e as { diagnostic?: string }).diagnostic;
             if (diagnostic !== undefined) return { kind: "rejected", code: diagnostic };
             throw e;
           }
-          done.set(operation, JSON.stringify(list));
+          known = { intents: JSON.stringify(list), hash };
+          done.set(operation, known);
+          if (hash !== undefined) this.unacknowledged.add(hash);
           this.log.push({ who: cls, operation, intents: list.map((i) => i.intent) });
           this.events.push(`C:${list.map((i) => i.intent).join(",")}`);
-        } else if (known !== JSON.stringify(intents)) throw new Error("operation ID reused");
+        } else if (known.intents !== JSON.stringify(intents))
+          throw new Error("operation ID reused");
+        if (f === "crash-after-commit" || f === undefined)
+          if (known.hash !== undefined) this.unacknowledged.delete(known.hash);
         if (f === "crash-after-commit") throw new Error("crashed after the commit");
         return f === "queued" ? { kind: "queued" } : { kind: "acknowledged" };
       },

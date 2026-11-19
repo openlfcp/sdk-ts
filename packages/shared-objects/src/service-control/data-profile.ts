@@ -323,6 +323,19 @@ export class ServiceControlDataProfile {
     });
   }
 
+  /**
+   * The Data Units that carry the change `hash` here (a unit received, or
+   * this writer's own once its commit stored it): what a batch's receipt
+   * names, so a client can tell whether the server accepted the change.
+   * Empty for a change no unit carries yet (staged, not committed).
+   */
+  unitsOf(hash: string): readonly DataUnitId[] {
+    const out: DataUnitId[] = [];
+    for (const index of [this.#merged, this.#pending, this.#held])
+      for (const w of index.values()) if (w.hash === hash) out.push(w.unitId);
+    return Object.freeze(out);
+  }
+
   has(unitId: DataUnitId): boolean {
     const k = toHex(unitId);
     return this.#merged.has(k) || this.#pending.has(k) || this.#held.has(k);

@@ -1,13 +1,15 @@
 import {
   bytesEqual,
   fromBase64url,
+  fromHex,
   type PrincipalId,
   type ResourceId,
   toBase64url,
   toHex,
 } from "@openlfcp/core";
-import { type ControlState, DEVICE_KIND, revocationOf } from "@openlfcp/wire";
+import { type ControlState, DEVICE_KIND, parsePairingUri, revocationOf } from "@openlfcp/wire";
 import { type PairingRequestValue, principalOfRef, principalRefOf } from "./document.js";
+import type { LinearChain } from "./phases.js";
 
 /**
  * The approving client's side of a service managed through a control
@@ -63,6 +65,16 @@ export interface ServiceControlStateView {
   readonly lifecycle?: Readonly<Record<string, unknown>>;
 }
 
+/** One value `requests[rid]` held in `C`'s history (structurally shared-objects' ServiceControlRequestRecord). */
+export interface ServiceControlRequestRecord {
+  readonly rid: string;
+  readonly request: ServiceControlStateView["requests"][string];
+  /** Whether the entry is in the state readers see now (false: deleted since). */
+  readonly present?: boolean;
+  /** §2.4: the change that created the value. */
+  readonly creators: readonly ServiceControlCreator[];
+}
+
 /** What committing one change to `C` came to (§9.1: the A3 phase is done once it is acknowledged). */
 export type ServiceControlCommitOutcome =
   /** The coordinator acknowledged the change's unit. */
@@ -81,6 +93,25 @@ export interface ServiceControlPort {
     container: "approvals" | "pairing" | "requests" | "cancels",
     key: string,
   ): readonly ServiceControlCreator[];
+  /**
+   * Every value `requests[rid]` has held in `C`'s accepted history, deleted
+   * ones included, each with the change that created it (§2.4); a value
+   * §5 finds invalid, a conflicted one included (rule 3), is left out
+   * (ServiceControlReplica.requestHistory). §7.4 condition 1 reads it.
+   */
+  requestHistory(): readonly ServiceControlRequestRecord[];
+  /**
+   * Whether the coordinator accepted a change that created the current
+   * value of `container[key]` (§7.1, IDENTITY §9.1: a phase ends at its
+   * ACK). False when there is no value, or when every change that created
+   * it is this client's own, queued or pending (its batch not accepted or
+   * acknowledged yet, as commit reports it). A change received from the
+   * coordinator is accepted.
+   */
+  acknowledged(
+    container: "approvals" | "pairing" | "requests" | "cancels",
+    key: string,
+  ): Promise<boolean>;
   /**
    * Commits `intents` (shared-objects' ServiceControlIntent) as one change
    * under `operationId`. The same operation with the same intents writes
@@ -347,4 +378,119 @@ function refusal(
   for (const other of i.identity.devices.values())
     if (other.issuers.some((e) => bytesEqual(e, P))) return "it has issued a certificate";
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Reconciliation order (SERVICE-CONTROL-PROFILE-01 §7.4, IDENTITY-PROFILE-01 §7.1 step 2)
+
+/** SERVICE-CONTROL-PROFILE-01's Data Profile identifier, as the roster names it. */
+export const SERVICE_CONTROL_PROFILE_ID = "org.openlfcp.service-control.v1";
+
+/** A control Resource of the roster, and this client's view of it (undefined: not open here). */
+export interface RosterControl {
+  readonly resource: ResourceId;
+  readonly control?: Pick<ServiceControlPort, "state" | "requestHistory" | "acknowledged">;
+}
+
+/**
+ * The kind-1 devices `C` names (§7.4 "Reconciliation order"): a device
+ * whose scope is exactly `[C]` (a base installation), or one proven by
+ * conditions 1 to 3 of the Section rule for some value `requests[rid]` of
+ * `C` held now or in its history (`requests`: ServiceControlPort's
+ * requestHistory): a `pair-section` request created by `root` or
+ * `personal` (§2.4) whose link names a pairing device `J` of `R`, consumed
+ * in `I` with digest `d`, and a `DEVICE_GRANT` of `I` with field 2 = `J`
+ * binding a leaf with digest `d`, kind 1, root `R`, mask {1, 2}, scope
+ * exactly `[X]` (the request's binding). A request deleted from `C` still
+ * names its device: the service deletes a request once its event is final
+ * with any final state (§3), `failed` before A3 included. The Principal
+ * comes from `I`'s chain through `J`; `pairing[rid]` is never read (§5
+ * rule 4), and one whose principal is not so proven defers nothing.
+ */
+export function controlNames(
+  identity: LinearChain,
+  C: ResourceId,
+  requests: readonly ServiceControlRequestRecord[],
+): ReadonlySet<string> {
+  const I = identity.state;
+  const R = I.owner.principalId;
+  const out = new Set<string>();
+  for (const [hex, d] of I.devices)
+    if (
+      d.kind === DEVICE_KIND.SERVICE &&
+      bytesEqual(d.root, R) &&
+      d.scope.length === 1 &&
+      bytesEqual(d.scope[0] as ResourceId, C)
+    )
+      out.add(hex);
+  for (const { request, creators } of requests) {
+    if (request.op !== "pair-section" || typeof request.binding !== "string") continue;
+    if (!createdBy(creators, ["root", "personal"])) continue;
+    let J: PrincipalId;
+    try {
+      J = parsePairingUri(String(request.args.link)).pairingDevice;
+    } catch {
+      continue;
+    }
+    const consumed = revocationOf(I, R, J);
+    if (consumed?.reason !== 3n || consumed.approval === null || consumed.approval === undefined)
+      continue;
+    for (const r of identity.records) {
+      if (r.body.type !== "DEVICE_GRANT" || r.body.pairingDevice === undefined) continue;
+      if (r.body.pairingDevice === null || !bytesEqual(r.body.pairingDevice, J)) continue;
+      const leaf = r.body.chain.leaf;
+      const p = leaf.payload;
+      if (
+        bytesEqual(leaf.payloadDigest, consumed.approval) &&
+        p.kind === DEVICE_KIND.SERVICE &&
+        bytesEqual(p.root, R) &&
+        p.mask.length === 2 &&
+        p.mask.includes(1n) &&
+        p.mask.includes(2n) &&
+        p.scope.length === 1 &&
+        toBase64url(p.scope[0] as ResourceId) === request.binding
+      )
+        out.add(toHex(p.device.principalId));
+    }
+  }
+  return out;
+}
+
+/**
+ * §7.4 for a reconciler that implements the profile: why the registration
+ * of kind-1 device `P` is deferred, or undefined when it may go ahead.
+ * Every control Resource of the roster must be synchronised (one not open
+ * or not synchronised defers every kind-1 registration); when one names
+ * `P`, its `approvals[P]` must be present there and accepted by the server
+ * (§7.1: A3 before A4 for every client of the profile; IDENTITY §9.1: a
+ * phase ends at its ACK). This client's own approval still queued or
+ * pending defers, as an absent one does.
+ */
+export async function controlRegistrationGate(
+  identity: LinearChain,
+  controls: readonly RosterControl[],
+): Promise<(device: PrincipalId) => string | undefined> {
+  const waiting = new Map<string, string>();
+  for (const c of controls) {
+    const state = c.control?.state();
+    if (c.control === undefined || state === undefined) {
+      const why = `the control Resource ${toHex(c.resource)} is not synchronised`;
+      return () => why;
+    }
+    for (const hex of controlNames(identity, c.resource, c.control.requestHistory())) {
+      if (waiting.has(hex)) continue;
+      const P = principalRefOf(fromHex(hex) as PrincipalId);
+      if (state.approvals[P] === undefined)
+        waiting.set(
+          hex,
+          `the control Resource ${toHex(c.resource)} names it and holds no approval for it yet`,
+        );
+      else if (!(await c.control.acknowledged("approvals", P)))
+        waiting.set(
+          hex,
+          `the control Resource ${toHex(c.resource)} names it and its approval for it is not accepted by the server yet`,
+        );
+    }
+  }
+  return (device) => waiting.get(toHex(device));
 }

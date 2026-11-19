@@ -1,5 +1,6 @@
 import {
   bytesEqual,
+  type DataUnitId,
   dataEpoch,
   fromHex,
   generateResourceId,
@@ -20,7 +21,9 @@ import { createResourceAsDevice, type DeviceCreateResult } from "./identity/acce
 import { storeDek, syncChain } from "./identity/context.js";
 import type {
   ServiceControlCommitOutcome,
+  ServiceControlCreator,
   ServiceControlPort,
+  ServiceControlRequestRecord,
   ServiceControlStateView,
 } from "./identity/control-approval.js";
 import { newOperationId, OperationJournal, phaseOf } from "./identity/journal.js";
@@ -294,17 +297,31 @@ async function createAsRoot(
 /**
  * A ServiceControlPort over a SyncClient that has `C` open with
  * shared-objects' ServiceControlDataProfile: the state readers see, who
- * created an entry (ServiceControlReplica.creatorsOf), and commits with
- * receipts. A committed change is `acknowledged` once its batch is
- * accepted, or acknowledged by a server without acceptance evidence
- * (`evidence-unavailable`); a change admission refuses before anything is
- * queued (§4) is `rejected` with its diagnostic.
+ * created an entry (ServiceControlReplica.creatorsOf), the request history
+ * (ServiceControlReplica.requestHistory), and commits with receipts. A
+ * committed change is `acknowledged` once the server acknowledged every
+ * unit carrying it (SyncClient.unitAcknowledged: an ACK that named the
+ * unit, durable acceptance evidence or not; a batch's
+ * `evidence-unavailable` alone is no ACK); a change admission refuses
+ * before anything is queued (§4) is `rejected` with its diagnostic, as is
+ * one a terminal NACK refused. `acknowledged(container, key)` holds once
+ * a unit carrying a change that created the entry
+ * (ServiceControlDataProfile.unitsOf) is acknowledged: by an ACK recorded
+ * here for this client's own unit, kept after its receipt is released, or
+ * as a unit of another writer received from the coordinator.
  */
 export function serviceControlPort(o: {
-  readonly client: Pick<SyncClient, "commit" | "statusSnapshot">;
+  readonly client: Pick<SyncClient, "commit" | "statusSnapshot" | "unitAcknowledged">;
   readonly profile: {
     state(): ServiceControlStateView & { readonly usable?: boolean };
-    readonly replica: Pick<ServiceControlPort, "creatorsOf">;
+    readonly replica: {
+      creatorsOf(
+        container: Parameters<ServiceControlPort["creatorsOf"]>[0],
+        key: string,
+      ): readonly (ServiceControlCreator & { readonly hash: string })[];
+      requestHistory(): readonly ServiceControlRequestRecord[];
+    };
+    unitsOf(hash: string): readonly DataUnitId[];
   };
   readonly resource: ResourceId;
   /** Whether `C` is synchronised (e.g. resourceState(C) === "LIVE"); always, by default. */
@@ -319,12 +336,23 @@ export function serviceControlPort(o: {
     },
     creatorsOf: (container: Parameters<ServiceControlPort["creatorsOf"]>[0], key: string) =>
       o.profile.replica.creatorsOf(container, key),
+    requestHistory: () => o.profile.replica.requestHistory(),
+    acknowledged: async (
+      container: Parameters<ServiceControlPort["creatorsOf"]>[0],
+      key: string,
+    ): Promise<boolean> => {
+      for (const c of o.profile.replica.creatorsOf(container, key))
+        for (const u of o.profile.unitsOf(c.hash))
+          if (await o.client.unitAcknowledged(o.resource, u)) return true;
+      return false;
+    },
     commit: async (
       intents: readonly unknown[],
       operationId: string,
     ): Promise<ServiceControlCommitOutcome> => {
+      let units: readonly DataUnitId[];
       try {
-        await o.client.commit(o.resource, intents, { operationId });
+        units = (await o.client.commit(o.resource, intents, { operationId })).unitIds;
       } catch (e) {
         const diagnostic = (e as { diagnostic?: unknown } | null)?.diagnostic;
         if (typeof diagnostic === "string") return { kind: "rejected", code: diagnostic };
@@ -335,9 +363,10 @@ export function serviceControlPort(o: {
       );
       if (batch?.status === "rejected")
         return { kind: "rejected", code: batch.rejection?.code ?? "rejected" };
-      return batch?.status === "accepted" || batch?.status === "evidence-unavailable"
-        ? { kind: "acknowledged" }
-        : { kind: "queued" };
+      if (units.length === 0) return { kind: "queued" };
+      for (const u of units)
+        if (!(await o.client.unitAcknowledged(o.resource, u))) return { kind: "queued" };
+      return { kind: "acknowledged" };
     },
   });
 }
