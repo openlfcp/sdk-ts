@@ -27,7 +27,8 @@ export interface ServiceControlCleanupOptions {
  * and its pairing entry when §3 lets that go too (the approval is present,
  * or the request was cancelled or rejected), from its final event's time;
  * one per settled question, once it and every answer to it are old enough:
- * the question, its answers and their final events; answers and pairing
+ * the question, its answers and their final events (an answer whose event
+ * is not final, or that has none yet, holds its question); answers and pairing
  * entries left behind once §3 allows it. Deletion removes nothing
  * from history (SOP §56) and is never a deduplication boundary (§10): the
  * service keeps its execution records.
@@ -70,16 +71,16 @@ export function serviceControlCleanup(
   const answersOf = new Map<string, string[]>();
   for (const [aid, a] of Object.entries(state.answers))
     answersOf.set(a.qid, [...(answersOf.get(a.qid) ?? []), aid]);
-  // An answer is settled when its event is final (at that event's time), or
-  // when it has no event at all (at its own time); never while its event runs.
+  // An answer is settled when its event is final, at that event's time (§9:
+  // from when it became final). Without a final event it is not settled,
+  // whether its event still runs or the service has not written one yet: the
+  // answer's own time is when it was created, never when it became final.
   const answerSettledAt = (aid: string) => {
     const a = state.answers[aid];
     if (a === undefined) return undefined;
-    if (state.events[aid] === undefined) return a.at;
     return latest(a.at, final(aid)?.at);
   };
-  const answerChange = (aid: string) =>
-    final(aid) === undefined ? [del("answers", aid)] : [del("answers", aid), del("events", aid)];
+  const answerChange = (aid: string) => [del("answers", aid), del("events", aid)];
   for (const [qid, q] of Object.entries(state.questions)) {
     // `superseded` carries no time (§2.1): only the service's own record says when.
     const settledAt =

@@ -381,6 +381,33 @@ describe("SERVICE-CONTROL-PROFILE-01 §9: 7 days from becoming final, not from c
     expect(serviceControlCleanup(c.validate(), Date.parse(at(17)))).toHaveLength(1);
   });
 
+  it("an answer without a final event holds its question until its own event is final (PB-33)", () => {
+    const c = ready();
+    c.write(S, [question(uid(46))]);
+    c.write(R, [answer(uid(47), uid(46), 0)]);
+    c.write(S, [
+      { intent: "event.put", id: uid(47), state: "applied", at: at(0) },
+      {
+        intent: "question.resolve",
+        qid: uid(46),
+        resolved: { answerId: uid(47), choice: "accept", at: at(0) },
+      },
+    ]);
+    // A second answer on day 1 the service has not handled yet: no event at all.
+    c.write(R, [answer(uid(48), uid(46), 1)]);
+    expect(serviceControlCleanup(c.validate(), Date.parse(at(30)))).toEqual([]);
+    // Rejected on day 20: the question and both answers go 7 days later, not before.
+    c.write(S, [
+      { intent: "event.put", id: uid(48), state: "rejected", code: "already_answered", at: at(20) },
+    ]);
+    expect(serviceControlCleanup(c.validate(), Date.parse(at(26)))).toEqual([]);
+    const changes = serviceControlCleanup(c.validate(), Date.parse(at(27)));
+    expect(changes).toHaveLength(1);
+    for (const change of changes) c.write(S, change);
+    const v = c.validate();
+    expect([v.questions, v.answers, v.events].map((m) => Object.keys(m).length)).toEqual([0, 0, 0]);
+  });
+
   it("an old resolved question waits for a later answer to settle and age", () => {
     const c = ready();
     c.write(S, [question(uid(43))]);
