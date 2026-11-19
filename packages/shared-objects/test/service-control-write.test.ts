@@ -179,6 +179,43 @@ describe("SERVICE-CONTROL-PROFILE-01 §3: writing C", () => {
   });
 });
 
+describe("SERVICE-CONTROL-PROFILE-01 §2.4: who created an entry", () => {
+  it("names the change, signer and class that created each entry, not a later write into it", () => {
+    const c = ready();
+    c.write(P, [
+      {
+        intent: "request.create",
+        rid: uid(60),
+        request: request("pair-section", { args: { link: "l" } }),
+      },
+    ]);
+    c.write(S, [
+      {
+        intent: "pairing.create",
+        rid: uid(60),
+        pairing: {
+          descriptor: serviceDevice.text,
+          principal: principalRef(B),
+          fp: deviceFingerprint(B),
+        },
+      },
+      { intent: "event.put", id: uid(60), state: "request-ready", at: T0 },
+    ]);
+    const of = (container: "requests" | "pairing" | "approvals" | "events", key: string) =>
+      c.creatorsOf(container, key).map((w) => [w.writerClass, principalRef(w.signer)]);
+    expect(of("requests", uid(60))).toEqual([["personal", principalRef(personal)]]);
+    expect(of("pairing", uid(60))).toEqual([["service", principalRef(B)]]);
+    expect(of("approvals", principalRef(B))).toEqual([["root", principalRef(root)]]);
+    // A later write into the entry is not its creation.
+    c.write(S, [{ intent: "event.put", id: uid(60), state: "ready", at: T0 }]);
+    expect(of("events", uid(60))).toEqual([["service", principalRef(B)]]);
+    expect(c.creatorsOf("pairing", uid(61))).toEqual([]);
+    expect(c.creatorsOf("pairing", uid(60)).every((w) => c.authorOf(w.hash) !== undefined)).toBe(
+      true,
+    );
+  });
+});
+
 describe("SERVICE-CONTROL-PROFILE-01 §3: a write of the current values", () => {
   it("makes no change and nothing to send", () => {
     const c = ready();
