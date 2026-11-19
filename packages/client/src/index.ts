@@ -130,6 +130,7 @@ export {
   SERVICE_CONTROL_PROFILE,
   type ServiceControlInitialize,
   type ServiceControlSignerFacts,
+  serviceControlPort,
   serviceControlRosterName,
   serviceControlSignerFacts,
 } from "./service-control.js";

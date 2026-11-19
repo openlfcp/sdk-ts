@@ -49,6 +49,12 @@ import {
   syncChain,
 } from "./context.js";
 import {
+  type ApprovalRecordIntent,
+  approvalRecordWrite,
+  classifyApprovalRecord,
+  type ServiceControlPort,
+} from "./control-approval.js";
+import {
   checkIssuance,
   type FlowOptions,
   leafPayload,
@@ -408,7 +414,7 @@ const tupleOf = (key: string, entry: PairingRequestValue, changes: readonly stri
     entry.platform ?? null,
   ]);
 
-async function readSession(o: IdentityFlowOptions, session: string) {
+export async function readSession(o: IdentityFlowOptions, session: string) {
   const op = await new OperationJournal(o.storage).load(session);
   return {
     op,
@@ -419,7 +425,7 @@ async function readSession(o: IdentityFlowOptions, session: string) {
   };
 }
 
-async function openIdentity(
+export async function openIdentity(
   o: IdentityFlowOptions,
   channel: IdentityChannel,
   I: ResourceId,
@@ -459,7 +465,7 @@ function presetsFor(
   });
 }
 
-function reviewOf(
+export function reviewOf(
   o: IdentityFlowOptions,
   session: string,
   chain: LinearChain,
@@ -563,8 +569,32 @@ export type ApprovalResult =
       readonly rotation: RotationOutcome;
       readonly code: string;
     }
+  /**
+   * Phases A1 and A2 are done (consumed, bound in I; keys and rotation as
+   * for `approved`), but the approval record A3 is not acknowledged in `C`
+   * yet: C is not open or not synchronised, or the write is queued. Nothing
+   * is registered (A4) before it; resumeApproval with `control` continues.
+   */
+  | {
+      readonly kind: "approval-record-pending";
+      readonly operation: string;
+      readonly reason: string;
+    }
   | { readonly kind: "conflict" }
   | { readonly kind: "unavailable"; readonly operation?: string; readonly reason: string };
+
+/**
+ * A service managed through a control Resource `C` (SERVICE-CONTROL-PROFILE-01
+ * §7.1): the approval record phase A3 writes, after the consume (A1) and
+ * the grant (A2) and before any registration (A4).
+ */
+export interface ApprovalRecordOptions {
+  readonly role: "base" | "section";
+  /** `meta.attemptId` of `C` (base) or the `rid` of the `pair-section` request (section). */
+  readonly origin: string;
+  /** The binding's generation; 0 (the default) for the base. */
+  readonly generation?: number | bigint;
+}
 
 /**
  * §5.3 steps 4–7 and 10: approves the confirmed request with a preset
@@ -580,6 +610,16 @@ export async function approvePairing(
     readonly scope?: readonly ResourceId[];
     /** RFC 3339 UTC for `devices[...].added_at`. */
     readonly addedAt?: string;
+    /** `C` of the service, for A3; required with `approvalRecord`. */
+    readonly control?: ServiceControlPort;
+    /** Write the approval record A3 in `control` before registering (A4). */
+    readonly approvalRecord?: ApprovalRecordOptions;
+    /**
+     * §5.3 step 4 *pre-authorised approval* (sectionApprovalDecision): the
+     * fingerprint of `pairing[rid].fp`, journaled with the mark
+     * `pre-authorised` in place of the human's confirmation.
+     */
+    readonly preAuthorised?: { readonly fingerprint: string };
   },
 ): Promise<ApprovalResult> {
   checkFlowProfiles(o);
@@ -616,6 +656,8 @@ export async function approvePairing(
       const leaf = leafPayload(R, descriptor, preset.kind as DeviceKind, preset.mask, scope);
       const f = checkIssuance({ chain, issuer: me, leaf, pairing: J });
       if (!f.feasible) return { kind: "infeasible", reason: f.reason };
+      const record = approvalRecordIntent(o, scope);
+      if (typeof record === "string") return { kind: "infeasible", reason: record };
       const operation = newOperationId("pairing-approval", secureRandom(8));
       await new OperationJournal(o.storage).begin({
         id: operation,
@@ -629,7 +671,9 @@ export async function approvePairing(
           pairingDevice: toHex(J),
           requestKey: review.requestKey,
           requestChanges: [...review.requestChanges],
-          fingerprint: review.fingerprint,
+          fingerprint: o.preAuthorised?.fingerprint ?? review.fingerprint,
+          approvedBy: o.preAuthorised === undefined ? "human" : "pre-authorised",
+          ...(record === undefined ? {} : { approvalRecord: record }),
           label: review.label,
           ...(review.platform === undefined ? {} : { platform: review.platform }),
           ...(o.addedAt === undefined ? {} : { addedAt: o.addedAt }),
@@ -644,6 +688,102 @@ export async function approvePairing(
   );
   if (typeof prepared !== "string") return prepared;
   return resumeApproval(o, prepared);
+}
+
+/** The journaled A3 intent, or why the options do not make one. */
+function approvalRecordIntent(
+  o: { readonly control?: ServiceControlPort; readonly approvalRecord?: ApprovalRecordOptions },
+  scope: readonly ResourceId[],
+): ApprovalRecordIntent | string | undefined {
+  const r = o.approvalRecord;
+  if (r === undefined) return undefined;
+  if (o.control === undefined) return "an approval record needs the control Resource C";
+  const C = o.control.resource;
+  const approves = r.role === "base" ? C : scope[0];
+  if (scope.length !== 1 || approves === undefined || !bytesEqual(scope[0] as ResourceId, approves))
+    return r.role === "base"
+      ? "a base installation's scope is exactly [C] (SERVICE-CONTROL-PROFILE-01 §7.4)"
+      : "a section installation's scope is exactly [X] (SERVICE-CONTROL-PROFILE-01 §7.4)";
+  const generation = BigInt(r.generation ?? 0);
+  if (r.role === "base" && generation !== 0n) return "the generation of a base approval is 0";
+  return {
+    resource: toHex(C),
+    role: r.role,
+    approves: toBase64url(approves),
+    origin: r.origin,
+    generation: generation.toString(),
+  };
+}
+
+const iso = (ms: number) => `${new Date(ms).toISOString().slice(0, 19)}Z`;
+
+/**
+ * Phase A3 (SERVICE-CONTROL-PROFILE-01 §7.1): `approvals[P]` in `C`,
+ * journaled like the other phases. Its exact write (with its time) is
+ * journaled before it is committed, so a resumed phase commits the same
+ * intents under the same operation and never writes a second change; an
+ * entry already present with the same `certDigest`, written by another
+ * hand, is `complete`. Undefined once the record is acknowledged (or
+ * complete): the approval continues with A4.
+ */
+async function approvalRecordPhase(
+  o: IdentityFlowOptions & { readonly control?: ServiceControlPort },
+  journal: OperationJournal,
+  operation: string,
+  record: ApprovalRecordIntent,
+  chainB: CertificateChain,
+): Promise<ApprovalResult | undefined> {
+  const id = "approval-record";
+  const waiting = (reason: string): ApprovalResult => ({
+    kind: "approval-record-pending",
+    operation,
+    reason,
+  });
+  let phase = phaseOf(await journal.load(operation), id);
+  if (phase?.state === "committed-own" || phase?.state === "complete") return undefined;
+  const port = o.control;
+  if (port === undefined || toHex(port.resource) !== record.resource)
+    return waiting("the control Resource C is not open here");
+  const P = principalId(chainB.leaf.payload.device.principalId);
+  const digest = chainB.leaf.payloadDigest;
+  if (phase?.facts?.at === undefined) {
+    const state = port.state();
+    if (state === undefined) return waiting("the control Resource C is not synchronised");
+    const found = classifyApprovalRecord(state, P, digest);
+    if (found !== "pending") {
+      await journal.putPhase(operation, {
+        id,
+        kind: "approval-record",
+        resource: record.resource,
+        state: found,
+      });
+      if (found === "complete") return undefined;
+      await journal.setStatus(operation, "superseded");
+      return { kind: "superseded", operation };
+    }
+    phase = {
+      id,
+      kind: "approval-record",
+      resource: record.resource,
+      state: "pending",
+      facts: { at: iso(o.now()) },
+    };
+    await journal.putPhase(operation, phase);
+  }
+  const at = phase.facts?.at as string;
+  const outcome = await port.commit(
+    [approvalRecordWrite(record, P, digest, chainB.leaf.id, at)],
+    `${operation}:${id}`,
+  );
+  if (outcome.kind === "queued")
+    return waiting("the approval record is queued for C's coordinator");
+  if (outcome.kind === "rejected") {
+    await journal.putPhase(operation, { ...phase, state: "refused", code: outcome.code });
+    await journal.setStatus(operation, "abandoned");
+    return { kind: "refused", operation, code: outcome.code };
+  }
+  await journal.putPhase(operation, { ...phase, state: "committed-own" });
+  return undefined;
 }
 
 interface PayloadJson {
@@ -726,7 +866,10 @@ export const cancelRecord = (
 
 /** Resumes a journaled approval from its next phase (§9.1: "If A crashes after step 5 …"). */
 export async function resumeApproval(
-  o: IdentityFlowOptions,
+  o: IdentityFlowOptions & {
+    /** `C` of a service whose approval writes an approval record (A3). */
+    readonly control?: ServiceControlPort;
+  },
   operation: string,
 ): Promise<ApprovalResult> {
   checkFlowProfiles(o);
@@ -855,7 +998,14 @@ export async function resumeApproval(
       // Step 9: J, consumed, was a reader of I: the rotation policy of §8.4 applies to I.
       const rotation = await rotateIfExposed({ ...o, channel, operation, resource: I });
 
-      // Step 10: register B in the roster (or the approved scope).
+      // A3 before A4: the approval record in C, before any registration (§7.1).
+      const record = op.intent.approvalRecord as ApprovalRecordIntent | undefined;
+      if (record !== undefined) {
+        const a3 = await approvalRecordPhase(o, journal, operation, record, chainB);
+        if (a3 !== undefined) return a3;
+      }
+
+      // Step 10 (A4): register B in the roster (or the approved scope).
       const { doc } = await openIdentity(o, channel, I);
       const targets = [...doc.roster()]
         .filter(([, e]) => e.archived !== true)
@@ -866,7 +1016,15 @@ export async function resumeApproval(
             (leaf.kind === DEVICE_KIND.PERSONAL ||
               leaf.scope.some((s) => bytesEqual(s, t.resource))),
         );
-      const registered = await registerDevice({ ...o, chain: chainB, targets });
+      // One registration operation per approval, so a crash inside A4 resumes it (§9.1).
+      const registration =
+        (op.intent.registration as string | undefined) ?? `${operation}:register`;
+      const registered = await registerDevice({
+        ...o,
+        chain: chainB,
+        targets,
+        operation: registration,
+      });
       await journal.updateIntent(operation, { registration: registered.operation });
       // The session is consumed either way; the approval stays open until its document is written.
       await journal.setStatus(op.intent.session as string, "done");
@@ -900,8 +1058,13 @@ export type CancelResult =
       readonly rotation: RotationOutcome;
       readonly code: string;
     }
-  /** The session was consumed by an approval: not cancelled (§9.2 Cancel: superseded). */
-  | { readonly kind: "consumed" }
+  /**
+   * The session was consumed by an approval: not cancelled (§9.2 Cancel:
+   * superseded). There is no cancellation after the consume (A§4.4): when
+   * the approval is this installation's, `operation` names it and
+   * resumeApproval carries its phases on.
+   */
+  | { readonly kind: "consumed"; readonly operation?: string }
   | { readonly kind: "refused"; readonly code: string }
   | { readonly kind: "conflict" }
   | { readonly kind: "unavailable"; readonly reason: string };
@@ -952,7 +1115,12 @@ export async function cancelPairing(
         classify: (chain) => classifyCancel(chain.state, R, J),
         build: (chain) => cancelRecord(chain, me, R, J),
       });
-      if (cancel.state === "superseded") return { kind: "consumed" };
+      if (cancel.state === "superseded") {
+        const own = (await journal.list({ kind: "pairing-approval" })).find(
+          (a) => a.intent.session === o.session && a.status !== "superseded",
+        );
+        return own === undefined ? { kind: "consumed" } : { kind: "consumed", operation: own.id };
+      }
       if (cancel.state === "refused") return { kind: "refused", code: cancel.code ?? "refused" };
       await o.secrets.delete(pairingSecretRef(J));
       // A cancelled J was a reader of I: the rotation policy applies (§5.3 step 9, §8.4).
