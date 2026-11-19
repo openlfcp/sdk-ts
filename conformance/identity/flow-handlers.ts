@@ -26,6 +26,7 @@ import {
   classifyRegister,
   classifyRevoke,
   classifyRotate,
+  controlRegistrationGate,
   createPairingSession,
   type DeviceEntryValue,
   exposingRevocationsSince,
@@ -1091,7 +1092,8 @@ const EXTRAS: Readonly<Record<string, Extra>> = {
           DEV_R_holds_2_in_I: holds2(wireId(step), "DEV_R"),
           DEV_B_holds_2_in_I: holds2(wireId(step), "DEV_B"),
         },
-  F20_section_auto_approval: (_f, step) => sectionDecisionFacts(step),
+  F20_section_auto_approval: (_f, step) =>
+    step.n === 12 ? deferredWhileUnsynchronised() : sectionDecisionFacts(step),
   "F08.link_rejected": (_f, _step, report) =>
     report.outcome === "PAIRING_LINK_REJECTED" ? REJECTED : undefined,
   "F08.missing_material": (_f, step) =>
@@ -1207,6 +1209,19 @@ function identityRequests(changes: readonly string[]): IdentityRequestEntry[] {
     entry: entry as IdentityRequestEntry["entry"],
     signers: replica.origins("requests", key).map((o) => o.signer),
   }));
+}
+
+/**
+ * F20 step 12: a reconciler that implements the control profile defers
+ * BRIDGE_O's registration in X while C is not synchronised (SERVICE-CONTROL
+ * §7.4): controlRegistrationGate on I's chain once BRIDGE_O is bound
+ * (P4s_bind_bridge_o), with C in the roster and no view of it here. The
+ * fixture names no bytes of C; any Resource ID stands for it.
+ */
+async function deferredWhileUnsynchronised(): Promise<Report> {
+  const C = resourceId(new Uint8Array(32).fill(0xc0));
+  const gate = await controlRegistrationGate(chainAt("P4s_bind_bridge_o"), [{ resource: C }]);
+  return { outcome: gate(idOf("BRIDGE_O")) === undefined ? "registered" : "deferred" };
 }
 
 const F20_OWN = ["change.C0_initial", "change.C1_fill", "pairing_writes_own_service_request"];
