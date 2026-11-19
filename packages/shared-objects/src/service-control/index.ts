@@ -1,0 +1,43 @@
+/** SERVICE-CONTROL-PROFILE-01: the control Resource `C`. Nothing in `C` confers authority (§5 rule 4). */
+
+export { ScReader, type ScValue } from "./reader.js";
+export {
+  ENTRY_LIMIT,
+  entryDiagnostics,
+  eventIsFinal,
+  eventStateOf,
+  firstDiagnostic,
+  limitOf,
+  MAX_EXAMPLE_SCALARS,
+  MAX_ITEMS,
+  PAIRING_ENTRY_LIMIT,
+  readApproval,
+  SERVICE_CONTROL_DIAGNOSTIC_ORDER,
+  type ServiceControlDiagnostic,
+  type ServiceControlProblem,
+  type ServiceControlValidation,
+  validateServiceControl,
+} from "./schema.js";
+export {
+  deriveServiceControlActorId,
+  deviceFingerprint,
+  EVENT_STATES,
+  type EventState,
+  FINAL_EVENT_STATES,
+  isHash32,
+  isOp,
+  isUuid7,
+  SERVICE_CONTROL_PROFILE_ID,
+  SERVICE_CONTROL_ROOT_KEYS,
+  SERVICE_CONTROL_V1_OPS,
+  type ServiceControlAnswer,
+  type ServiceControlApproval,
+  type ServiceControlCancel,
+  type ServiceControlContainer,
+  type ServiceControlEvent,
+  type ServiceControlPairing,
+  type ServiceControlQuestion,
+  type ServiceControlRecord,
+  type ServiceControlRequest,
+  type ServiceControlRootKey,
+} from "./values.js";
