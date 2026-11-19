@@ -1,4 +1,19 @@
 /** SERVICE-CONTROL-PROFILE-01: the control Resource `C`. Nothing in `C` confers authority (§5 rule 4). */
+export {
+  checkServiceControlUnit,
+  refuseServiceControl,
+  SERVICE_CONTROL_ADMISSION_ORDER,
+  ServiceControlAdmission,
+  type ServiceControlAdmissionDiagnostic,
+  ServiceControlAdmissionError,
+  type ServiceControlOptions,
+  type ServiceControlSignerClass,
+  type ServiceControlSignerFacts,
+  type ServiceControlWriter,
+  type ServiceControlWriterClass,
+  serviceControlSignerClass,
+  serviceControlWriterClass,
+} from "./admission.js";
 
 export { ScReader, type ScValue } from "./reader.js";
 export {
