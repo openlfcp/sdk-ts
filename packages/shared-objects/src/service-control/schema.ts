@@ -63,6 +63,8 @@ const COUNTS: FieldType = { mapOf: "u" };
 
 /** §2.1; a key ending in "?" is optional. */
 const SCHEMA: Readonly<Record<string, FieldType>> = {
+  // Written once, by the initial change (§2.2); immutable after it (SC1).
+  meta: fields({ attemptId: "s", createdAt: "t" }),
   approvals: fields({
     role: { enum: ["base", "section"] },
     resource: "r",
@@ -217,7 +219,7 @@ export function entryDiagnostics(
   checkValue(reader, schema, v, found);
   // §4 Sizes, on the state read: concurrent values of a field count, so an
   // entry merged from changes admitted apart can exceed its limit (§5).
-  if (reader.size(v) > limitOf(container)) found.add("LIMIT_EXCEEDED");
+  if (container !== "meta" && reader.size(v) > limitOf(container)) found.add("LIMIT_EXCEEDED");
   if (key !== undefined) {
     if (UUID_KEYED.has(container) && !isUuid7(key)) found.add("INVALID_KEY");
     if (container === "bindings" && !isResourceRef(key)) found.add("INVALID_RESOURCE_REF");
@@ -409,6 +411,11 @@ export function validateServiceControl(
     return Object.freeze({ usable: false, problems: Object.freeze(problems), ...empty });
   }
   const container = (k: string) => reader.map("_root", k) as string;
+  // `meta` is the attempt's record (§2.1); no reader depends on it, so an invalid one is reported only.
+  const metaProblem = firstDiagnostic(
+    entryDiagnostics(reader, "meta", undefined, reader.get("_root", "meta"), resource),
+  );
+  if (metaProblem !== undefined) fail(metaProblem, at("meta"));
 
   const whole = (name: string): ServiceControlRecord | undefined => {
     const v = reader.get("_root", name) as ScValue;

@@ -268,7 +268,7 @@ export class ServiceControlAdmission {
     const decoded = decodedOf(change);
     const ops = decoded.ops as Op[];
     if (change.deps.length === 0) {
-      this.#acceptInitial(change);
+      this.#acceptInitial(change, ops);
       this.#commit(change, decoded);
       return this.writerClassAt([], writer);
     }
@@ -480,7 +480,12 @@ export class ServiceControlAdmission {
     }
   }
 
-  #acceptInitial(change: CheckedChange): void {
+  /**
+   * SC0, then the rules the initial change is not exempt from (§4: it is
+   * exempt from SC1, SC5 and SC6 only): SC4 on `meta` (§2.1 `attemptId`
+   * string, `createdAt` timestamp) and on collaborative Text anywhere.
+   */
+  #acceptInitial(change: CheckedChange, ops: readonly Op[]): void {
     if (this.#changes.length > 0)
       refuseServiceControl("INVALID_ROOT", "SC0: C already has its initial change");
     this.#apply(change);
@@ -505,6 +510,14 @@ export class ServiceControlAdmission {
         "INVALID_ROOT",
         "SC0: the initial change creates exactly profile, meta and eleven empty maps",
       );
+    }
+    const found = new Set<ServiceControlAdmissionDiagnostic>(
+      entryDiagnostics(r, "meta", undefined, r.get("_root", "meta"), this.#resource),
+    );
+    if (ops.some((op) => op.action === "makeText")) found.add("INVALID_FIELD_TYPE");
+    if (found.size > 0) {
+      this.#rebuild();
+      this.#refuse(found);
     }
   }
 

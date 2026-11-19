@@ -48,6 +48,12 @@ describe("SERVICE-CONTROL-PROFILE-01 §5 state validation", () => {
     expect(v(other).usable).toBe(false);
   });
 
+  it("reports a meta whose fields have the wrong types (§2.1)", () => {
+    const doc = initial(root, (d) => put(d.meta, "createdAt", "bad timestamp"));
+    expect(v(doc).usable).toBe(true);
+    expect(diagnostics(doc)).toEqual([["/meta", "INVALID_TIMESTAMP"]]);
+  });
+
   it("reads valid entries with unknown fields and leaves invalid ones out (§2.1, §5 rule 1)", () => {
     const doc = edit(initial(), personal, (d) => {
       put(d.requests, uid(1), request("turn-off", { priority: "high" }));

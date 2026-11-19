@@ -203,6 +203,26 @@ describe("SERVICE-CONTROL-PROFILE-01 §2.3 the class on the change's causal hist
 });
 
 describe("SERVICE-CONTROL-PROFILE-01 §2.1 field types in SC0, SC4 and SC7", () => {
+  const meta = (fn: (d: Doc) => void) => initial(root, fn);
+
+  it("refuses an initial change whose meta has the wrong types (SC0 is not exempt from SC4)", () => {
+    const cases: [string, (d: Doc) => void][] = [
+      ["INVALID_FIELD_TYPE", (d) => put(d.meta, "attemptId", 123)],
+      ["INVALID_TIMESTAMP", (d) => put(d.meta, "createdAt", "bad timestamp")],
+      ["INVALID_FIELD_TYPE", (d) => put(d.meta, "createdAt", 5)],
+      // A plain string is collaborative Text in Automerge 3.
+      [
+        "INVALID_FIELD_TYPE",
+        (d) => {
+          d.meta.attemptId = "attempt-1";
+        },
+      ],
+    ];
+    for (const [want, fn] of cases)
+      expect(admit(new ServiceControlAdmission(options), meta(fn), R)).toBe(want);
+    expect(admit(new ServiceControlAdmission(options), initial(), R)).toBe("root");
+  });
+
   it("checks a binding's preview and a question's counts (§2.1, SC4, SC7)", () => {
     const approvedDoc = () => {
       const admission = new ServiceControlAdmission(options);
