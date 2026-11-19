@@ -39,6 +39,7 @@ import {
   pairingRequests,
   reconcileDevices,
   requestPairing,
+  resendKeys,
   resumeApproval,
   SERVICE_CONTROL_PROFILE_ID,
   type SectionApprovalInput,
@@ -924,6 +925,15 @@ describe("the reconciliation order of a client that implements the profile (§7.
     const r = await reconcileDevices(t.w.P);
     expect(forX(t, r)?.deferred).toBeUndefined();
     expect(grantsOf(t, t.X)).toBe(1);
+  });
+
+  test("Re-send keys reconciles through the same gate", async () => {
+    const { t, port } = await boundWithoutApproval();
+    const r = await resendKeys({ ...t.w.P, device: D, controlResources: viewOf(t, port) });
+    expect(
+      r.targets.find((x) => toHex(x.resource) === toHex(t.X))?.deferred?.map((d) => ref(d.device)),
+    ).toEqual([ref(D)]);
+    expect(grantsOf(t, t.X)).toBe(0);
   });
 
   // R1: every control Resource of the roster, archived or not, whatever `only` selects.
