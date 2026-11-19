@@ -24,14 +24,17 @@ import {
 import { describe, expect, test } from "vitest";
 import {
   type ApprovalResult,
+  approvePairing,
   autoApproveSection,
   type ControlRevocationCause,
   cancelPairing,
   completePairing,
   controlRevocationTargets,
+  createIdentityResource,
   createPairingSession,
   OperationJournal,
   type PairingRequestValue,
+  pairingRequests,
   requestPairing,
   resumeApproval,
   type SectionApprovalInput,
@@ -39,8 +42,9 @@ import {
   sectionApprovalDecision,
 } from "../../packages/client/src/index.js";
 import type { Fault, UploadEvent } from "../../packages/client/test/identity/memory-coordinator.js";
-import { party, pid } from "../../packages/client/test/identity/support.js";
-import { node, pair, world } from "../../packages/client/test/identity/world.js";
+import { MemoryCoordinator } from "../../packages/client/test/identity/memory-coordinator.js";
+import { party, pid, URL } from "../../packages/client/test/identity/support.js";
+import { hostResource, node, pair, world } from "../../packages/client/test/identity/world.js";
 import { type CommitFault, T0, TestControl } from "./control-port.js";
 
 const uid = (n: number) => `0196f2a0-0000-7000-8000-${String(n).padStart(12, "0")}`;
@@ -655,5 +659,65 @@ describe("sectionApprovalDecision: every substitution of §5.3 step 4 (T§3)", {
       kind: "closed",
       consumed: false,
     });
+  });
+});
+
+describe("the base installation's approval record (A§4.1, §7.1)", { timeout: 60_000 }, () => {
+  test("approved by the human with scope [C]: A3 writes role base, generation 0, origin attemptId", async () => {
+    // C hosted and listed in the roster, so the base installation may ask for it (§5.3 step 3).
+    const server = new MemoryCoordinator();
+    const P = node(server, party(1));
+    const hosted = await hostResource(server, P, "org.openlfcp.service-control.v1");
+    const created = await createIdentityResource({
+      ...P,
+      url: URL,
+      label: "laptop",
+      roster: [hosted],
+    });
+    if (created.kind !== "created") throw new Error(created.kind);
+    const w = { server, P };
+    const control = new TestControl(R, hosted.resource);
+    const s = await createPairingSession(w.P);
+    if (s.kind !== "created") throw new Error(s.kind);
+    const base = node(w.server, party(31));
+    const req = await requestPairing({
+      ...base,
+      link: s.link,
+      label: "MacBook Air",
+      kind: 1,
+      scope: [control.resource],
+    });
+    if (req.kind !== "requested") throw new Error(req.kind);
+    const [review] = await pairingRequests({ ...w.P, session: s.session });
+    if (review === undefined) throw new Error("no request");
+    const port = control.port(R, "root");
+    // A section role on a base scope, or a base generation, is refused before anything is signed.
+    expect(
+      await approvePairing({
+        ...w.P,
+        review,
+        preset: "service",
+        control: port,
+        approvalRecord: { role: "base", origin: "attempt-1", generation: 1 },
+      }),
+    ).toMatchObject({ kind: "infeasible" });
+    const r = await approvePairing({
+      ...w.P,
+      review,
+      preset: "service",
+      control: port,
+      approvalRecord: { role: "base", origin: "attempt-1" },
+    });
+    if (r.kind !== "approved") throw new Error(JSON.stringify(r));
+    expect(control.replica.validate().approvals[ref(pid(31))]).toMatchObject({
+      role: "base",
+      resource: toBase64url(control.resource),
+      generation: 0,
+      origin: "attempt-1",
+      certDigest: toBase64url(r.chain.leaf.payloadDigest),
+    });
+    const op = (await new OperationJournal(w.P.storage).list({ kind: "pairing-approval" }))[0];
+    expect(op?.intent.approvedBy).toBe("human");
+    expect(op?.intent.fingerprint).toBe(deviceFingerprint(pid(31)));
   });
 });

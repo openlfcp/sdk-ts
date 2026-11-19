@@ -20,7 +20,6 @@ import {
 export type CommitFault = "crash-after-commit" | "queued" | undefined;
 
 export class TestControl {
-  readonly resource: ResourceId = generateResourceId();
   readonly replica: ServiceControlReplica;
   /** Every change committed through a port, in order: `[who, operationId, intents]`. */
   readonly log: { readonly who: string; readonly operation: string; readonly intents: string[] }[] =
@@ -29,7 +28,10 @@ export class TestControl {
   readonly events: string[] = [];
   synchronised = true;
 
-  constructor(readonly root: PrincipalId) {
+  constructor(
+    readonly root: PrincipalId,
+    readonly resource: ResourceId = generateResourceId(),
+  ) {
     this.replica = ServiceControlReplica.empty({
       resource: this.resource,
       root,
