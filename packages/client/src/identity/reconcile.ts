@@ -39,11 +39,6 @@ import {
   sealIdentityUnit,
   syncChain,
 } from "./context.js";
-import {
-  controlRegistrationGate,
-  SERVICE_CONTROL_PROFILE_ID,
-  type ServiceControlPort,
-} from "./control-approval.js";
 import { mayManageDevices } from "./devices.js";
 import {
   type DeviceEntryValue,
@@ -264,12 +259,6 @@ export interface TargetReconciliation {
    * every relevant pair reached the target.
    */
   readonly unpropagated?: readonly PrincipalId[];
-  /**
-   * SERVICE-CONTROL-PROFILE-01 §7.4 (with `controlResources`): kind-1
-   * registrations this run deferred, each with why. A later run tries them
-   * again.
-   */
-  readonly deferred?: readonly { readonly device: PrincipalId; readonly reason: string }[];
   readonly keys?: KeyDelivery;
   readonly rotation?: RotationOutcome;
 }
@@ -287,21 +276,6 @@ export async function reconcileDevices(
     readonly only?: readonly ResourceId[];
     /** Apply the rotation policy of §8.4 to each target (default true). */
     readonly rotate?: boolean;
-    /**
-     * SERVICE-CONTROL-PROFILE-01 §7.4 reconciliation order, for a client
-     * that implements that profile (which MUST pass it): this client's view
-     * of each control Resource of the roster (profile
-     * `org.openlfcp.service-control.v1`), undefined when it is not open
-     * here. A kind-1 device is then registered only once every control
-     * Resource of the roster is synchronised and, when one names the
-     * device, once `approvals[P]` is present there; otherwise the
-     * registration is deferred (TargetReconciliation.deferred) and the
-     * next run tries it again. Without it this is the reconciler of a
-     * client that does not implement the profile (§7.4 informative, §11).
-     */
-    readonly controlResources?: (
-      resource: ResourceId,
-    ) => Pick<ServiceControlPort, "state" | "creatorsOf"> | undefined;
   },
 ): Promise<{
   readonly operation: string;
@@ -365,21 +339,6 @@ export async function reconcileDevices(
         .filter((t) => !bytesEqual(t.resource, target.resource)),
     ].filter((t) => o.only === undefined || o.only.some((r) => bytesEqual(r, t.resource)));
 
-    // §7.4: the control Resources of the whole roster, whatever `only` selects.
-    const gate =
-      o.controlResources === undefined
-        ? undefined
-        : controlRegistrationGate(
-            I,
-            [...doc.roster()]
-              .filter(([, e]) => e.archived !== true && e.profile === SERVICE_CONTROL_PROFILE_ID)
-              .map(([ref]) => {
-                const resource = resourceId(fromBase64url(ref));
-                const control = o.controlResources?.(resource);
-                return control === undefined ? { resource } : { resource, control };
-              }),
-          );
-
     for (const t of targets) {
       try {
         const c = await pool.get(me, t.url);
@@ -388,17 +347,7 @@ export async function reconcileDevices(
           continue;
         }
         out.push(
-          await reconcileTarget(
-            o,
-            c,
-            journal,
-            ledger,
-            operation,
-            I,
-            t.resource,
-            hints(t.resource),
-            gate,
-          ),
+          await reconcileTarget(o, c, journal, ledger, operation, I, t.resource, hints(t.resource)),
         );
       } catch (e) {
         if (e instanceof IdentityUnavailable || e instanceof IdentityRefused)
@@ -445,7 +394,6 @@ export async function reconcileDevices(
         (t) =>
           t.status === "unreachable" ||
           t.status === "conflict" ||
-          (t.deferred?.length ?? 0) > 0 ||
           t.rotation?.status === "unreachable" ||
           t.rotation?.status === "awaiting-key-holder",
       );
@@ -577,7 +525,6 @@ async function reconcileTarget(
   I: LinearChain,
   X: ResourceId,
   resend: ReadonlyMap<string, ReadonlySet<string>>,
-  gate?: (device: PrincipalId) => string | undefined,
 ): Promise<TargetReconciliation> {
   const me = o.installation.signer;
   const R = genesisOwner(I);
@@ -587,18 +534,8 @@ async function reconcileTarget(
   const refused = manages
     ? await refusedRevocations(journal, operation, X)
     : new Map<string, string>();
-  const deferred: { device: PrincipalId; reason: string }[] = [];
   if (manages)
     for (const step of planReconciliation(I, chain)) {
-      // §7.4: a kind-1 registration waits for the control Resources (and its approval).
-      const wait =
-        step.kind === "register" && step.chain.leaf.payload.kind === DEVICE_KIND.SERVICE
-          ? gate?.(step.device)
-          : undefined;
-      if (wait !== undefined) {
-        deferred.push({ device: step.device, reason: wait });
-        continue;
-      }
       const id = `${step.kind}:${toHex(X)}:${toHex(step.device)}`;
       // §7.1 step 1: a refused propagation is not repeated as such. It is proposed again once
       // X's state changed since the refusal (its head moved; binding the device moves it too,
@@ -668,7 +605,6 @@ async function reconcileTarget(
     status: manages ? "done" : "not-authorized",
     steps: Object.freeze(steps),
     ...(unpropagated.length === 0 ? {} : { unpropagated: Object.freeze(unpropagated) }),
-    ...(deferred.length === 0 ? {} : { deferred: Object.freeze(deferred) }),
     keys,
     ...(rotation === undefined ? {} : { rotation }),
   };
