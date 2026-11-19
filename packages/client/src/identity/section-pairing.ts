@@ -83,6 +83,10 @@ export async function autoApproveSection(
   const known = await journal.get(o.session);
   if (known?.kind !== "pairing-session")
     return { kind: "not-own", reason: "this installation has no such pairing session" };
+  // A cancel decided before (journaled before J was revoked, A§4.3): finished first.
+  const decided = known.intent.cancelReason;
+  if (decided === "mismatch" || decided === "expired")
+    return cancel(o, journal, decided, "a cancel decided before is finished");
   const { I, R, J, url } = await readSession(o, o.session);
   const state = o.control.state();
   if (state === undefined) return { kind: "waiting", reason: "C is not synchronised" };
@@ -153,19 +157,11 @@ export async function autoApproveSection(
   switch (decision.kind) {
     case "not-own":
       return notOwn("this installation did not create J");
-    case "closed": {
-      if (decision.consumed) return (await carryOn(o, journal)) ?? { kind: "closed" };
-      // Cancelled here before a crash, cancels[rid] not acknowledged yet: written again.
-      const op = await journal.load(o.session);
-      if (typeof op.intent.cancelReason !== "string") return { kind: "closed" };
-      const reason = op.intent.cancelReason as "mismatch" | "expired";
-      return {
-        kind: "cancelled",
-        reason,
-        detail: "the session was cancelled before",
-        ...(await writeCancel(o, journal, reason)),
-      };
-    }
+    case "closed":
+      // Cancelled by another hand (a cancel of ours is journaled and finished above).
+      return decision.consumed
+        ? ((await carryOn(o, journal)) ?? { kind: "closed" })
+        : { kind: "closed" };
     case "wait":
       return o.expired === true
         ? cancel(o, journal, "expired", decision.reason)
@@ -202,13 +198,28 @@ async function carryOn(
   return { kind: "approval", approval: await resumeApproval(o, own.id) };
 }
 
-/** Step 9 and §6.3: cancel `J_X`, then `cancels[rid]` in `C`; a consumed session carries on instead. */
+/**
+ * Step 9 and §6.3: cancel `J_X`, then `cancels[rid]` in `C`; a consumed
+ * session carries on instead. The decision (reason and time) is journaled
+ * on the session before `J_X` is revoked (§9.1), so a lost answer or a
+ * crash at any point is finished by the next call: cancelPairing again
+ * (its phases classified by §9.2: the revocation, then the rotation of I),
+ * then the same `cancels[rid]` write under the same operation.
+ */
 async function cancel(
   o: AutoApproveSectionOptions,
   journal: OperationJournal,
   reason: "mismatch" | "expired",
   detail: string,
 ): Promise<SectionApprovalResult> {
+  const op = await journal.load(o.session);
+  const at = typeof op.intent.cancelAt === "string" ? op.intent.cancelAt : iso(o.now());
+  const why =
+    op.intent.cancelReason === "mismatch" || op.intent.cancelReason === "expired"
+      ? op.intent.cancelReason
+      : reason;
+  if (op.intent.cancelAt === undefined)
+    await journal.updateIntent(o.session, { cancelAt: at, cancelReason: why });
   const cancelled = await cancelPairing({ ...o, session: o.session });
   if (cancelled.kind === "consumed")
     return (
@@ -221,35 +232,20 @@ async function cancel(
     );
   if (cancelled.kind === "unavailable") return { kind: "unavailable", reason: cancelled.reason };
   if (cancelled.kind === "conflict") return { kind: "conflict" };
-  if (cancelled.kind === "refused") return { kind: "cancelled", reason, detail, cancel: cancelled };
-  return {
-    kind: "cancelled",
-    reason,
-    detail,
-    cancel: cancelled,
-    ...(await writeCancel(o, journal, reason)),
-  };
-}
-
-/**
- * `cancels[rid]` in `C`, unless `C` holds one: its exact write is journaled
- * on the session first, so a repeated call commits the same intents under
- * the same operation (§9.1) and never a second change.
- */
-async function writeCancel(
-  o: AutoApproveSectionOptions,
-  journal: OperationJournal,
-  reason: "mismatch" | "expired",
-): Promise<{ readonly written?: ServiceControlCommitOutcome }> {
-  if (o.control.state()?.cancels[o.rid] !== undefined) return {};
-  const op = await journal.load(o.session);
-  const at = typeof op.intent.cancelAt === "string" ? op.intent.cancelAt : iso(o.now());
-  const why = typeof op.intent.cancelReason === "string" ? op.intent.cancelReason : reason;
-  if (op.intent.cancelAt === undefined)
-    await journal.updateIntent(o.session, { cancelAt: at, cancelReason: why });
+  if (cancelled.kind === "refused")
+    return { kind: "cancelled", reason: why, detail, cancel: cancelled };
+  const state = o.control.state();
+  if (state === undefined)
+    return { kind: "waiting", reason: "J_X is cancelled; cancels[rid] waits for C to synchronise" };
+  // Written by another hand: nothing to add. Our own write is committed again until
+  // acknowledged (the same operation: a receipt, never a second change).
+  const ours = (await journal.load(o.session)).intent.cancelWritten === true;
+  if (state.cancels[o.rid] !== undefined && !ours)
+    return { kind: "cancelled", reason: why, detail, cancel: cancelled };
+  if (!ours) await journal.updateIntent(o.session, { cancelWritten: true });
   const written = await o.control.commit(
     [{ intent: "cancel.create", rid: o.rid, cancel: { reason: why, at } }],
     `${o.session}:cancel`,
   );
-  return { written };
+  return { kind: "cancelled", reason: why, detail, cancel: cancelled, written };
 }

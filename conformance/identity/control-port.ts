@@ -17,7 +17,7 @@ import {
   type ServiceControlSignerClass,
 } from "@openlfcp/shared-objects/service-control";
 
-export type CommitFault = "crash-after-commit" | "queued" | undefined;
+export type CommitFault = "crash-before-commit" | "crash-after-commit" | "queued" | undefined;
 
 export class TestControl {
   readonly replica: ServiceControlReplica;
@@ -64,6 +64,7 @@ export class TestControl {
         this.replica.creatorsOf(container, key),
       commit: async (intents, operation): Promise<ServiceControlCommitOutcome> => {
         const f = fault();
+        if (f === "crash-before-commit") throw new Error("crashed before the commit");
         const known = done.get(operation);
         if (known === undefined) {
           const list = intents as readonly ServiceControlIntent[];

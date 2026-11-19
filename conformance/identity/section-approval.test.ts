@@ -721,3 +721,86 @@ describe("the base installation's approval record (A§4.1, §7.1)", { timeout: 6
     expect(op?.intent.fingerprint).toBe(deviceFingerprint(pid(31)));
   });
 });
+
+describe("a cancel interrupted at each step is finished from the journal (A§4.3, §8.2)", {
+  timeout: 120_000,
+}, () => {
+  const cancelsOf = (t: T) =>
+    t.control.log.filter((l) => l.intents.includes("cancel.create")).length;
+  const revokes0 = (t: T) =>
+    records(t, t.w.I).filter(
+      (x) =>
+        x.body.type === "DEVICE_REVOKE" &&
+        toHex(x.body.device) === toHex(t.s.pairingDevice) &&
+        x.body.reason === 0n,
+    ).length;
+
+  test("the answer to J's revocation is lost: the next re-check rotates I and writes cancels{mismatch}", async () => {
+    const t = await setup();
+    await bridgeRequests(t, [t.Y]);
+    servicePairs(t);
+    t.faultOn(
+      (e) => e.op === "control" && t.label(e.resource) === "I" && type(e.bytes) === "DEVICE_REVOKE",
+      "drop-answer",
+    );
+    const port = t.control.port(R, "root");
+    expect(await approve(t, port)).toMatchObject({ kind: "unavailable" });
+    // The server revoked J; the client never heard it, and C holds no cancel yet.
+    expect(revokes0(t)).toBe(1);
+    expect(t.control.replica.validate().cancels).toEqual({});
+    const journal = await new OperationJournal(t.w.P.storage).load(t.s.session);
+    expect(journal.intent.cancelReason).toBe("mismatch");
+    const r = await approve(t, port);
+    expect(r).toMatchObject({
+      kind: "cancelled",
+      reason: "mismatch",
+      cancel: { kind: "cancelled", rotation: { status: "rotated" } },
+      written: { kind: "acknowledged" },
+    });
+    expect(revokes0(t)).toBe(1);
+    expect(records(t, t.w.I).at(-1)?.body.type).toBe("KEY_EPOCH");
+    expect(t.control.replica.validate().cancels[t.rid]?.reason).toBe("mismatch");
+    expect(cancelsOf(t)).toBe(1);
+    expect(consumes(t)).toBe(0);
+  });
+
+  test("a crash after J is cancelled, before cancels[rid] is written: written by the next re-check", async () => {
+    const t = await setup();
+    await bridgeRequests(t);
+    servicePairs(t, 8);
+    let fault: CommitFault = "crash-before-commit";
+    const port = t.control.port(R, "root", () => fault);
+    await expect(approve(t, port)).rejects.toThrow("crashed before the commit");
+    expect(revokes0(t)).toBe(1);
+    expect(t.control.replica.validate().cancels).toEqual({});
+    fault = undefined;
+    expect(await approve(t, port)).toMatchObject({
+      kind: "cancelled",
+      reason: "mismatch",
+      written: { kind: "acknowledged" },
+    });
+    expect(revokes0(t)).toBe(1);
+    expect(cancelsOf(t)).toBe(1);
+    // Re-checked once more: the same operation, nothing new.
+    await approve(t, port);
+    expect(cancelsOf(t)).toBe(1);
+  });
+
+  test("a queued cancels[rid] is committed again under the same operation until acknowledged", async () => {
+    const t = await setup();
+    await bridgeRequests(t);
+    servicePairs(t, 8);
+    let fault: CommitFault = "queued";
+    const port = t.control.port(R, "root", () => fault);
+    expect(await approve(t, port)).toMatchObject({
+      kind: "cancelled",
+      written: { kind: "queued" },
+    });
+    fault = undefined;
+    expect(await approve(t, port)).toMatchObject({
+      kind: "cancelled",
+      written: { kind: "acknowledged" },
+    });
+    expect(cancelsOf(t)).toBe(1);
+  });
+});
