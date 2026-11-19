@@ -234,7 +234,13 @@ const accessKey = (a: AccessState): string =>
  */
 export interface SnapshotBinding<T> {
   readonly codec: DataProfileCodec<T>;
-  load(value: T): void;
+  /**
+   * Absent for a profile that publishes Snapshots but never loads one: an
+   * offered Snapshot is then not fetched and the units are replayed (the
+   * control Resource of SERVICE-CONTROL-PROFILE-01, whose admission needs
+   * every change's unit, §2.2).
+   */
+  load?(value: T): void;
   current(): T;
 }
 
@@ -1941,7 +1947,7 @@ export class SyncClient {
   /** The offered Snapshot holds units we lack, we can load it, and we did not load it before. */
   async #snapshotUseful(ctx: ResourceContext): Promise<boolean> {
     const offered = ctx.offered;
-    if (offered === null || ctx.binding.snapshot === undefined) return false;
+    if (offered === null || ctx.binding.snapshot?.load === undefined) return false;
     if ((await this.#o.storage.snapshots.get(offered.snapshotId)) !== undefined) return false;
     const R = ctx.binding.resourceId;
     await this.#snapshots.recover(R);
@@ -1977,7 +1983,7 @@ export class SyncClient {
           profile: guarded,
         });
         if (trap !== undefined) throw trap;
-        if (received.kind === "accepted") binding.load(received.value);
+        if (received.kind === "accepted") binding.load?.(received.value);
         return received;
       });
       if (r.kind === "accepted") {

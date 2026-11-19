@@ -2,6 +2,7 @@ import {
   type ActorSequence,
   actorSequence,
   bytesEqual,
+  type ControlRecordId,
   type DataEpoch,
   type DataUnitId,
   dataUnitId,
@@ -20,6 +21,7 @@ import type {
 } from "@openlfcp/storage";
 import {
   beyondCutoff,
+  type ControlState,
   type ControlView,
   canonicalFrontierFromCbor,
   checkDataUnit,
@@ -78,6 +80,13 @@ export interface ProfileUnit {
   readonly actor: PrincipalId;
   readonly seq: ActorSequence;
   readonly epoch: DataEpoch;
+  /**
+   * The Resource's Control state at the unit's control_ref (W §80.1), for a
+   * profile whose admission depends on the signer's standing there
+   * (SERVICE-CONTROL-PROFILE-01 §2.3). Set by DataUnitApplier; undefined
+   * only when the chain no longer holds that head.
+   */
+  readonly control?: ControlState;
 }
 
 /** A profile-level finding about the state after a merge (e.g. a PROFILE_INVALID object). */
@@ -324,7 +333,15 @@ const HELD =
 const CRASHED =
   "this unit crashed the profile engine twice, applied alone; it is not applied again on this device (local only)";
 
-type Accepted = Extract<ReceivedDataUnit<unknown>, { kind: "accepted" }>;
+/** An accepted unit, with the control_ref its bytes name. */
+type Accepted = Extract<ReceivedDataUnit<unknown>, { kind: "accepted" }> & {
+  readonly controlHead?: ControlRecordId;
+};
+
+const controlAt = (view: ControlView, head: ControlRecordId | undefined) => {
+  const state = head === undefined ? undefined : view.stateAt(head);
+  return state === undefined ? {} : { control: state };
+};
 
 const profileUnit = (view: ControlView, r: Accepted): ProfileUnit => ({
   unitId: r.unitId,
@@ -332,6 +349,7 @@ const profileUnit = (view: ControlView, r: Accepted): ProfileUnit => ({
   actor: r.actor,
   seq: r.seq,
   epoch: r.epoch,
+  ...controlAt(view, r.controlHead),
 });
 
 export class DataUnitApplier {
@@ -514,6 +532,8 @@ export class DataUnitApplier {
     });
     // A decode that trapped the engine is not this unit's local failure.
     if (r.kind === "local-failure" && isEngineTrap(r.error)) throw r.error;
+    if (r.kind === "accepted" && row !== undefined)
+      return { handler, r: { ...r, controlHead: row.controlHead } as Accepted };
     return { handler, r };
   }
 
@@ -852,7 +872,13 @@ export class DataUnitApplier {
           resource,
           group.map((u) => unitItem(u.unitId)),
           () =>
-            this.#replayGroup(handler, group, { merged, pendingNow, heldNow, replayed, skipped }),
+            this.#replayGroup(view, handler, group, {
+              merged,
+              pendingNow,
+              heldNow,
+              replayed,
+              skipped,
+            }),
         );
     const isHeld = (id: DataUnitId) => heldNow.some((h) => bytesEqual(h, id));
     await this.#write([
@@ -888,6 +914,7 @@ export class DataUnitApplier {
   }
   /** Decrypts, decodes and applies replayed units (replayStored), adding to `acc`. */
   async #replayGroup(
+    view: ControlView,
     handler: DataProfileHandler<unknown>,
     group: readonly StoredDataUnit[],
     acc: {
@@ -920,6 +947,7 @@ export class DataUnitApplier {
             actor: p.actor,
             seq: p.actorSeq,
             epoch: p.dataEpoch,
+            ...controlAt(view, p.controlHead),
           },
           value,
         });

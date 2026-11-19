@@ -41,6 +41,7 @@ import {
   type SharedObjectsDataProfile,
 } from "@openlfcp/shared-objects";
 import type { SharedSectionsDataProfile } from "@openlfcp/shared-objects/sections";
+import type { ServiceControlDataProfile } from "@openlfcp/shared-objects/service-control";
 import {
   dekSecretRef,
   type EpochRow,
@@ -91,8 +92,11 @@ export async function waitFor(
   throw new Error(`timed out waiting for ${what}`);
 }
 
-/** The Data Profile of a side: Shared Objects, or Shared Sections (LFCP-02-028). */
-export type SideProfile = SharedObjectsDataProfile | SharedSectionsDataProfile;
+/** The Data Profile of a side: Shared Objects, Shared Sections (LFCP-02-028), or a control Resource. */
+export type SideProfile =
+  | SharedObjectsDataProfile
+  | SharedSectionsDataProfile
+  | ServiceControlDataProfile;
 
 export interface SideOptions<P extends SideProfile = SharedObjectsDataProfile> {
   readonly url: string;
@@ -170,7 +174,7 @@ export class Side<P extends SideProfile = SharedObjectsDataProfile> {
         {
           dataProfile: profile.dataProfile,
           codecFor: (u) => profile.codecFor(u),
-          apply: (u, v) => profile.apply(u, v as never),
+          apply: (u, v) => profile.apply(u as never, v as never),
           exclude: (ids) => profile.exclude(ids),
           has: (id) => profile.has(id),
           reset: () => profile.reset(),
@@ -178,7 +182,7 @@ export class Side<P extends SideProfile = SharedObjectsDataProfile> {
       ],
     });
     this.checkpointer =
-      o.checkpoints === true
+      o.checkpoints === true && "checkpoint" in profile
         ? new ProfileCheckpointer(this.storage, profile, { minIntervalMs: 0 })
         : undefined;
     this.client = new SyncClient({
@@ -215,13 +219,15 @@ export class Side<P extends SideProfile = SharedObjectsDataProfile> {
   /** Registers the Resource with the session (opened now, or when READY). */
   open(): void {
     const profile = this.profile;
-    const snapshot: SnapshotBinding<Uint8Array> | undefined = this.#snapshots
-      ? {
-          codec: profile.snapshotCodec(),
-          load: (save) => void profile.loadSnapshot(save),
-          current: () => profile.snapshotState(),
-        }
-      : undefined;
+    const snapshot: SnapshotBinding<Uint8Array> | undefined = !this.#snapshots
+      ? undefined
+      : "snapshotBinding" in profile && !("loadSnapshot" in profile)
+        ? profile.snapshotBinding() // publish only: C's units are replayed (E-014)
+        : {
+            codec: profile.snapshotCodec(),
+            load: (save) => void profile.loadSnapshot(save),
+            current: () => profile.snapshotState(),
+          };
     this.client.open({
       resourceId: this.resource,
       applier: this.applier,
