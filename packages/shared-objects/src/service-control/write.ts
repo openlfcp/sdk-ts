@@ -80,6 +80,8 @@ export type ServiceControlIntent =
         readonly descriptor: string;
         readonly principal: string;
         readonly fp: string;
+        /** Fields this version does not name (§2.1), within the size limit. */
+        readonly [unknownField: string]: unknown;
       };
     }
   | {
