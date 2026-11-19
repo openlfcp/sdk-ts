@@ -329,3 +329,88 @@ describe("SERVICE-CONTROL-PROFILE-01 §9: deletion for display", () => {
     ]);
   });
 });
+
+describe("SERVICE-CONTROL-PROFILE-01 §9: 7 days from becoming final, not from creation", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const at = (days: number) =>
+    new Date(Date.parse(T0) + days * DAY).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const question = (qid: string) =>
+    ({
+      intent: "question.create",
+      qid,
+      question: {
+        binding: X,
+        generation: 1,
+        kind: "mass-delete",
+        anomalyId: "a",
+        snapshotHash: "h",
+        items: [],
+        counts: {},
+        options: ["accept"],
+        at: at(0),
+      },
+    }) as ServiceControlIntent;
+  const answer = (aid: string, qid: string, day: number) =>
+    ({
+      intent: "answer.create",
+      aid,
+      answer: { qid, snapshotHash: "h", choice: "accept", at: at(day) },
+    }) as ServiceControlIntent;
+
+  it("a question created on day 0 and superseded on day 18 stays until day 25", () => {
+    const c = ready();
+    c.write(S, [question(uid(40))]);
+    c.write(S, [{ intent: "question.supersede", qid: uid(40), by: uid(41) }]);
+    const now = Date.parse(at(18));
+    // Without the service's record of when it superseded the question: kept.
+    expect(serviceControlCleanup(c.validate(), now)).toEqual([]);
+    const supersededAt = () => at(18);
+    expect(serviceControlCleanup(c.validate(), now, { supersededAt })).toEqual([]);
+    expect(serviceControlCleanup(c.validate(), Date.parse(at(24)), { supersededAt })).toEqual([]);
+    const changes = serviceControlCleanup(c.validate(), Date.parse(at(25)), { supersededAt });
+    expect(changes).toEqual([[{ intent: "delete", container: "questions", key: uid(40) }]]);
+    for (const change of changes) c.write(S, change);
+    expect(c.validate().questions).toEqual({});
+  });
+
+  it("a request created on day 0 and final on day 10 stays until day 17", () => {
+    const c = ready();
+    c.write(P, [req(uid(42))]);
+    c.write(S, [{ intent: "event.put", id: uid(42), state: "applied", at: at(10) }]);
+    expect(serviceControlCleanup(c.validate(), Date.parse(at(16)))).toEqual([]);
+    expect(serviceControlCleanup(c.validate(), Date.parse(at(17)))).toHaveLength(1);
+  });
+
+  it("an old resolved question waits for a later answer to settle and age", () => {
+    const c = ready();
+    c.write(S, [question(uid(43))]);
+    c.write(R, [answer(uid(44), uid(43), 0)]);
+    c.write(S, [
+      { intent: "event.put", id: uid(44), state: "applied", at: at(0) },
+      {
+        intent: "question.resolve",
+        qid: uid(43),
+        resolved: { answerId: uid(44), choice: "accept", at: at(0) },
+      },
+    ]);
+    // A second answer on day 9, still being handled, then rejected on day 12.
+    c.write(R, [answer(uid(45), uid(43), 9)]);
+    c.write(S, [{ intent: "event.put", id: uid(45), state: "received", at: at(9) }]);
+    expect(serviceControlCleanup(c.validate(), Date.parse(at(30)))).toEqual([]);
+    c.write(S, [
+      {
+        intent: "event.put",
+        id: uid(45),
+        state: "rejected",
+        code: "already_answered",
+        at: at(12),
+      },
+    ]);
+    expect(serviceControlCleanup(c.validate(), Date.parse(at(18)))).toEqual([]);
+    const changes = serviceControlCleanup(c.validate(), Date.parse(at(19)));
+    expect(changes).toHaveLength(1);
+    for (const change of changes) c.write(S, change);
+    const v = c.validate();
+    expect([v.questions, v.answers, v.events].map((m) => Object.keys(m).length)).toEqual([0, 0, 0]);
+  });
+});

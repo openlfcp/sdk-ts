@@ -15,7 +15,11 @@ export {
   serviceControlWriterClass,
 } from "./admission.js";
 
-export { SERVICE_CONTROL_DISPLAY_DAYS, serviceControlCleanup } from "./cleanup.js";
+export {
+  SERVICE_CONTROL_DISPLAY_DAYS,
+  type ServiceControlCleanupOptions,
+  serviceControlCleanup,
+} from "./cleanup.js";
 export {
   type ServiceControlBatchResult,
   type ServiceControlChanged,
