@@ -32,6 +32,7 @@ import {
   heldDeks,
   type IdentityChannel,
   IdentityConflict,
+  type IdentityRequestEntry,
   identityWriterClass,
   keyRecipients,
   leafPayload,
@@ -45,14 +46,26 @@ import {
   recordSeq,
   registerDevice,
   rotatorTest,
+  type SectionApprovalInput,
+  sectionApprovalDecision,
   signChain,
   storeDek,
   syncChain,
   verifiedFrontier,
 } from "@openlfcp/client";
-import { bytesEqual, dataEpoch, fromHex, hash32, type PrincipalId, toHex } from "@openlfcp/core";
+import {
+  bytesEqual,
+  dataEpoch,
+  fromHex,
+  hash32,
+  type PrincipalId,
+  resourceId,
+  toBase64url,
+  toHex,
+} from "@openlfcp/core";
 import { InvitationSecret, importResourceDEK, sha256 } from "@openlfcp/crypto";
 import { unframeChange } from "@openlfcp/shared-objects/admission";
+import { IdentityReplica } from "@openlfcp/shared-objects/identity";
 import { InMemoryLfcpStorage } from "@openlfcp/storage";
 import {
   ABILITY,
@@ -64,6 +77,7 @@ import {
   DEVICE_KIND,
   decodeControlRecord,
   deviceCertificatePayloadFromCbor,
+  encodePrincipalDescriptor,
   hasAbility,
   parseDataUnit,
   signControlRecord,
@@ -1077,6 +1091,7 @@ const EXTRAS: Readonly<Record<string, Extra>> = {
           DEV_R_holds_2_in_I: holds2(wireId(step), "DEV_R"),
           DEV_B_holds_2_in_I: holds2(wireId(step), "DEV_B"),
         },
+  F20_section_auto_approval: (_f, step) => sectionDecisionFacts(step),
   "F08.link_rejected": (_f, _step, report) =>
     report.outcome === "PAIRING_LINK_REJECTED" ? REJECTED : undefined,
   "F08.missing_material": (_f, step) =>
@@ -1153,8 +1168,131 @@ const _last = (f: FlowCase, pred: (s: FlowStep) => boolean) =>
 const countRecords = (id: string, pred: (r: ControlRecord) => boolean) =>
   chainAt(id).records.filter(pred).length;
 
-const SECTION_AUTO_APPROVAL_NOT_RUN =
-  "sdk-ts has no pre-authorised approval helper yet (SERVICE-CONTROL-PROFILE-01 §7–§8); it lands with the approval phases (E-015), which then verifies this fact.";
+/**
+ * F20: the pre-authorised approval (IDENTITY §5.3 step 4) decided by the
+ * client's sectionApprovalDecision on the corpus records. The request in I
+ * is the document the flow's changes build (step 2's change, or the
+ * owner's S_service_valid for step 16), each entry with the signers of the
+ * changes that wrote it; I's state is the chain at P2_pairing_device (J
+ * active), or at P3c_cancel_pairing for step 19. The fixture names no
+ * bytes of C: pairing[rid] is stated as each step describes it (the same
+ * descriptor from the service class, another descriptor, another class).
+ */
+function identityRequests(changes: readonly string[]): IdentityRequestEntry[] {
+  const fixtures = profileSuite as unknown as {
+    fixtures: { identity_resource: { hex: string }; owner_ref: string };
+  };
+  const replica = IdentityReplica.empty({
+    resource: fromHex(fixtures.fixtures.identity_resource.hex) as never,
+    root: principalOfRef(fixtures.fixtures.owner_ref) as PrincipalId,
+  });
+  for (const id of changes) {
+    const c = profileById.get(
+      id.startsWith("change.") || profileById.has(id) ? id : `change.${id}`,
+    );
+    const i = (c?.inputs ?? {}) as Json;
+    const hex = i.automerge_change_hex?.hex ?? i.automerge_change?.hex;
+    if (typeof hex !== "string") throw new Error(`no change bytes for ${id}`);
+    replica.receiveChanges([
+      {
+        bytes: fromHex(hex),
+        signer: principalOfRef(i.writer_ref) as PrincipalId,
+        actorSeq: BigInt(i.unit_actor_seq),
+        writerClass: i.writer_class,
+      },
+    ]);
+  }
+  return Object.entries(replica.requests()).map(([key, entry]) => ({
+    key,
+    entry: entry as IdentityRequestEntry["entry"],
+    signers: replica.origins("requests", key).map((o) => o.signer),
+  }));
+}
+
+const F20_OWN = ["change.C0_initial", "change.C1_fill", "pairing_writes_own_service_request"];
+const F20_BY_OWNER = ["change.C0_initial", "change.C1_fill", "change.S_service_valid"];
+
+function sectionDecisionFacts(step: FlowStep): Report | undefined {
+  const J = idOf("PAIR_J");
+  const ref = (label: string) => `p:${toBase64url(idOf(label))}`;
+  const resource = (label: string) =>
+    fromHex((wire.fixtures.resources[label] as unknown as { id: { hex: string } }).id.hex);
+  const X = resource("X");
+  const own = identityRequests(F20_OWN);
+  const request = own.find((r) => r.key === ref("BRIDGE_O"));
+  if (request === undefined) throw new Error("step 2 wrote no request for BRIDGE_O");
+  const service = [{ signer: idOf("DEV_A"), writerClass: "service" as const }];
+  const same = { descriptor: request.entry.descriptor, principal: request.key, creators: service };
+  const base: SectionApprovalInput = {
+    root: idOf("OWNER"),
+    identity: chainAt("P2_pairing_device").state,
+    pairingDevice: J,
+    ownSession: true,
+    binding: resourceId(X),
+    requests: own,
+    pairing: same,
+  };
+  const withEntry = (patch: Partial<IdentityRequestEntry["entry"]>): SectionApprovalInput => ({
+    ...base,
+    requests: [{ ...request, entry: { ...request.entry, ...patch } }],
+  });
+  const { pairing: _, ...noPairing } = base;
+  const inputs: Record<number, SectionApprovalInput> = {
+    3: noPairing,
+    4: base,
+    5: { ...base, requests: [] },
+    13: {
+      ...base,
+      pairing: {
+        ...same,
+        descriptor: toBase64url(encodePrincipalDescriptor(party("DEV_B").descriptor)),
+      },
+    },
+    14: withEntry({ scope: [toBase64url(X), toBase64url(resource("Y"))] }),
+    15: withEntry({ scope: [toBase64url(resource("Y"))] }),
+    16: { ...base, requests: identityRequests(F20_BY_OWNER) },
+    17: {
+      ...base,
+      pairing: { ...same, creators: [{ signer: idOf("DEV_A"), writerClass: "other" }] },
+    },
+    18: { ...base, ownSession: false },
+    19: { ...base, identity: chainAt("P3c_cancel_pairing").state },
+    20: withEntry({ kind: 0, scope: [] }),
+  };
+  const input = inputs[step.n];
+  if (input === undefined) return undefined;
+  const d = sectionApprovalDecision(input);
+  // A request naming J, written by someone else, is what the client ignored.
+  const ignored = input.requests.some(
+    (r) => r.entry.pairing === `p:${toBase64url(J)}` && r.signers.some((x) => !bytesEqual(x, J)),
+  );
+  switch (d.kind) {
+    case "approve":
+      return { outcome: "pre-authorised", decision: "approve", human_comparison: false };
+    case "wait":
+      return ignored
+        ? {
+            outcome: "request ignored (not signed by J); no consume, still waiting",
+            consume_proposed: false,
+            cancel_reason: null,
+          }
+        : { outcome: "waiting", decision: "wait", cancel: false };
+    case "mismatch":
+      return { outcome: "cancelled: mismatch", consume_proposed: false, cancel_reason: "mismatch" };
+    case "not-own":
+      return {
+        outcome: "not approved; left to the client that created it",
+        consume_proposed: false,
+        cancel_reason: null,
+      };
+    case "closed":
+      return {
+        outcome: d.consumed ? "consumed" : "not approved; already cancelled",
+        consume_proposed: false,
+        cancel_reason: null,
+      };
+  }
+}
 
 const FINALS: Readonly<Record<string, Final>> = {
   F01_register_write_revoke_cutoff: async (f, steps) => {
@@ -1209,12 +1347,10 @@ const FINALS: Readonly<Record<string, Final>> = {
   "F08.link_rejected": () => ({
     not_verified_fields: { requests_written_after_rejection: LINK_REJECTION_NOT_RUN },
   }),
-  // The pre-authorised approval helper (IDENTITY §5.3 step 4) lands with the approval phases (E-015).
-  F20_section_auto_approval: () => ({
-    not_verified_fields: {
-      approved_without_human: SECTION_AUTO_APPROVAL_NOT_RUN,
-      cancelled_mismatch: SECTION_AUTO_APPROVAL_NOT_RUN,
-    },
+  // The decisions sectionApprovalDecision took on the steps above (EXTRAS).
+  F20_section_auto_approval: (_f, steps) => ({
+    approved_without_human: steps.filter((s) => s.decision === "approve").length,
+    cancelled_mismatch: steps.filter((s) => s.cancel_reason === "mismatch").length,
   }),
   "F08.missing_material": (_f, steps) => ({
     sessions_without_material: steps.filter(
