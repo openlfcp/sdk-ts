@@ -66,3 +66,4 @@ export {
   type ServiceControlRequest,
   type ServiceControlRootKey,
 } from "./values.js";
+export type { ServiceControlIntent } from "./write.js";

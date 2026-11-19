@@ -30,6 +30,8 @@ import {
   checkServiceControlUnit,
   refuseServiceControl,
   ServiceControlAdmission,
+  type ServiceControlAdmissionDiagnostic,
+  ServiceControlAdmissionError,
   type ServiceControlOptions,
   type ServiceControlWriter,
   type ServiceControlWriterClass,
@@ -37,6 +39,7 @@ import {
 import { ScReader } from "./reader.js";
 import { type ServiceControlValidation, validateServiceControl } from "./schema.js";
 import { deriveServiceControlActorId, SERVICE_CONTROL_PROFILE_ID } from "./values.js";
+import { applyServiceControlIntent, type ServiceControlIntent } from "./write.js";
 
 /** Wire authorization, decryption and the signer's class at control_ref happen before this boundary. */
 export interface ServiceControlUnit extends ServiceControlWriter {
@@ -258,6 +261,48 @@ export class ServiceControlReplica {
         .filter(([hash]) => !removed.has(hash))
         .map(([, unit]) => unit),
       this.#options,
+    );
+  }
+
+  /**
+   * The writer's own change (§3): `intents` in one change on the local
+   * heads, admitted here exactly as a received change is (§4, with the
+   * class `writer` has at the control_ref of the unit that will carry it).
+   * A change admission refuses throws ServiceControlAdmissionError with its
+   * diagnostic, LIMIT_EXCEEDED for an entry over its size, and leaves the
+   * replica as it was: the client does not send it ("Couldn't send", §4,
+   * §11). The LFCP actor sequence of `writer` matters only to the initial
+   * change (SC0: unit 1).
+   */
+  write(writer: ServiceControlWriter, intents: readonly ServiceControlIntent[]): CheckedChange {
+    if (intents.length === 0) throw new LfcpError("PROFILE_INVALID", "no intent to write");
+    const actor = toHex(deriveServiceControlActorId(this.#options.resource, writer.signer));
+    const fork = A.clone(this.#doc, { actor });
+    let bytes: Uint8Array;
+    try {
+      const doc = A.change(fork, { time: 0 }, (d) => {
+        for (const i of intents) applyServiceControlIntent(d as Record<string, unknown>, i);
+      });
+      const last = A.getLastLocalChange(doc);
+      if (last === null || last === undefined)
+        throw new LfcpError("PROFILE_INVALID", "the intents change nothing");
+      bytes = last;
+    } finally {
+      A.free(fork);
+    }
+    const change = checkChange(bytes);
+    const r = this.receiveChanges([{ ...writer, bytes }]);
+    if (r.admitted.includes(change.hash)) return checkChange(bytes);
+    const refused = r.refused.find((x) => x.hash === change.hash);
+    if (refused !== undefined && !refused.held)
+      throw new ServiceControlAdmissionError(
+        refused.diagnostic as ServiceControlAdmissionDiagnostic,
+        refused.message,
+      );
+    this.#waiting.delete(change.hash);
+    throw new LfcpError(
+      "PROFILE_INVALID",
+      refused?.message ?? "the change was not admitted on the local heads",
     );
   }
 
