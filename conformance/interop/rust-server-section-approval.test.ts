@@ -6,10 +6,14 @@
 // kind-1 request in I as J, B writes pairing[rid]; P approves without the
 // human through autoApproveSection: A1 consume, A2 grant (I), A3 approval
 // record (C, through serviceControlPort over P's SyncClient), A4
-// registration (X). Each section loses one boundary's answer: the record
-// is committed but the client never hears it (A1, A2, A4), or the client
-// crashes right after committing A3. The next re-check recovers: one of
-// each record, A3 before A4, D ready in its section.
+// registration (X). Each section fails at one boundary: the server commits
+// the record of A1, A2 or A4 and the client never hears the answer; for A3
+// the client crashes once the server has acknowledged the approval record
+// but before its journal says so, or once the record is durable in its own
+// storage but before the server has it (its DATA_PUT held on the wire). A
+// crash at A3 restarts P's SyncClient and profile from their storage. The
+// next re-check recovers: one of each record, A3 acknowledged before A4,
+// D ready in its section.
 //
 // Skipped (saying why) without a server checkout or cargo, unless
 // LFCP_REQUIRE_LIVE=1; LFCP_SERVER_BIN runs a prebuilt server instead.
@@ -58,9 +62,10 @@ import {
   signControlRecord,
 } from "@openlfcp/wire";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createResource, Side, sleep, waitFor } from "./harness.js";
+import { createResource, Side, type SideOptions, sleep, waitFor } from "./harness.js";
 import { chainOf, hostResource, installation, type Node } from "./identity-live.js";
 import { type RunningRustServer, startRustServer } from "./rust-server.mjs";
+import { WireTap } from "./wire-tap.js";
 
 declare const console: { warn(...a: unknown[]): void };
 
@@ -98,6 +103,10 @@ function controlSide(
   root: Node,
   who: Node,
   cls: ServiceControlSignerClass,
+  /** A restarted client: the same storage and secrets, a new SyncClient and profile. */
+  keep: Partial<
+    Pick<SideOptions<ServiceControlDataProfile>, "storage" | "secrets" | "webSocket">
+  > = {},
 ) {
   const profile = new ServiceControlDataProfile({
     resource: C,
@@ -111,6 +120,7 @@ function controlSide(
     who: who.installation,
     profile,
     commit: profile.commitBinding(idOf(who), cls) as never,
+    ...keep,
   });
   return { side, profile };
 }
@@ -148,29 +158,8 @@ function losing(
   };
 }
 
-/** A port whose client crashes once right after its A3 commit is durable. */
-function crashingAfterCommit(port: ServiceControlPort): ServiceControlPort {
-  let crashed = false;
-  return {
-    resource: port.resource,
-    state: () => port.state(),
-    creatorsOf: (c, k) => port.creatorsOf(c, k),
-    commit: async (intents, operation) => {
-      const r = await port.commit(intents, operation);
-      if (
-        !crashed &&
-        (intents as ServiceControlIntent[]).some((i) => i.intent === "approval.create")
-      ) {
-        crashed = true;
-        throw new Error("crashed after the A3 commit");
-      }
-      return r;
-    },
-  };
-}
-
 describe("section auto-approval ↔ Rust reference server (live, E-015)", () => {
-  it("a crash at each ACK boundary A1–A4 recovers: one of each record, A3 before A4", async (ctx) => {
+  it("a crash at each ACK boundary A1–A4 recovers: one of each record, A3 acknowledged before A4", async (ctx) => {
     if (server === undefined) {
       console.warn(`SKIPPED: section auto-approval interop (${skip})`);
       ctx.skip();
@@ -182,7 +171,7 @@ describe("section auto-approval ↔ Rust reference server (live, E-015)", () => 
     const sides: Side<ServiceControlDataProfile>[] = [];
     try {
       const sections = [];
-      for (let n = 1; n <= 4; n++) sections.push(await hostResource(P, url, `X${n}`));
+      for (let n = 1; n <= 5; n++) sections.push(await hostResource(P, url, `X${n}`));
       const created = await createIdentityResource({
         ...P,
         url,
@@ -195,8 +184,32 @@ describe("section auto-approval ↔ Rust reference server (live, E-015)", () => 
       // C, created and initialized by the root; B approved as its base installation (A§4.1).
       const C = generateResourceId();
       const dek = generateResourceDEK();
-      const plugin = controlSide(url, C, P, P, "root");
+      // P's client of C; its outgoing DATA_PUTs are held while `hold` is set.
+      let hold = false;
+      const tapOf = () => {
+        const tap = new WireTap();
+        tap.rule((f) =>
+          hold && f.direction === "out" && f.message?.type === "DATA_PUT"
+            ? { kind: "drop" }
+            : undefined,
+        );
+        return tap;
+      };
+      let plugin = controlSide(url, C, P, P, "root", { webSocket: tapOf().factory });
       sides.push(plugin.side);
+      /** P crashes: its SyncClient and profile stop; a new one starts from the same storage. */
+      const restartPlugin = async () => {
+        const old = plugin;
+        await old.side.stop();
+        plugin = controlSide(url, C, P, P, "root", {
+          storage: old.side.storage,
+          secrets: old.side.secrets,
+          webSocket: tapOf().factory,
+        });
+        sides.push(plugin.side);
+        plugin.side.start();
+        await waitFor("P LIVE again", () => plugin.side.client.resourceState(C) === "LIVE", 30_000);
+      };
       const genesis = await createResource(plugin.side, url, dek);
       plugin.side.start({ open: false });
       await waitFor("plugin READY", () => plugin.side.client.connectionState === "READY");
@@ -263,15 +276,29 @@ describe("section auto-approval ↔ Rust reference server (live, E-015)", () => 
         30_000,
       );
 
-      const port = serviceControlPort({
-        client: plugin.side.client,
-        profile: plugin.profile,
+      // The port over P's current client (a restart replaces it).
+      const portNow = (): ServiceControlPort =>
+        serviceControlPort({
+          client: plugin.side.client,
+          profile: plugin.profile,
+          resource: C,
+          synchronised: () => plugin.side.client.resourceState(C) === "LIVE",
+        });
+      const port: ServiceControlPort = {
         resource: C,
-        synchronised: () => plugin.side.client.resourceState(C) === "LIVE",
-      });
+        state: () => portNow().state(),
+        creatorsOf: (c, k) => portNow().creatorsOf(c, k),
+        commit: (intents, operation) => portNow().commit(intents, operation),
+      };
       const order: string[] = [];
 
-      const boundaries = ["A1", "A2", "A3", "A4"] as const;
+      const boundaries = [
+        "A1",
+        "A2",
+        "A3 after the server's ACK",
+        "A3 before the server's ACK",
+        "A4",
+      ] as const;
       for (const [i, boundary] of boundaries.entries()) {
         const X = (sections[i] as { resource: ResourceId }).resource;
         const label = (r: ResourceId) =>
@@ -326,7 +353,7 @@ describe("section auto-approval ↔ Rust reference server (live, E-015)", () => 
           30_000,
         );
 
-        // The first run loses the boundary's answer.
+        // The first run fails at the boundary.
         const lose =
           boundary === "A1"
             ? (r: ResourceId, b: Uint8Array) => label(r) === "I" && type(b) === "DEVICE_REVOKE"
@@ -352,28 +379,71 @@ describe("section auto-approval ↔ Rust reference server (live, E-015)", () => 
             });
           },
         };
+        const isA3 = (intents: readonly unknown[]) =>
+          (intents as ServiceControlIntent[]).some((x) => x.intent === "approval.create");
+        // Each write to C with its outcome: A3 counts once the server acknowledged it.
         const loggingPort: ServiceControlPort = {
           ...port,
-          state: () => port.state(),
-          creatorsOf: (c, k) => port.creatorsOf(c, k),
           commit: async (intents, operation) => {
-            order.push(
-              `${boundary}:C:${(intents as ServiceControlIntent[]).map((x) => x.intent).join(",")}`,
-            );
-            return port.commit(intents, operation);
+            const r = await port.commit(intents, operation);
+            const names = (intents as ServiceControlIntent[]).map((x) => x.intent).join(",");
+            order.push(`${boundary}:C:${names}:${r.kind}`);
+            return r;
           },
         };
+        // A3's crash points. After the ACK: the commit is re-read until the server has
+        // acknowledged it, then the client dies before resumeApproval journals it.
+        // Before the ACK: the DATA_PUT is held, the record is durable only here.
+        const crashed: { at?: string; status?: string } = {};
+        const crashingPort: ServiceControlPort = {
+          ...loggingPort,
+          commit: async (intents, operation) => {
+            const r = await loggingPort.commit(intents, operation);
+            if (!isA3(intents) || crashed.at !== undefined) return r;
+            if (boundary === "A3 after the server's ACK") {
+              let acked = r;
+              const until = Date.now() + 30_000;
+              while (acked.kind !== "acknowledged" && Date.now() < until) {
+                await sleep(50);
+                acked = await port.commit(intents, operation);
+              }
+              crashed.status = acked.kind;
+            } else crashed.status = r.kind;
+            crashed.at = operation;
+            throw new Error(`crashed at ${boundary}`);
+          },
+        };
+        if (boundary === "A3 before the server's ACK") hold = true;
         const first = await autoApproveSection({
           ...P,
           network: losing(tapped, lose),
           session: s.session,
           rid,
-          control: boundary === "A3" ? crashingAfterCommit(loggingPort) : loggingPort,
+          control: boundary.startsWith("A3") ? crashingPort : loggingPort,
         }).catch((e: unknown) => ({ crashed: String(e) }));
         expect(first, boundary).not.toMatchObject({
           kind: "approval",
           approval: { kind: "approved", registrations: [{ status: "registered" }] },
         });
+        if (boundary.startsWith("A3")) {
+          // The crash happened exactly at the boundary: the server had (or had not) acknowledged
+          // A3, and the journal had not recorded it; nothing was registered in X.
+          expect(first, boundary).toEqual({ crashed: `Error: crashed at ${boundary}` });
+          expect(crashed.status, boundary).toBe(
+            boundary === "A3 after the server's ACK" ? "acknowledged" : "queued",
+          );
+          const op = (
+            await new OperationJournal(P.storage).list({ kind: "pairing-approval" })
+          ).find((o) => o.intent.session === s.session);
+          expect(op?.phases.find((ph) => ph.id === "approval-record")?.state, boundary).toBe(
+            "pending",
+          );
+          expect((await chainOf(P, url, X)).records.length, boundary).toBe(1);
+          if (boundary === "A3 before the server's ACK")
+            expect(bridge.profile.state().approvals[ref(idOf(D))], boundary).toBeUndefined();
+          hold = false;
+          await restartPlugin();
+        }
 
         // The next re-check (a push of I or C): until the approval is done.
         let result: SectionApprovalResult | undefined;
@@ -425,9 +495,18 @@ describe("section auto-approval ↔ Rust reference server (live, E-015)", () => 
         expect(plugin.profile.replica.creatorsOf("approvals", ref(idOf(D))).length, boundary).toBe(
           1,
         );
-        // A3 before A4.
-        const a3 = order.findIndex((o) => o.startsWith(`${boundary}:C:approval.create`));
-        const a4 = order.findIndex((o) => o === `${boundary}:X:DEVICE_GRANT`);
+        // The service sees the one approval record too (it reached the server once).
+        await waitFor(
+          `${boundary}: B sees the approval`,
+          () => bridge.profile.state().approvals[ref(idOf(D))] !== undefined,
+          30_000,
+        );
+        expect(bridge.profile.replica.creatorsOf("approvals", ref(idOf(D))).length, boundary).toBe(
+          1,
+        );
+        // A3 acknowledged before A4.
+        const a3 = order.indexOf(`${boundary}:C:approval.create:acknowledged`);
+        const a4 = order.indexOf(`${boundary}:X:DEVICE_GRANT`);
         expect(a3, boundary).toBeGreaterThanOrEqual(0);
         expect(a4, `${boundary} ${order.join(" ")}`).toBeGreaterThan(a3);
         const journal = new OperationJournal(P.storage);
