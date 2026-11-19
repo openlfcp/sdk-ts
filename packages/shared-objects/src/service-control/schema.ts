@@ -52,9 +52,14 @@ type Scalar = "s" | "u" | "b" | "t" | "r" | "p" | "h" | "id" | "op" | "x" | "m";
 type FieldType =
   | Scalar
   | { readonly enum: readonly string[] }
-  | { readonly list: FieldType }
+  | { readonly list: FieldType; readonly max?: number }
+  | { readonly mapOf: FieldType }
   | { readonly fields: Readonly<Record<string, FieldType>> };
 const fields = (f: Readonly<Record<string, FieldType>>) => ({ fields: f });
+/** §2.1 `list<Example>` of a question or preview: at most five (§4 SC7). */
+const EXAMPLES: FieldType = { list: "x", max: MAX_ITEMS };
+/** §2.1 `map<string, uint>`. */
+const COUNTS: FieldType = { mapOf: "u" };
 
 /** §2.1; a key ending in "?" is optional. */
 const SCHEMA: Readonly<Record<string, FieldType>> = {
@@ -91,7 +96,14 @@ const SCHEMA: Readonly<Record<string, FieldType>> = {
     pending: fields({ toApple: "u", toLfcp: "u" }),
     refused: "u",
     unconfirmed: "u",
-    "preview?": "m",
+    "preview?": fields({
+      id: "s",
+      planHash: "s",
+      filter: "s",
+      list: "s",
+      "items?": EXAMPLES,
+      "counts?": COUNTS,
+    }),
     "needsAttention?": fields({ code: "s" }),
     "lifecycle?": "s",
   }),
@@ -102,8 +114,8 @@ const SCHEMA: Readonly<Record<string, FieldType>> = {
     kind: "s",
     anomalyId: "s",
     snapshotHash: "s",
-    items: { list: "x" },
-    counts: "m",
+    items: EXAMPLES,
+    counts: COUNTS,
     "actor?": "s",
     options: { list: "s" },
     at: "t",
@@ -160,8 +172,16 @@ function checkValue(
   if ("list" in type) {
     if (v[0] !== "list") return void found.add("INVALID_FIELD_TYPE");
     const id = String(v[1]);
-    for (let i = 0; i < reader.length(id); i++)
-      checkValue(reader, type.list, reader.get(id, i), found);
+    const length = reader.length(id);
+    if (type.max !== undefined && length > type.max) found.add("LIMIT_EXCEEDED");
+    for (let i = 0; i < length; i++) checkValue(reader, type.list, reader.get(id, i), found);
+    return;
+  }
+  if ("mapOf" in type) {
+    if (!isMapValue(v)) return void found.add("INVALID_FIELD_TYPE");
+    // Every concurrent value of every key (SOP §45).
+    for (const k of reader.keys(v[1]))
+      for (const e of reader.all(v[1], k)) checkValue(reader, type.mapOf, e, found);
     return;
   }
   if (!isMapValue(v)) return void found.add("INVALID_FIELD_TYPE");
@@ -206,11 +226,6 @@ export function entryDiagnostics(
   if (container === "approvals") {
     if (field("principal") !== key) found.add("INVALID_KEY");
     if (field("role") === "base" && field("resource") !== resource) found.add("INVALID_ENUM_VALUE");
-  }
-  if (container === "questions") {
-    const items = reader.get(v[1], "items");
-    if (items?.[0] === "list" && reader.length(String(items[1])) > MAX_ITEMS)
-      found.add("LIMIT_EXCEEDED");
   }
   if (container === "pairing") {
     const descriptor = field("descriptor");

@@ -29,6 +29,7 @@ import {
   STATUS,
   T0,
   uid,
+  X,
 } from "./support/service-control.js";
 
 const options = { resource, root, genesisSigner: root };
@@ -198,5 +199,63 @@ describe("SERVICE-CONTROL-PROFILE-01 §2.3 the class on the change's causal hist
     expect(
       admit(admission, byOther, writer(principalId(new Uint8Array(32).fill(12)), "other")),
     ).toBe("UNAUTHORIZED_WRITER");
+  });
+});
+
+describe("SERVICE-CONTROL-PROFILE-01 §2.1 field types in SC0, SC4 and SC7", () => {
+  it("checks a binding's preview and a question's counts (§2.1, SC4, SC7)", () => {
+    const approvedDoc = () => {
+      const admission = new ServiceControlAdmission(options);
+      const init = initial();
+      admit(admission, init, R);
+      const base = edit(init, personal, (d) => put(d.approvals, principalRef(B), approval(B)));
+      admit(admission, base, personalWriter());
+      return { admission, base };
+    };
+    const binding = (preview: unknown) => ({
+      state: "preview",
+      generation: 1,
+      list: "Groceries",
+      filter: "all",
+      pending: { toApple: 0, toLfcp: 0 },
+      refused: 0,
+      unconfirmed: 0,
+      preview,
+    });
+    const preview = { id: "p-1", planHash: "h-1", filter: "all", list: "Groceries" };
+    const write = (value: unknown) => {
+      const { admission, base } = approvedDoc();
+      const doc = edit(base, B, (d) => put(d.bindings, X, value));
+      return admit(admission, doc, serviceWriter());
+    };
+    expect(write(binding({ ...preview, items: ["Milk"], counts: { add: 2 } }))).toBe("service");
+    expect(write(binding({ id: 123, items: ["1"] }))).toBe("MISSING_REQUIRED_FIELD");
+    expect(write(binding({ ...preview, id: 123 }))).toBe("INVALID_FIELD_TYPE");
+    expect(write(binding({ ...preview, counts: { bad: "string" } }))).toBe("INVALID_FIELD_TYPE");
+    expect(write(binding({ ...preview, items: ["1", "2", "3", "4", "5", "6"] }))).toBe(
+      "LIMIT_EXCEEDED",
+    );
+    expect(write(binding({ ...preview, items: ["x".repeat(81)] }))).toBe("LIMIT_EXCEEDED");
+    const question = (counts: unknown) => ({
+      binding: X,
+      generation: 1,
+      kind: "mass-delete",
+      anomalyId: "an-1",
+      snapshotHash: "sh-1",
+      items: [],
+      counts,
+      options: ["apply"],
+      at: T0,
+    });
+    const ask = (counts: unknown) => {
+      const { admission, base } = approvedDoc();
+      return admit(
+        admission,
+        edit(base, B, (d) => put(d.questions, uid(11), question(counts))),
+        serviceWriter(),
+      );
+    };
+    expect(ask({ deleted: 12 })).toBe("service");
+    expect(ask({ deleted: "12" })).toBe("INVALID_FIELD_TYPE");
   });
 });
