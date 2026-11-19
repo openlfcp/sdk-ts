@@ -6,8 +6,9 @@ import {
   toBase64url,
   toHex,
 } from "@openlfcp/core";
-import { type ControlState, DEVICE_KIND, revocationOf } from "@openlfcp/wire";
+import { type ControlState, DEVICE_KIND, parsePairingUri, revocationOf } from "@openlfcp/wire";
 import { type PairingRequestValue, principalOfRef, principalRefOf } from "./document.js";
+import type { LinearChain } from "./phases.js";
 
 /**
  * The approving client's side of a service managed through a control
@@ -347,4 +348,115 @@ function refusal(
   for (const other of i.identity.devices.values())
     if (other.issuers.some((e) => bytesEqual(e, P))) return "it has issued a certificate";
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Reconciliation order (SERVICE-CONTROL-PROFILE-01 §7.4, IDENTITY-PROFILE-01 §7.1 step 2)
+
+/** SERVICE-CONTROL-PROFILE-01's Data Profile identifier, as the roster names it. */
+export const SERVICE_CONTROL_PROFILE_ID = "org.openlfcp.service-control.v1";
+
+/** A control Resource of the roster, and this client's view of it (undefined: not open here). */
+export interface RosterControl {
+  readonly resource: ResourceId;
+  readonly control?: Pick<ServiceControlPort, "state" | "creatorsOf">;
+}
+
+/**
+ * The kind-1 devices `C` names (§7.4 "Reconciliation order"): a device
+ * whose scope is exactly `[C]` (a base installation), or one proven for
+ * some `requests[rid]` of `C` by conditions 1 to 3 of the Section rule: a
+ * `pair-section` request created by `root` or `personal` whose link names
+ * a pairing device `J` of `R`, consumed in `I` with digest `d`, and a
+ * `DEVICE_GRANT` of `I` with field 2 = `J` binding a leaf with digest `d`,
+ * kind 1, root `R`, mask {1, 2}, scope exactly `[X]` (the request's
+ * binding). `pairing[rid]` is never the source of a Principal. Only the
+ * requests `C` holds now are read: one deleted from `C` is final, and its
+ * approval exists or it was cancelled (§3, §9).
+ */
+export function controlNames(
+  identity: LinearChain,
+  C: ResourceId,
+  state: ServiceControlStateView,
+  creatorsOf: ServiceControlPort["creatorsOf"],
+): ReadonlySet<string> {
+  const I = identity.state;
+  const R = I.owner.principalId;
+  const out = new Set<string>();
+  for (const [hex, d] of I.devices)
+    if (
+      d.kind === DEVICE_KIND.SERVICE &&
+      bytesEqual(d.root, R) &&
+      d.scope.length === 1 &&
+      bytesEqual(d.scope[0] as ResourceId, C)
+    )
+      out.add(hex);
+  for (const [rid, request] of Object.entries(state.requests)) {
+    if (request.op !== "pair-section" || typeof request.binding !== "string") continue;
+    if (!createdBy(creatorsOf("requests", rid), ["root", "personal"])) continue;
+    let J: PrincipalId;
+    try {
+      J = parsePairingUri(String(request.args.link)).pairingDevice;
+    } catch {
+      continue;
+    }
+    const consumed = revocationOf(I, R, J);
+    if (consumed?.reason !== 3n || consumed.approval === null || consumed.approval === undefined)
+      continue;
+    for (const r of identity.records) {
+      if (r.body.type !== "DEVICE_GRANT" || r.body.pairingDevice === undefined) continue;
+      if (r.body.pairingDevice === null || !bytesEqual(r.body.pairingDevice, J)) continue;
+      const leaf = r.body.chain.leaf;
+      const p = leaf.payload;
+      if (
+        bytesEqual(leaf.payloadDigest, consumed.approval) &&
+        p.kind === DEVICE_KIND.SERVICE &&
+        bytesEqual(p.root, R) &&
+        p.mask.length === 2 &&
+        p.mask.includes(1n) &&
+        p.mask.includes(2n) &&
+        p.scope.length === 1 &&
+        toBase64url(p.scope[0] as ResourceId) === request.binding
+      )
+        out.add(toHex(p.device.principalId));
+    }
+  }
+  return out;
+}
+
+/**
+ * §7.4 for a reconciler that implements the profile: why the registration
+ * of kind-1 device `P` is deferred, or undefined when it may go ahead.
+ * Every control Resource of the roster must be synchronised (an unreachable
+ * one defers every kind-1 registration); when one names `P`, its
+ * `approvals[P]` must be present.
+ */
+export function controlRegistrationGate(
+  identity: LinearChain,
+  controls: readonly RosterControl[],
+): (device: PrincipalId) => string | undefined {
+  const views: {
+    resource: ResourceId;
+    state: ServiceControlStateView;
+    names: ReadonlySet<string>;
+  }[] = [];
+  for (const c of controls) {
+    const state = c.control?.state();
+    if (c.control === undefined || state === undefined) {
+      const why = `the control Resource ${toHex(c.resource)} is not synchronised`;
+      return () => why;
+    }
+    views.push({
+      resource: c.resource,
+      state,
+      names: controlNames(identity, c.resource, state, c.control.creatorsOf),
+    });
+  }
+  return (device) => {
+    const hex = toHex(device);
+    for (const v of views)
+      if (v.names.has(hex) && v.state.approvals[principalRefOf(device)] === undefined)
+        return `the control Resource ${toHex(v.resource)} names it and holds no approval for it yet`;
+    return undefined;
+  };
 }
