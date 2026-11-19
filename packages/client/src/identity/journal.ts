@@ -68,7 +68,9 @@ export interface JournalPhase {
     | "revoke"
     | "rotate"
     | "claim"
-    | "document";
+    | "document"
+    /** SERVICE-CONTROL-PROFILE-01 §7.1 phase A3: the approval record in `C`. */
+    | "approval-record";
   /** The Resource the phase acts on (hex). */
   readonly resource: string;
   readonly state: PhaseState | "refused";

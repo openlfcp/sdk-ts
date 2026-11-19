@@ -179,6 +179,43 @@ describe("SERVICE-CONTROL-PROFILE-01 §3: writing C", () => {
   });
 });
 
+describe("SERVICE-CONTROL-PROFILE-01 §2.4: who created an entry", () => {
+  it("names the change, signer and class that created each entry, not a later write into it", () => {
+    const c = ready();
+    c.write(P, [
+      {
+        intent: "request.create",
+        rid: uid(60),
+        request: request("pair-section", { args: { link: "l" } }),
+      },
+    ]);
+    c.write(S, [
+      {
+        intent: "pairing.create",
+        rid: uid(60),
+        pairing: {
+          descriptor: serviceDevice.text,
+          principal: principalRef(B),
+          fp: deviceFingerprint(B),
+        },
+      },
+      { intent: "event.put", id: uid(60), state: "request-ready", at: T0 },
+    ]);
+    const of = (container: "requests" | "pairing" | "approvals" | "events", key: string) =>
+      c.creatorsOf(container, key).map((w) => [w.writerClass, principalRef(w.signer)]);
+    expect(of("requests", uid(60))).toEqual([["personal", principalRef(personal)]]);
+    expect(of("pairing", uid(60))).toEqual([["service", principalRef(B)]]);
+    expect(of("approvals", principalRef(B))).toEqual([["root", principalRef(root)]]);
+    // A later write into the entry is not its creation.
+    c.write(S, [{ intent: "event.put", id: uid(60), state: "ready", at: T0 }]);
+    expect(of("events", uid(60))).toEqual([["service", principalRef(B)]]);
+    expect(c.creatorsOf("pairing", uid(61))).toEqual([]);
+    expect(c.creatorsOf("pairing", uid(60)).every((w) => c.authorOf(w.hash) !== undefined)).toBe(
+      true,
+    );
+  });
+});
+
 describe("SERVICE-CONTROL-PROFILE-01 §3: a write of the current values", () => {
   it("makes no change and nothing to send", () => {
     const c = ready();
@@ -379,6 +416,33 @@ describe("SERVICE-CONTROL-PROFILE-01 §9: 7 days from becoming final, not from c
     c.write(S, [{ intent: "event.put", id: uid(42), state: "applied", at: at(10) }]);
     expect(serviceControlCleanup(c.validate(), Date.parse(at(16)))).toEqual([]);
     expect(serviceControlCleanup(c.validate(), Date.parse(at(17)))).toHaveLength(1);
+  });
+
+  it("an answer without a final event holds its question until its own event is final (PB-33)", () => {
+    const c = ready();
+    c.write(S, [question(uid(46))]);
+    c.write(R, [answer(uid(47), uid(46), 0)]);
+    c.write(S, [
+      { intent: "event.put", id: uid(47), state: "applied", at: at(0) },
+      {
+        intent: "question.resolve",
+        qid: uid(46),
+        resolved: { answerId: uid(47), choice: "accept", at: at(0) },
+      },
+    ]);
+    // A second answer on day 1 the service has not handled yet: no event at all.
+    c.write(R, [answer(uid(48), uid(46), 1)]);
+    expect(serviceControlCleanup(c.validate(), Date.parse(at(30)))).toEqual([]);
+    // Rejected on day 20: the question and both answers go 7 days later, not before.
+    c.write(S, [
+      { intent: "event.put", id: uid(48), state: "rejected", code: "already_answered", at: at(20) },
+    ]);
+    expect(serviceControlCleanup(c.validate(), Date.parse(at(26)))).toEqual([]);
+    const changes = serviceControlCleanup(c.validate(), Date.parse(at(27)));
+    expect(changes).toHaveLength(1);
+    for (const change of changes) c.write(S, change);
+    const v = c.validate();
+    expect([v.questions, v.answers, v.events].map((m) => Object.keys(m).length)).toEqual([0, 0, 0]);
   });
 
   it("an old resolved question waits for a later answer to settle and age", () => {

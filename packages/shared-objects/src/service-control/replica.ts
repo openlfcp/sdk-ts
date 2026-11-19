@@ -36,9 +36,13 @@ import {
   type ServiceControlWriter,
   type ServiceControlWriterClass,
 } from "./admission.js";
-import { ScReader } from "./reader.js";
+import { isObject, ScReader } from "./reader.js";
 import { type ServiceControlValidation, validateServiceControl } from "./schema.js";
-import { deriveServiceControlActorId, SERVICE_CONTROL_PROFILE_ID } from "./values.js";
+import {
+  deriveServiceControlActorId,
+  SERVICE_CONTROL_PROFILE_ID,
+  type ServiceControlContainer,
+} from "./values.js";
 import { applyServiceControlIntent, type ServiceControlIntent } from "./write.js";
 
 /** Wire authorization, decryption and the signer's class at control_ref happen before this boundary. */
@@ -344,6 +348,49 @@ export class ServiceControlReplica {
     const writerClass = this.#classes.get(hash);
     if (unit === undefined || writerClass === undefined) return undefined;
     return Object.freeze({ signer: unit.signer.slice() as PrincipalId, writerClass });
+  }
+
+  /**
+   * §2.4 for an entry: the admitted changes that created the value
+   * `container[key]` holds now (each value of a conflict), with the signer
+   * of the unit that carried each and the class admission judged it by. An
+   * earlier value since deleted is not its provenance. This is what a client
+   * checks before it trusts an entry: `pairing[rid]` admitted from `service`
+   * (IDENTITY-PROFILE-01 §5.3 step 4), `requests[rid]` written by itself, an
+   * approval created by `root` or `personal` (§7.2).
+   */
+  creatorsOf(
+    container: ServiceControlContainer,
+    key: string,
+  ): readonly {
+    readonly hash: string;
+    readonly signer: PrincipalId;
+    readonly writerClass: ServiceControlWriterClass;
+  }[] {
+    const reader = new ScReader(A.getBackend(this.#doc));
+    const map = reader.map("_root", container);
+    if (map === undefined) return Object.freeze([]);
+    // Each value is named by the op that made it, `<counter>@<actor>`.
+    const made = reader
+      .all(map, key)
+      .filter(isObject)
+      .map((v) => {
+        const [counter, actor] = String(v[1]).split("@");
+        return { counter: Number(counter), actor };
+      });
+    const out: { hash: string; signer: PrincipalId; writerClass: ServiceControlWriterClass }[] = [];
+    if (made.length === 0) return Object.freeze(out);
+    for (const [hash, unit] of this.#accepted) {
+      const change = A.decodeChange(unit.bytes);
+      const end = change.startOp + change.ops.length;
+      const writerClass = this.#classes.get(hash);
+      if (writerClass === undefined) continue;
+      if (
+        made.some((m) => m.actor === change.actor && m.counter >= change.startOp && m.counter < end)
+      )
+        out.push({ hash, signer: unit.signer.slice() as PrincipalId, writerClass });
+    }
+    return Object.freeze(out.map((o) => Object.freeze(o)));
   }
 
   /**

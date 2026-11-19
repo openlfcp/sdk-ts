@@ -18,10 +18,16 @@ import {
 } from "@openlfcp/wire";
 import { createResourceAsDevice, type DeviceCreateResult } from "./identity/accept.js";
 import { storeDek, syncChain } from "./identity/context.js";
+import type {
+  ServiceControlCommitOutcome,
+  ServiceControlPort,
+  ServiceControlStateView,
+} from "./identity/control-approval.js";
 import { newOperationId, OperationJournal, phaseOf } from "./identity/journal.js";
 import { ChannelPool, IdentityRefused, IdentityUnavailable } from "./identity/network.js";
 import { type IdentityFlowOptions, identityTarget } from "./identity/resource.js";
 import { addToRoster } from "./identity/roster.js";
+import type { SyncClient } from "./sync-client.js";
 
 /**
  * The control Resource `C` of SERVICE-CONTROL-PROFILE-01 on the client
@@ -283,4 +289,55 @@ async function createAsRoot(
     siblings: [],
     roster: false,
   };
+}
+
+/**
+ * A ServiceControlPort over a SyncClient that has `C` open with
+ * shared-objects' ServiceControlDataProfile: the state readers see, who
+ * created an entry (ServiceControlReplica.creatorsOf), and commits with
+ * receipts. A committed change is `acknowledged` once its batch is
+ * accepted, or acknowledged by a server without acceptance evidence
+ * (`evidence-unavailable`); a change admission refuses before anything is
+ * queued (§4) is `rejected` with its diagnostic.
+ */
+export function serviceControlPort(o: {
+  readonly client: Pick<SyncClient, "commit" | "statusSnapshot">;
+  readonly profile: {
+    state(): ServiceControlStateView & { readonly usable?: boolean };
+    readonly replica: Pick<ServiceControlPort, "creatorsOf">;
+  };
+  readonly resource: ResourceId;
+  /** Whether `C` is synchronised (e.g. resourceState(C) === "LIVE"); always, by default. */
+  readonly synchronised?: () => boolean;
+}): ServiceControlPort {
+  return Object.freeze({
+    resource: o.resource,
+    state: () => {
+      if (o.synchronised?.() === false) return undefined;
+      const s = o.profile.state();
+      return s.usable === false ? undefined : s;
+    },
+    creatorsOf: (container: Parameters<ServiceControlPort["creatorsOf"]>[0], key: string) =>
+      o.profile.replica.creatorsOf(container, key),
+    commit: async (
+      intents: readonly unknown[],
+      operationId: string,
+    ): Promise<ServiceControlCommitOutcome> => {
+      try {
+        await o.client.commit(o.resource, intents, { operationId });
+      } catch (e) {
+        const diagnostic = (e as { diagnostic?: unknown } | null)?.diagnostic;
+        if (typeof diagnostic === "string") return { kind: "rejected", code: diagnostic };
+        throw e;
+      }
+      const batch = (await o.client.statusSnapshot(o.resource)).batches.find(
+        (b) => b.operationId === operationId,
+      );
+      if (batch?.status === "rejected")
+        return { kind: "rejected", code: batch.rejection?.code ?? "rejected" };
+      return batch?.status === "accepted" || batch?.status === "evidence-unavailable"
+        ? { kind: "acknowledged" }
+        : { kind: "queued" };
+    },
+  });
 }

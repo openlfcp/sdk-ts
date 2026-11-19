@@ -34,6 +34,26 @@ export {
   syncChain,
 } from "./context.js";
 export {
+  type ApprovalRecordIntent,
+  approvalRecordWrite,
+  type ControlRevocationCause,
+  type ControlRevocationInput,
+  type ControlRevocationTargets,
+  classifyApprovalRecord,
+  controlRevocationTargets,
+  createdBy,
+  type IdentityRequestEntry,
+  type SectionApprovalDecision,
+  type SectionApprovalInput,
+  type ServiceControlApprovalView,
+  type ServiceControlCommitOutcome,
+  type ServiceControlCreator,
+  type ServiceControlPort,
+  type ServiceControlStateView,
+  type ServiceControlWriterClass,
+  sectionApprovalDecision,
+} from "./control-approval.js";
+export {
   checkIssuance,
   type Feasibility,
   type FlowOptions,
@@ -105,6 +125,7 @@ export {
   type OpenAnswer,
 } from "./network.js";
 export {
+  type ApprovalRecordOptions,
   type ApprovalResult,
   approvedGrantRecord,
   approvePairing,
@@ -206,3 +227,8 @@ export {
   rotatorTest,
   verifiedFrontier,
 } from "./rotation.js";
+export {
+  type AutoApproveSectionOptions,
+  autoApproveSection,
+  type SectionApprovalResult,
+} from "./section-pairing.js";
