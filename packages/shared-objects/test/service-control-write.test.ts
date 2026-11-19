@@ -7,6 +7,7 @@ import {
   ServiceControlReplica,
   type ServiceControlSignerClass,
   type ServiceControlWriter,
+  serviceControlCleanup,
 } from "../src/service-control/index.js";
 import {
   approval,
@@ -273,5 +274,58 @@ describe("SERVICE-CONTROL-PROFILE-01 §4 sizes (A§3.2): records over their limi
     ).toBe("LIMIT_EXCEEDED");
     c.write(P, [req(uid(203))]);
     expect(Object.keys(c.validate().requests)).toHaveLength(33);
+  });
+});
+
+describe("SERVICE-CONTROL-PROFILE-01 §9: deletion for display", () => {
+  const T8 = Date.parse(T0) + 8 * 24 * 60 * 60 * 1000;
+  it("deletes what has been final for 7 days, each change admitted by §3", () => {
+    const c = ready();
+    c.write(P, [req(uid(30)), req(uid(31))]);
+    c.write(R, [{ intent: "cancel.create", rid: uid(30), cancel: { reason: "user", at: T0 } }]);
+    c.write(S, [
+      { intent: "event.put", id: uid(30), state: "cancelled", at: T0 },
+      { intent: "event.put", id: uid(31), state: "executing", at: T0 },
+      {
+        intent: "question.create",
+        qid: uid(32),
+        question: {
+          binding: X,
+          generation: 1,
+          kind: "mass-delete",
+          anomalyId: "a",
+          snapshotHash: "h",
+          items: [],
+          counts: {},
+          options: ["accept"],
+          at: T0,
+        },
+      },
+    ]);
+    c.write(R, [
+      {
+        intent: "answer.create",
+        aid: uid(33),
+        answer: { qid: uid(32), snapshotHash: "h", choice: "accept", at: T0 },
+      },
+    ]);
+    c.write(S, [
+      { intent: "event.put", id: uid(33), state: "applied", at: T0 },
+      {
+        intent: "question.resolve",
+        qid: uid(32),
+        resolved: { answerId: uid(33), choice: "accept", at: T0 },
+      },
+    ]);
+    expect(serviceControlCleanup(c.validate(), Date.parse(T0))).toEqual([]);
+    const changes = serviceControlCleanup(c.validate(), T8);
+    expect(changes).toHaveLength(2);
+    for (const change of changes) c.write(S, change);
+    const v = c.validate();
+    expect(Object.keys(v.requests)).toEqual([uid(31)]);
+    expect(Object.keys(v.events)).toEqual([uid(31)]);
+    expect([v.cancels, v.questions, v.answers].map((m) => Object.keys(m).length)).toEqual([
+      0, 0, 0,
+    ]);
   });
 });
