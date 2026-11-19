@@ -123,6 +123,16 @@ export {
   type StatusEvent,
   type StatusSnapshot,
 } from "./section-status.js";
+export {
+  type CreatedServiceControl,
+  type CreateServiceControlOptions,
+  createServiceControl,
+  SERVICE_CONTROL_PROFILE,
+  type ServiceControlInitialize,
+  type ServiceControlSignerFacts,
+  serviceControlRosterName,
+  serviceControlSignerFacts,
+} from "./service-control.js";
 export { type CreatedSnapshot, type CreateSnapshotOptions, createSnapshot } from "./snapshot.js";
 export {
   adoptStoredDeks,
