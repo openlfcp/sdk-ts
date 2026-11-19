@@ -1153,6 +1153,9 @@ const _last = (f: FlowCase, pred: (s: FlowStep) => boolean) =>
 const countRecords = (id: string, pred: (r: ControlRecord) => boolean) =>
   chainAt(id).records.filter(pred).length;
 
+const SECTION_AUTO_APPROVAL_NOT_RUN =
+  "sdk-ts has no pre-authorised approval helper yet (SERVICE-CONTROL-PROFILE-01 §7–§8); it lands with the approval phases (E-015), which then verifies this fact.";
+
 const FINALS: Readonly<Record<string, Final>> = {
   F01_register_write_revoke_cutoff: async (f, steps) => {
     const units = [2, 3, 4].map((n) => wireId(stepOf(f, n)));
@@ -1205,6 +1208,13 @@ const FINALS: Readonly<Record<string, Final>> = {
   }),
   "F08.link_rejected": () => ({
     not_verified_fields: { requests_written_after_rejection: LINK_REJECTION_NOT_RUN },
+  }),
+  // The pre-authorised approval helper (IDENTITY §5.3 step 4) lands with the approval phases (E-015).
+  F20_section_auto_approval: () => ({
+    not_verified_fields: {
+      approved_without_human: SECTION_AUTO_APPROVAL_NOT_RUN,
+      cancelled_mismatch: SECTION_AUTO_APPROVAL_NOT_RUN,
+    },
   }),
   "F08.missing_material": (_f, steps) => ({
     sessions_without_material: steps.filter(
