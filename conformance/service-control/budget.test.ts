@@ -13,10 +13,12 @@ import {
   type PrincipalId,
   principalId,
   resourceId,
+  secureRandom,
   toBase64url,
 } from "@openlfcp/core";
 import { importAgreementKey, importResourceDEK, importSigningKey } from "@openlfcp/crypto";
 import {
+  deviceFingerprint,
   ENTRY_LIMIT,
   PAIRING_ENTRY_LIMIT,
   type ServiceControlIntent,
@@ -25,7 +27,10 @@ import {
   serviceControlCodecFor,
 } from "@openlfcp/shared-objects/service-control";
 import {
+  createMessage,
   DEFAULT_MAX_MESSAGE_BYTES,
+  encodeMessage,
+  encodePrincipalDescriptor,
   principalDescriptorFromKeys,
   type Signer,
   sealDataUnit,
@@ -90,7 +95,7 @@ function running() {
       DEK,
       signer,
     );
-    return unit.bytes.length;
+    return unit.bytes;
   };
   write(ROOT, "root", [{ intent: "initialize", attemptId: "attempt-1", createdAt: T0 }]);
   write(ROOT, "root", [
@@ -141,7 +146,7 @@ describe("A§3.5 budget of C against the server's write quotas (E-014)", () => {
         { intent: "status.put", fields: { heartbeatAt: minute(30 * n) } },
       ]),
     );
-    const heartbeat = Math.max(...sizes);
+    const heartbeat = Math.max(...sizes.map((u) => u.length));
     const year = heartbeat * HEARTBEATS_PER_YEAR;
     console.info(
       `E-014 budget: heartbeat unit ${heartbeat} B, ${HEARTBEATS_PER_YEAR} a year = ${(year / MIB).toFixed(2)} MiB`,
@@ -186,24 +191,71 @@ describe("A§3.5 budget of C against the server's write quotas (E-014)", () => {
     expect(units / 60).toBeLessThan(SERVER.wsMessagesPerSecond);
   });
 
-  it("the largest entries §4 admits make units far below the message limit", () => {
-    const { write } = running();
-    // A request just under 4 KiB (the request map's own fields take the rest).
-    const request = write(ROOT, "root", [
-      {
-        intent: "request.create",
-        rid: uid(1),
-        request: {
-          op: "pair-section",
-          binding: toBase64url(seed(9)),
-          generation: 1,
-          args: { link: "l".repeat(ENTRY_LIMIT - 200) },
-          client: { app: "0.8.0", protocol: 1 },
-          at: T0,
-        },
+  it("the largest entries §4 admits, of incompressible content, fit the message limit", () => {
+    const filler = (n: number) => toBase64url(secureRandom(Math.ceil((n * 3) / 4))).slice(0, n);
+    const rid = uid(1);
+    const pairSection = (link: string): ServiceControlIntent => ({
+      intent: "request.create",
+      rid,
+      request: {
+        op: "pair-section",
+        binding: toBase64url(seed(9)),
+        generation: 1,
+        args: { link },
+        client: { app: "0.8.0", protocol: 1 },
+        at: T0,
       },
-    ]);
-    expect(request).toBeLessThan(2 * ENTRY_LIMIT);
-    expect(PAIRING_ENTRY_LIMIT * 2).toBeLessThan(DEFAULT_MAX_MESSAGE_BYTES);
+    });
+    const pairing = (note: string): ServiceControlIntent => ({
+      intent: "pairing.create",
+      rid,
+      pairing: {
+        descriptor: toBase64url(encodePrincipalDescriptor(BRIDGE.descriptor)),
+        principal: `p:${toBase64url(id(BRIDGE))}`,
+        fp: deviceFingerprint(id(BRIDGE)),
+        note,
+      },
+    });
+    /** The largest filler §4 admits, and the sealed unit of the entry it makes. */
+    const largest = (limit: number, make: (n: number) => Uint8Array) => {
+      let lo = 0;
+      let hi = limit;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        try {
+          make(mid);
+          lo = mid;
+        } catch (e) {
+          if ((e as { diagnostic?: string }).diagnostic !== "LIMIT_EXCEEDED") throw e;
+          hi = mid - 1;
+        }
+      }
+      const at = make(lo);
+      expect(() => make(lo + 1)).toThrowError(
+        expect.objectContaining({ diagnostic: "LIMIT_EXCEEDED" }),
+      );
+      return { filler: lo, unit: at };
+    };
+    const request = largest(ENTRY_LIMIT, (n) =>
+      running().write(ROOT, "root", [pairSection(filler(n))]),
+    );
+    const pair = largest(PAIRING_ENTRY_LIMIT, (n) => {
+      const r = running();
+      r.write(ROOT, "root", [pairSection("link")]);
+      return r.write(BRIDGE, "service-device", [pairing(filler(n))]);
+    });
+    // The entries are at their limits: the fillers take almost all of it.
+    expect(request.filler).toBeGreaterThan(ENTRY_LIMIT - 300);
+    expect(pair.filler).toBeGreaterThan(PAIRING_ENTRY_LIMIT - 300);
+    console.info(
+      `E-014 budget: largest request unit ${request.unit.length} B, pairing unit ${pair.unit.length} B`,
+    );
+    // A full DATA_PUT of the outbound queue (64 units, OutboundQueue's default) of the largest.
+    const put = encodeMessage(
+      createMessage("DATA_PUT", { resourceId: C, objects: Array(64).fill(pair.unit) }),
+    );
+    expect(put.length).toBeLessThan(DEFAULT_MAX_MESSAGE_BYTES);
+    expect(pair.unit.length).toBeLessThan(PAIRING_ENTRY_LIMIT + 2048);
+    expect(request.unit.length).toBeLessThan(ENTRY_LIMIT + 2048);
   });
 });
