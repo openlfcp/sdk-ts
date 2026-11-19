@@ -10,6 +10,7 @@ import {
 import {
   approval,
   B,
+  B2,
   type Doc,
   edit,
   initial,
@@ -126,3 +127,34 @@ describe("ServiceControlReplica", () => {
 
 const asChange = (u: ServiceControlUnit | undefined) =>
   checkChange((u as ServiceControlUnit).bytes);
+
+describe("ServiceControlReplica §5 sizes on the merged state", () => {
+  it("leaves out a status that two admitted branches make larger than 4096 bytes, in both orders", () => {
+    const init = initial();
+    // Two managing clients approve different base installations concurrently.
+    const baseB = edit(init, personal, (d) => put(d.approvals, principalRef(B), approval(B)));
+    const baseB2 = edit(init, root, (d) => put(d.approvals, principalRef(B2), approval(B2)));
+    // Each installation is the only base in its own causal history and fills status.
+    const fill = (doc: A.Doc<Doc>, who: typeof B, field: string) =>
+      edit(doc, who, (d) => {
+        for (const [k, v] of Object.entries(STATUS)) put(d.status, k, v);
+        put(d.status, field, "x".repeat(2300));
+      });
+    const units = [
+      unit(init, root, "root"),
+      unit(baseB, personal, "personal"),
+      unit(baseB2, root, "root", 2),
+      unit(fill(baseB, B, "noteB"), B, "service-device"),
+      unit(fill(baseB2, B2, "noteB2"), B2, "service-device"),
+    ];
+    for (const order of [units, [...units.slice(0, 3), ...units.slice(3).reverse()]]) {
+      const { replica, result } = ServiceControlReplica.fromChanges(order, options);
+      expect(result.refused).toEqual([]);
+      const state = replica.validate();
+      expect(state.status).toBeUndefined();
+      expect(state.problems.map((p) => [p.pointer, p.diagnostic])).toEqual([
+        ["/status", "LIMIT_EXCEEDED"],
+      ]);
+    }
+  });
+});

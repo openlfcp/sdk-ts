@@ -196,9 +196,10 @@ function checkValue(
 
 /**
  * §5 for one value: `container[key]`, or `container` itself for `service`,
- * `status` and `lifecycle` (key undefined). Nested fields are read by their
- * projection; conflicts are §5 rule 3's (validateServiceControl), not this
- * function's. `resource` is C's ResourceRef (a base approval names it).
+ * `status` and `lifecycle` (key undefined), its size of §4 included. Nested
+ * fields are read by their projection; other conflicts are §5 rule 3's
+ * (validateServiceControl), not this function's. `resource` is C's
+ * ResourceRef (a base approval names it).
  */
 export function entryDiagnostics(
   reader: ScReader,
@@ -214,6 +215,9 @@ export function entryDiagnostics(
   if (WHOLE_CONTAINERS.has(container) && isMapValue(v) && reader.keys(v[1]).length === 0)
     return found;
   checkValue(reader, schema, v, found);
+  // §4 Sizes, on the state read: concurrent values of a field count, so an
+  // entry merged from changes admitted apart can exceed its limit (§5).
+  if (reader.size(v) > limitOf(container)) found.add("LIMIT_EXCEEDED");
   if (key !== undefined) {
     if (UUID_KEYED.has(container) && !isUuid7(key)) found.add("INVALID_KEY");
     if (container === "bindings" && !isResourceRef(key)) found.add("INVALID_RESOURCE_REF");

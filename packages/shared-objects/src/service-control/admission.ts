@@ -19,7 +19,6 @@ import {
   entryDiagnostics,
   eventIsFinal,
   eventStateOf,
-  limitOf,
   readApproval,
   SERVICE_CONTROL_DIAGNOSTIC_ORDER,
 } from "./schema.js";
@@ -403,8 +402,8 @@ export class ServiceControlAdmission {
       const [top = "", key] = t.split("/");
       const v = key === undefined ? post.get("_root", top) : post.get(container(top), key);
       if (v === undefined) continue;
+      // §5, the size limit of §4 included.
       for (const d of entryDiagnostics(post, top, key, v, this.#resource)) found.add(d);
-      if (post.size(v) > limitOf(top)) found.add("LIMIT_EXCEEDED");
     }
     if ([...created].some((k) => k.startsWith("requests/"))) {
       const requests = container("requests");
