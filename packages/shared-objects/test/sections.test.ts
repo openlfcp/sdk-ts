@@ -103,9 +103,12 @@ describe("profile dispatch (§1, §17)", () => {
       PROFILE_ID,
       SECTIONS_PROFILE_ID,
       "org.openlfcp.identity.v1",
+      "org.openlfcp.service-control.v1",
     ]);
     expect(profileModel("org.openlfcp.identity.v1").kind).toBe("identity");
+    expect(profileModel("org.openlfcp.service-control.v1").kind).toBe("service-control");
     for (const other of [
+      "org.openlfcp.service-control.v2",
       "org.openlfcp.shared-sections.v2",
       "ORG.OPENLFCP.SHARED-SECTIONS.V1",
       `${SECTIONS_PROFILE_ID} `,
@@ -122,6 +125,7 @@ describe("profile dispatch (§1, §17)", () => {
     expect(taskRefModel(PROFILE_ID).kind).toBe("shared-objects");
     expect(taskRefModel(SECTIONS_PROFILE_ID).kind).toBe("shared-sections");
     expect(taskRefModel("org.openlfcp.identity.v1").kind).toBe("profile-unsupported");
+    expect(taskRefModel("org.openlfcp.service-control.v1").kind).toBe("profile-unsupported");
     expect(taskRefModel("com.example.other").kind).toBe("profile-unsupported");
   });
 });

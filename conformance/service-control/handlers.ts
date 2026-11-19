@@ -1,5 +1,6 @@
 // SERVICE-CONTROL-TEST-VECTORS-01 handlers (SERVICE-CONTROL-PROFILE-01 §12):
-// admission SC0 to SC7 of every change against its causal history, through
+// admission SC0 to SC7 of every change against its causal history, and the
+// delivery orders of the behavioral cases through the replica, all through
 // @openlfcp/shared-objects/service-control. The writer's class is derived
 // here, as the SDK's caller derives it: the signer's class from C's Control
 // state at the unit's control_ref (fixtures.control_states), then `service`
@@ -12,6 +13,8 @@ import {
   checkServiceControlUnit,
   ServiceControlAdmission,
   type ServiceControlOptions,
+  ServiceControlReplica,
+  type ServiceControlValidation,
   type ServiceControlWriter,
   serviceControlSignerClass,
 } from "@openlfcp/shared-objects/service-control";
@@ -165,4 +168,128 @@ export const profileChange: Handler = (c, context) => {
         ? { outcome: "accept" }
         : { outcome: refusal.code, diagnostic: refusal.diagnostic },
   };
+};
+
+// ---------------------------------------------------------------------------
+// behavioral: delivery orders through the replica
+
+const Q1 = "0196f2a0-0000-7000-8000-000000000011";
+const A1 = "0196f2a0-0000-7000-8000-000000000021";
+const A2 = "0196f2a0-0000-7000-8000-000000000022";
+const R1 = "0196f2a0-0000-7000-8000-000000000001";
+const R2 = "0196f2a0-0000-7000-8000-000000000002";
+
+interface Run {
+  readonly admitted: string[];
+  readonly refused: Record<string, string>;
+  readonly replica: ServiceControlReplica;
+  /** The state readers saw after each admitted step, by case name. */
+  readonly after: Map<string, ServiceControlValidation>;
+}
+
+function deliver(context: HandlerContext, names: readonly string[]): Run {
+  const f = fixturesOf(context);
+  const first = caseOf(context, names[0] as string);
+  const replica = ServiceControlReplica.empty(optionsAt(f, (first.inputs as Json).control_ref));
+  const byHash = new Map<string, string>();
+  const admitted: string[] = [];
+  const refused: Record<string, string> = {};
+  const after = new Map<string, ServiceControlValidation>();
+  for (const name of names) {
+    const c = caseOf(context, name);
+    byHash.set((c.inputs as Json).change_hash, name);
+    const r = replica.receiveChanges([{ ...writerOf(f, c), bytes: bytesOf(c) }]);
+    for (const h of r.admitted) {
+      const n = byHash.get(h) ?? h;
+      admitted.push(n);
+      after.set(n, replica.validate());
+    }
+    for (const x of r.refused)
+      refused[x.hash === undefined ? name : (byHash.get(x.hash) ?? x.hash)] = x.diagnostic;
+  }
+  return { admitted, refused, replica, after };
+}
+
+/** An event as the corpus states it: absent, its state, or state{code}. */
+const eventOf = (s: ServiceControlValidation, id: string) => {
+  const e = s.events[id];
+  return e === undefined ? "absent" : e.code === undefined ? e.state : `${e.state}{${e.code}}`;
+};
+
+type StateField = (run: Run, s: ServiceControlValidation, context: HandlerContext) => unknown;
+const json = (v: unknown) => JSON.stringify(v);
+const STATE: Readonly<Record<string, StateField>> = {
+  question: (_r, s) => {
+    const q = s.questions[Q1];
+    if (q === undefined) return "absent";
+    if (q.resolved !== undefined) return `resolved by ${q.resolved.answerId}`;
+    return q.superseded !== undefined ? "superseded" : "open";
+  },
+  event_a1: (_r, s) => eventOf(s, A1),
+  event_a2: (_r, s) => eventOf(s, A2),
+  // The raw markers of questions[q1], §5 rule 3 aside.
+  holds_resolved: (r) => r.replica.valuesAt(["questions", Q1, "resolved"]).length > 0,
+  holds_superseded: (r) => r.replica.valuesAt(["questions", Q1, "superseded"]).length > 0,
+  // The concurrent maps held at approvals[p:<B>].
+  approval_maps: (r, _s, context) =>
+    r.replica.valuesAt(["approvals", fixturesOf(context).principals.B?.ref as string]).length,
+  status_state: (_r, s) => s.status?.state,
+  base_approvals_unrevoked: (_r, s) =>
+    Object.values(s.approvals).filter((a) => a.role === "base" && !a.revoked).length,
+  heartbeatAt: (_r, s) => s.status?.heartbeatAt,
+  message: (_r, s) => s.status?.message,
+  request: (_r, s) => (s.requests[R1] === undefined ? "absent" : "present"),
+  // unknown_op_no_effect names r2; request_deleted_before_and_after_final r1.
+  event: (_r, s) => {
+    const e = s.events[R2] ?? s.events[R1];
+    return e === undefined ? "absent" : e.state;
+  },
+  code: (_r, s) => s.events[R2]?.code,
+  ...Object.fromEntries(
+    (["bindings", "service", "status"] as const).map((k) => [
+      `${k}_unchanged`,
+      ((r: Run, s: ServiceControlValidation) =>
+        json(s[k]) === json(r.after.get("unknown_op_request")?.[k])) as StateField,
+    ]),
+  ),
+};
+
+/** §3, §5, §10 across delivery orders: what is admitted, refused, and the state readers see. */
+export const controlDocument: Handler = (c, context) => {
+  const i = c.inputs as Json;
+  const e = c.expected as Json;
+  const runs = (i.orders as { case: string }[][]).map((o) =>
+    deliver(
+      context,
+      o.map((x) => x.case),
+    ),
+  );
+  const checks: Check[] = [];
+  for (const [n, run] of runs.entries()) {
+    const at = runs.length === 1 ? "" : `/order-${n + 1}`;
+    const state = run.replica.validate();
+    checks.push(equalCheck(`admitted${at}`, [...e.admitted].sort(), [...run.admitted].sort()));
+    checks.push(equalCheck(`refused${at}`, e.refused, run.refused));
+    for (const [k, want] of Object.entries(e.state as Record<string, unknown>)) {
+      const read = STATE[k];
+      checks.push(
+        read === undefined
+          ? { name: `state/${k}${at}`, ok: false, message: `no reader for ${k}` }
+          : equalCheck(`state/${k}${at}`, want, read(run, state, context)),
+      );
+    }
+  }
+  if (runs.length > 1) {
+    const [a, b] = runs as [Run, Run];
+    checks.push(equalCheck("state/same_document", a.replica.heads(), b.replica.heads()));
+    checks.push(
+      equalCheck("state/same_state", json(a.replica.validate()), json(b.replica.validate())),
+    );
+  }
+  return { checks, report: { admitted: runs[0]?.admitted, refused: runs[0]?.refused } };
+};
+
+export const SERVICE_CONTROL_HANDLERS: Readonly<Record<string, Handler>> = {
+  "validation/profile_change": profileChange,
+  "behavioral/control_document": controlDocument,
 };

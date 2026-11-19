@@ -17,6 +17,16 @@ export {
 
 export { ScReader, type ScValue } from "./reader.js";
 export {
+  type ServiceControlReceiveResult,
+  type ServiceControlRefusal,
+  ServiceControlReplica,
+  type ServiceControlUnit,
+  serviceControlCodec,
+  serviceControlCodecFor,
+  serviceControlSnapshotCodec,
+  serviceControlUnitProfile,
+} from "./replica.js";
+export {
   ENTRY_LIMIT,
   entryDiagnostics,
   eventIsFinal,
