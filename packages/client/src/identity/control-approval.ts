@@ -1,6 +1,7 @@
 import {
   bytesEqual,
   fromBase64url,
+  fromHex,
   type PrincipalId,
   type ResourceId,
   toBase64url,
@@ -388,26 +389,28 @@ export const SERVICE_CONTROL_PROFILE_ID = "org.openlfcp.service-control.v1";
 /** A control Resource of the roster, and this client's view of it (undefined: not open here). */
 export interface RosterControl {
   readonly resource: ResourceId;
-  readonly control?: Pick<ServiceControlPort, "state" | "creatorsOf">;
+  readonly control?: Pick<ServiceControlPort, "state" | "requestHistory" | "acknowledged">;
 }
 
 /**
  * The kind-1 devices `C` names (§7.4 "Reconciliation order"): a device
- * whose scope is exactly `[C]` (a base installation), or one proven for
- * some `requests[rid]` of `C` by conditions 1 to 3 of the Section rule: a
- * `pair-section` request created by `root` or `personal` whose link names
- * a pairing device `J` of `R`, consumed in `I` with digest `d`, and a
- * `DEVICE_GRANT` of `I` with field 2 = `J` binding a leaf with digest `d`,
- * kind 1, root `R`, mask {1, 2}, scope exactly `[X]` (the request's
- * binding). `pairing[rid]` is never the source of a Principal. Only the
- * requests `C` holds now are read: one deleted from `C` is final, and its
- * approval exists or it was cancelled (§3, §9).
+ * whose scope is exactly `[C]` (a base installation), or one proven by
+ * conditions 1 to 3 of the Section rule for some value `requests[rid]` of
+ * `C` held now or in its history (`requests`: ServiceControlPort's
+ * requestHistory): a `pair-section` request created by `root` or
+ * `personal` (§2.4) whose link names a pairing device `J` of `R`, consumed
+ * in `I` with digest `d`, and a `DEVICE_GRANT` of `I` with field 2 = `J`
+ * binding a leaf with digest `d`, kind 1, root `R`, mask {1, 2}, scope
+ * exactly `[X]` (the request's binding). A request deleted from `C` still
+ * names its device: the service deletes a request once its event is final
+ * with any final state (§3), `failed` before A3 included. The Principal
+ * comes from `I`'s chain through `J`; `pairing[rid]` is never read (§5
+ * rule 4), and one whose principal is not so proven defers nothing.
  */
 export function controlNames(
   identity: LinearChain,
   C: ResourceId,
-  state: ServiceControlStateView,
-  creatorsOf: ServiceControlPort["creatorsOf"],
+  requests: readonly ServiceControlRequestRecord[],
 ): ReadonlySet<string> {
   const I = identity.state;
   const R = I.owner.principalId;
@@ -420,9 +423,9 @@ export function controlNames(
       bytesEqual(d.scope[0] as ResourceId, C)
     )
       out.add(hex);
-  for (const [rid, request] of Object.entries(state.requests)) {
+  for (const { request, creators } of requests) {
     if (request.op !== "pair-section" || typeof request.binding !== "string") continue;
-    if (!createdBy(creatorsOf("requests", rid), ["root", "personal"])) continue;
+    if (!createdBy(creators, ["root", "personal"])) continue;
     let J: PrincipalId;
     try {
       J = parsePairingUri(String(request.args.link)).pairingDevice;
@@ -456,36 +459,38 @@ export function controlNames(
 /**
  * §7.4 for a reconciler that implements the profile: why the registration
  * of kind-1 device `P` is deferred, or undefined when it may go ahead.
- * Every control Resource of the roster must be synchronised (an unreachable
- * one defers every kind-1 registration); when one names `P`, its
- * `approvals[P]` must be present.
+ * Every control Resource of the roster must be synchronised (one not open
+ * or not synchronised defers every kind-1 registration); when one names
+ * `P`, its `approvals[P]` must be present there and accepted by the server
+ * (§7.1: A3 before A4 for every client of the profile; IDENTITY §9.1: a
+ * phase ends at its ACK). This client's own approval still queued or
+ * pending defers, as an absent one does.
  */
-export function controlRegistrationGate(
+export async function controlRegistrationGate(
   identity: LinearChain,
   controls: readonly RosterControl[],
-): (device: PrincipalId) => string | undefined {
-  const views: {
-    resource: ResourceId;
-    state: ServiceControlStateView;
-    names: ReadonlySet<string>;
-  }[] = [];
+): Promise<(device: PrincipalId) => string | undefined> {
+  const waiting = new Map<string, string>();
   for (const c of controls) {
     const state = c.control?.state();
     if (c.control === undefined || state === undefined) {
       const why = `the control Resource ${toHex(c.resource)} is not synchronised`;
       return () => why;
     }
-    views.push({
-      resource: c.resource,
-      state,
-      names: controlNames(identity, c.resource, state, c.control.creatorsOf),
-    });
+    for (const hex of controlNames(identity, c.resource, c.control.requestHistory())) {
+      if (waiting.has(hex)) continue;
+      const P = principalRefOf(fromHex(hex) as PrincipalId);
+      if (state.approvals[P] === undefined)
+        waiting.set(
+          hex,
+          `the control Resource ${toHex(c.resource)} names it and holds no approval for it yet`,
+        );
+      else if (!(await c.control.acknowledged("approvals", P)))
+        waiting.set(
+          hex,
+          `the control Resource ${toHex(c.resource)} names it and its approval for it is not accepted by the server yet`,
+        );
+    }
   }
-  return (device) => {
-    const hex = toHex(device);
-    for (const v of views)
-      if (v.names.has(hex) && v.state.approvals[principalRefOf(device)] === undefined)
-        return `the control Resource ${toHex(v.resource)} names it and holds no approval for it yet`;
-    return undefined;
-  };
+  return (device) => waiting.get(toHex(device));
 }

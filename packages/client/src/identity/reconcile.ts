@@ -288,20 +288,28 @@ export async function reconcileDevices(
     /** Apply the rotation policy of §8.4 to each target (default true). */
     readonly rotate?: boolean;
     /**
-     * SERVICE-CONTROL-PROFILE-01 §7.4 reconciliation order, for a client
-     * that implements that profile (which MUST pass it): this client's view
-     * of each control Resource of the roster (profile
-     * `org.openlfcp.service-control.v1`), undefined when it is not open
-     * here. A kind-1 device is then registered only once every control
-     * Resource of the roster is synchronised and, when one names the
-     * device, once `approvals[P]` is present there; otherwise the
-     * registration is deferred (TargetReconciliation.deferred) and the
-     * next run tries it again. Without it this is the reconciler of a
-     * client that does not implement the profile (§7.4 informative, §11).
+     * SERVICE-CONTROL-PROFILE-01 §7.4 reconciliation order. A client that
+     * implements that profile MUST pass it on every run of this
+     * reconciler (its own, and the one its pairing flows run); leaving it
+     * out makes this the reconciler of a client that does not implement
+     * the profile (§7.4 informative, §11), which may register a service
+     * device before its approval record exists.
+     *
+     * This client's view of a control Resource of the roster (profile
+     * `org.openlfcp.service-control.v1`; every such entry, archived or
+     * not and whatever `only` selects), undefined when it is not open
+     * here: e.g. serviceControlPort over its SyncClient. A kind-1 device
+     * is then registered only once every control Resource of the roster
+     * is synchronised and, when one names the device (from its requests,
+     * deleted ones included, and `I`'s chain), once `approvals[P]` is
+     * present there and accepted by the server (A3 before A4, §7.1);
+     * otherwise the registration is deferred (TargetReconciliation.deferred),
+     * the operation stays open and the next run tries it again. Writing a
+     * missing approval (the MAY takeover) is not done here.
      */
     readonly controlResources?: (
       resource: ResourceId,
-    ) => Pick<ServiceControlPort, "state" | "creatorsOf"> | undefined;
+    ) => Pick<ServiceControlPort, "state" | "requestHistory" | "acknowledged"> | undefined;
   },
 ): Promise<{
   readonly operation: string;
@@ -365,14 +373,15 @@ export async function reconcileDevices(
         .filter((t) => !bytesEqual(t.resource, target.resource)),
     ].filter((t) => o.only === undefined || o.only.some((r) => bytesEqual(r, t.resource)));
 
-    // §7.4: the control Resources of the whole roster, whatever `only` selects.
+    // §7.4: every control Resource of the roster, archived ones included (IDENTITY §4 rule 6:
+    // `archived` revokes nothing), whatever `only` selects.
     const gate =
       o.controlResources === undefined
         ? undefined
-        : controlRegistrationGate(
+        : await controlRegistrationGate(
             I,
             [...doc.roster()]
-              .filter(([, e]) => e.archived !== true && e.profile === SERVICE_CONTROL_PROFILE_ID)
+              .filter(([, e]) => e.profile === SERVICE_CONTROL_PROFILE_ID)
               .map(([ref]) => {
                 const resource = resourceId(fromBase64url(ref));
                 const control = o.controlResources?.(resource);
