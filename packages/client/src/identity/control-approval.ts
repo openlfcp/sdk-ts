@@ -64,6 +64,16 @@ export interface ServiceControlStateView {
   readonly lifecycle?: Readonly<Record<string, unknown>>;
 }
 
+/** One value `requests[rid]` held in `C`'s history (structurally shared-objects' ServiceControlRequestRecord). */
+export interface ServiceControlRequestRecord {
+  readonly rid: string;
+  readonly request: ServiceControlStateView["requests"][string];
+  /** Whether the entry is in the state readers see now (false: deleted since). */
+  readonly present?: boolean;
+  /** §2.4: the change that created the value. */
+  readonly creators: readonly ServiceControlCreator[];
+}
+
 /** What committing one change to `C` came to (§9.1: the A3 phase is done once it is acknowledged). */
 export type ServiceControlCommitOutcome =
   /** The coordinator acknowledged the change's unit. */
@@ -82,6 +92,25 @@ export interface ServiceControlPort {
     container: "approvals" | "pairing" | "requests" | "cancels",
     key: string,
   ): readonly ServiceControlCreator[];
+  /**
+   * Every value `requests[rid]` has held in `C`'s accepted history, deleted
+   * ones included, each with the change that created it (§2.4); a value
+   * §5 finds invalid, a conflicted one included (rule 3), is left out
+   * (ServiceControlReplica.requestHistory). §7.4 condition 1 reads it.
+   */
+  requestHistory(): readonly ServiceControlRequestRecord[];
+  /**
+   * Whether the coordinator accepted a change that created the current
+   * value of `container[key]` (§7.1, IDENTITY §9.1: a phase ends at its
+   * ACK). False when there is no value, or when every change that created
+   * it is this client's own, queued or pending (its batch not accepted or
+   * acknowledged yet, as commit reports it). A change received from the
+   * coordinator is accepted.
+   */
+  acknowledged(
+    container: "approvals" | "pairing" | "requests" | "cancels",
+    key: string,
+  ): Promise<boolean>;
   /**
    * Commits `intents` (shared-objects' ServiceControlIntent) as one change
    * under `operationId`. The same operation with the same intents writes

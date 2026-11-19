@@ -288,6 +288,8 @@ describe("section auto-approval ↔ Rust reference server (live, E-015)", () => 
         resource: C,
         state: () => portNow().state(),
         creatorsOf: (c, k) => portNow().creatorsOf(c, k),
+        requestHistory: () => portNow().requestHistory(),
+        acknowledged: (c, k) => portNow().acknowledged(c, k),
         commit: (intents, operation) => portNow().commit(intents, operation),
       };
       const order: string[] = [];

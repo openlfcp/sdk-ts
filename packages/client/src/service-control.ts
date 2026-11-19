@@ -1,5 +1,6 @@
 import {
   bytesEqual,
+  type DataUnitId,
   dataEpoch,
   fromHex,
   generateResourceId,
@@ -20,7 +21,9 @@ import { createResourceAsDevice, type DeviceCreateResult } from "./identity/acce
 import { storeDek, syncChain } from "./identity/context.js";
 import type {
   ServiceControlCommitOutcome,
+  ServiceControlCreator,
   ServiceControlPort,
+  ServiceControlRequestRecord,
   ServiceControlStateView,
 } from "./identity/control-approval.js";
 import { newOperationId, OperationJournal, phaseOf } from "./identity/journal.js";
@@ -294,17 +297,29 @@ async function createAsRoot(
 /**
  * A ServiceControlPort over a SyncClient that has `C` open with
  * shared-objects' ServiceControlDataProfile: the state readers see, who
- * created an entry (ServiceControlReplica.creatorsOf), and commits with
- * receipts. A committed change is `acknowledged` once its batch is
- * accepted, or acknowledged by a server without acceptance evidence
+ * created an entry (ServiceControlReplica.creatorsOf), the request history
+ * (ServiceControlReplica.requestHistory), and commits with receipts. A
+ * committed change is `acknowledged` once its batch is accepted, or
+ * acknowledged by a server without acceptance evidence
  * (`evidence-unavailable`); a change admission refuses before anything is
- * queued (§4) is `rejected` with its diagnostic.
+ * queued (§4) is `rejected` with its diagnostic. `acknowledged(container,
+ * key)` reads the same receipts: a change that created the entry counts
+ * once a unit carrying it (ServiceControlDataProfile.unitsOf) is in no
+ * batch of this client that is not accepted or acknowledged yet (a unit
+ * received from the coordinator is in none).
  */
 export function serviceControlPort(o: {
   readonly client: Pick<SyncClient, "commit" | "statusSnapshot">;
   readonly profile: {
     state(): ServiceControlStateView & { readonly usable?: boolean };
-    readonly replica: Pick<ServiceControlPort, "creatorsOf">;
+    readonly replica: {
+      creatorsOf(
+        container: Parameters<ServiceControlPort["creatorsOf"]>[0],
+        key: string,
+      ): readonly (ServiceControlCreator & { readonly hash: string })[];
+      requestHistory(): readonly ServiceControlRequestRecord[];
+    };
+    unitsOf(hash: string): readonly DataUnitId[];
   };
   readonly resource: ResourceId;
   /** Whether `C` is synchronised (e.g. resourceState(C) === "LIVE"); always, by default. */
@@ -319,6 +334,19 @@ export function serviceControlPort(o: {
     },
     creatorsOf: (container: Parameters<ServiceControlPort["creatorsOf"]>[0], key: string) =>
       o.profile.replica.creatorsOf(container, key),
+    requestHistory: () => o.profile.replica.requestHistory(),
+    acknowledged: async (
+      container: Parameters<ServiceControlPort["creatorsOf"]>[0],
+      key: string,
+    ): Promise<boolean> => {
+      const creators = o.profile.replica.creatorsOf(container, key);
+      if (creators.length === 0) return false;
+      const open = new Set<string>();
+      for (const b of (await o.client.statusSnapshot(o.resource)).batches)
+        if (b.status !== "accepted" && b.status !== "evidence-unavailable")
+          for (const u of b.unitIds) open.add(toHex(u));
+      return creators.some((c) => o.profile.unitsOf(c.hash).some((u) => !open.has(toHex(u))));
+    },
     commit: async (
       intents: readonly unknown[],
       operationId: string,

@@ -53,6 +53,7 @@ export {
   type ServiceControlCommitOutcome,
   type ServiceControlCreator,
   type ServiceControlPort,
+  type ServiceControlRequestRecord,
   type ServiceControlStateView,
   type ServiceControlWriterClass,
   sectionApprovalDecision,

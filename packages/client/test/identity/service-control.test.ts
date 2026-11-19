@@ -1,10 +1,12 @@
-import { type PrincipalId, toHex } from "@openlfcp/core";
+import { dataUnitId, type PrincipalId, resourceId, toHex } from "@openlfcp/core";
 import { describe, expect, test } from "vitest";
+import type { BatchStatusName } from "../../src/batch-status.js";
 import { fetchDeks, loadIdentityDocument, syncChain } from "../../src/identity/context.js";
 import { resourceRef } from "../../src/identity/document.js";
 import {
   createServiceControl,
   SERVICE_CONTROL_PROFILE,
+  serviceControlPort,
   serviceControlRosterName,
   serviceControlSignerFacts,
 } from "../../src/service-control.js";
@@ -85,5 +87,72 @@ describe("serviceControlSignerFacts (§2.3 at control_ref)", () => {
     const facts = serviceControlSignerFacts(state, A.installation.signer.descriptor.principalId);
     expect(facts.device).toEqual({ kind: 0, root: id(1), boundInC: true, active: true });
     expect(serviceControlSignerFacts(state, id(9)).device).toBeUndefined();
+  });
+});
+
+describe("serviceControlPort.acknowledged (SERVICE-CONTROL-PROFILE-01 §7.1, IDENTITY §9.1)", () => {
+  const unit = (n: number) => dataUnitId(new Uint8Array(32).fill(n));
+  /** A port over a fake client whose batches have `status`, and a profile whose entry has `hashes`. */
+  function portWith(
+    batches: readonly { status: BatchStatusName; units: readonly number[] }[],
+    creators: Record<string, readonly number[]>,
+  ) {
+    const resource = resourceId(new Uint8Array(32).fill(9));
+    return serviceControlPort({
+      resource,
+      client: {
+        commit: async () => ({}) as never,
+        statusSnapshot: async () =>
+          ({
+            batches: batches.map((b, i) => ({
+              operationId: `op-${i}`,
+              status: b.status,
+              unitIds: b.units.map(unit),
+              acceptedUnitIds: [],
+              affectedNodeIds: [],
+            })),
+          }) as never,
+      },
+      profile: {
+        state: () => ({ approvals: {}, requests: {}, pairing: {}, cancels: {} }),
+        replica: {
+          creatorsOf: () =>
+            Object.keys(creators).map((hash) => ({
+              hash,
+              signer: id(1),
+              writerClass: "root" as const,
+            })),
+          requestHistory: () => [],
+        },
+        unitsOf: (hash) => (creators[hash] ?? []).map(unit),
+      },
+    });
+  }
+
+  test("own change queued or pending: not acknowledged; accepted, or received: acknowledged", async () => {
+    const key = "p:x";
+    for (const status of ["saved", "pending", "blocked", "rejected"] as const)
+      expect(
+        await portWith([{ status, units: [1] }], { a: [1] }).acknowledged("approvals", key),
+        status,
+      ).toBe(false);
+    for (const status of ["accepted", "evidence-unavailable"] as const)
+      expect(
+        await portWith([{ status, units: [1] }], { a: [1] }).acknowledged("approvals", key),
+        status,
+      ).toBe(true);
+    // A unit in no batch of this client was received from the coordinator.
+    expect(await portWith([], { a: [2] }).acknowledged("approvals", key)).toBe(true);
+    // Staged, not committed yet: no unit carries it.
+    expect(await portWith([], { a: [] }).acknowledged("approvals", key)).toBe(false);
+    // No value.
+    expect(await portWith([], {}).acknowledged("approvals", key)).toBe(false);
+    // Two equal approvals (§5 rule 3): another client's accepted one counts.
+    expect(
+      await portWith([{ status: "pending", units: [1] }], { a: [1], b: [3] }).acknowledged(
+        "approvals",
+        key,
+      ),
+    ).toBe(true);
   });
 });
