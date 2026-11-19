@@ -156,3 +156,85 @@ describe("ServiceControlDataProfile: C through the client's Data Unit applier", 
     expect(binding.codec.decode(binding.codec.encode(save))).toEqual(save);
   });
 });
+
+/** personal's alternative to the request of history(): the same Automerge sequence, another change. */
+function alternative(units: ReturnType<typeof history>) {
+  const { replica } = ServiceControlReplica.fromChanges(
+    units.slice(0, 3).map(({ unit, value }) => ({
+      signer: unit.actor,
+      actorSeq: unit.seq,
+      signerClass: classes.get(toHex(unit.actor)) as ServiceControlSignerClass,
+      bytes: value.bytes,
+    })),
+    options,
+  );
+  const change = replica.write({ signer: personal, signerClass: "personal", actorSeq: 2 }, [
+    { intent: "request.create", rid: uid(9), request: request("check") as never },
+  ]);
+  if (change === null) throw new Error("no change");
+  return {
+    unit: { unitId: unitId(), actor: personal, seq: 2, control: "at-control-ref" },
+    value: checkChange(change.bytes),
+  };
+}
+
+describe("ServiceControlDataProfile.exclude: an excluded unit is never applied (W §19.1)", () => {
+  it("a waiting unit excluded before its dependencies arrive", () => {
+    const units = history();
+    const profile = new ServiceControlDataProfile({ ...options, signerClassOf });
+    const request = units[3] as (typeof units)[number];
+    expect("pending" in profile.apply(request.unit, request.value)).toBe(true);
+    profile.exclude([request.unit.unitId]);
+    expect(profile.has(request.unit.unitId)).toBe(false);
+    profile.applyBatch(units.slice(0, 3));
+    expect(profile.state().status?.state).toBe("running");
+    expect(profile.state().requests).toEqual({});
+    expect(profile.replica.hasChange(request.value.hash)).toBe(false);
+  });
+
+  it("a merged unit excluded after its dependencies arrived", () => {
+    const units = history();
+    const profile = new ServiceControlDataProfile({ ...options, signerClassOf });
+    profile.applyBatch(units);
+    const request = units[3] as (typeof units)[number];
+    expect(profile.state().requests[uid(1)]).toBeDefined();
+    profile.exclude([request.unit.unitId]);
+    expect(profile.state().requests).toEqual({});
+    // Later deliveries (another catch-up) do not bring it back.
+    profile.applyBatch(units.slice(0, 3));
+    expect(profile.state().requests).toEqual({});
+  });
+
+  it("a held unit excluded, then the change that held it excluded too", () => {
+    const units = history();
+    const alt = alternative(units);
+    const profile = new ServiceControlDataProfile({ ...options, signerClassOf });
+    const r = profile.applyBatch([...units, alt]);
+    expect(r.held.map(toHex)).toEqual([toHex(alt.unit.unitId)]);
+    profile.exclude([alt.unit.unitId]);
+    // Excluding the request frees the actor sequence: the held alternative must not take it.
+    const freed = profile.exclude([(units[3] as (typeof units)[number]).unit.unitId]);
+    expect(freed.released).toEqual([]);
+    expect(profile.state().requests).toEqual({});
+    expect(profile.replica.hasChange(alt.value.hash)).toBe(false);
+  });
+
+  it("a mixed exclusion of merged, waiting and held units", () => {
+    const units = history();
+    const alt = alternative(units);
+    const profile = new ServiceControlDataProfile({ ...options, signerClassOf });
+    profile.applyBatch([units[0], units[1], units[3], alt] as typeof units);
+    // B's service write is still to come; the request merged, the alternative held.
+    profile.exclude([
+      (units[1] as (typeof units)[number]).unit.unitId,
+      (units[3] as (typeof units)[number]).unit.unitId,
+      alt.unit.unitId,
+    ]);
+    profile.applyBatch([units[2]] as typeof units);
+    const s = profile.state();
+    expect(s.approvals).toEqual({});
+    expect(s.requests).toEqual({});
+    // B's write needed the approval for its class: it waits, it is not admitted.
+    expect(s.status).toBeUndefined();
+  });
+});

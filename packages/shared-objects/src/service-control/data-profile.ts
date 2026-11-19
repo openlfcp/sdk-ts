@@ -285,20 +285,25 @@ export class ServiceControlDataProfile {
   /**
    * W §19.1 (G-EP7): the state without `unitIds`, rebuilt from the other
    * changes; merged units that build on an excluded one wait again, held
-   * ones are retried.
+   * ones are retried. An excluded unit that was waiting or held is dropped
+   * from the replica too: it is never admitted later.
    */
   exclude(unitIds: readonly DataUnitId[]) {
-    const hashes: string[] = [];
+    // Merged, waiting and held units alike: the replica keeps waiting and held
+    // changes itself and would admit them once their dependencies arrive.
+    const excluded = new Set<string>();
     for (const id of unitIds) {
       const k = toHex(id);
-      this.#pending.delete(k);
-      this.#held.delete(k);
-      const m = this.#merged.get(k);
-      if (m !== undefined) {
-        hashes.push(m.hash);
-        this.#merged.delete(k);
+      for (const index of [this.#merged, this.#pending, this.#held]) {
+        const w = index.get(k);
+        if (w !== undefined) excluded.add(w.hash);
+        index.delete(k);
       }
     }
+    // A change another remaining unit still carries stays.
+    for (const index of [this.#merged, this.#pending, this.#held])
+      for (const w of index.values()) excluded.delete(w.hash);
+    const hashes = [...excluded];
     if (hashes.length === 0) return Object.freeze({ objects: [], pending: [], released: [] });
     const heldBefore = new Set(this.#held.keys());
     const { replica, result } = this.#replica.rebuildWithout(hashes);
