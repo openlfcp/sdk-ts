@@ -271,25 +271,30 @@ export class ServiceControlReplica {
    * A change admission refuses throws ServiceControlAdmissionError with its
    * diagnostic, LIMIT_EXCEEDED for an entry over its size, and leaves the
    * replica as it was: the client does not send it ("Couldn't send", §4,
-   * §11). The LFCP actor sequence of `writer` matters only to the initial
-   * change (SC0: unit 1).
+   * §11). Null when the intents change nothing (every value written is
+   * the current one). The LFCP actor sequence of `writer` matters only to
+   * the initial change (SC0: unit 1).
    */
-  write(writer: ServiceControlWriter, intents: readonly ServiceControlIntent[]): CheckedChange {
+  write(
+    writer: ServiceControlWriter,
+    intents: readonly ServiceControlIntent[],
+  ): CheckedChange | null {
     if (intents.length === 0) throw new LfcpError("PROFILE_INVALID", "no intent to write");
     const actor = toHex(deriveServiceControlActorId(this.#options.resource, writer.signer));
     const fork = A.clone(this.#doc, { actor });
-    let bytes: Uint8Array;
+    const before = A.getHeads(fork).sort().join();
+    let bytes: Uint8Array | undefined;
     try {
       const doc = A.change(fork, { time: 0 }, (d) => {
         for (const i of intents) applyServiceControlIntent(d as Record<string, unknown>, i);
       });
-      const last = A.getLastLocalChange(doc);
-      if (last === null || last === undefined)
-        throw new LfcpError("PROFILE_INVALID", "the intents change nothing");
-      bytes = last;
+      // Values equal to the current ones make no change (getLastLocalChange would
+      // then return this actor's previous change).
+      if (A.getHeads(doc).sort().join() !== before) bytes = A.getLastLocalChange(doc) ?? undefined;
     } finally {
       A.free(fork);
     }
+    if (bytes === undefined) return null;
     const change = checkChange(bytes);
     const r = this.receiveChanges([{ ...writer, bytes }]);
     if (r.admitted.includes(change.hash)) return checkChange(bytes);

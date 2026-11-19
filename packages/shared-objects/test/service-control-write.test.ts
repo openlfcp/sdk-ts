@@ -178,6 +178,16 @@ describe("SERVICE-CONTROL-PROFILE-01 §3: writing C", () => {
   });
 });
 
+describe("SERVICE-CONTROL-PROFILE-01 §3: a write of the current values", () => {
+  it("makes no change and nothing to send", () => {
+    const c = ready();
+    const heads = c.heads();
+    expect(c.write(S, [{ intent: "status.put", fields: STATUS }])).toBeNull();
+    expect(c.heads()).toEqual(heads);
+    expect(c.write(S, [{ intent: "status.put", fields: PAUSED }])).not.toBeNull();
+  });
+});
+
 describe("SERVICE-CONTROL-PROFILE-01 §4 sizes (A§3.2): records over their limits are refused", () => {
   it("refuses an entry over 4 KiB and a pairing entry over 8 KiB, and admits smaller ones", () => {
     const c = ready();
