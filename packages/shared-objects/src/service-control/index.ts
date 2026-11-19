@@ -15,6 +15,15 @@ export {
   serviceControlWriterClass,
 } from "./admission.js";
 
+export {
+  type ServiceControlBatchResult,
+  type ServiceControlChanged,
+  ServiceControlDataProfile,
+  type ServiceControlDataProfileOptions,
+  type ServiceControlListenerFailure,
+  type ServiceControlProfileUnit,
+  type ServiceControlStagedOperation,
+} from "./data-profile.js";
 export { ScReader, type ScValue } from "./reader.js";
 export {
   type ServiceControlReceiveResult,
