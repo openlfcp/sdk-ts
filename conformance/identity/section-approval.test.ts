@@ -29,14 +29,17 @@ import {
   type ControlRevocationCause,
   cancelPairing,
   completePairing,
+  controlNames,
   controlRevocationTargets,
   createIdentityResource,
   createPairingSession,
   OperationJournal,
   type PairingRequestValue,
   pairingRequests,
+  reconcileDevices,
   requestPairing,
   resumeApproval,
+  SERVICE_CONTROL_PROFILE_ID,
   type SectionApprovalInput,
   type ServiceControlPort,
   sectionApprovalDecision,
@@ -44,7 +47,13 @@ import {
 import type { Fault, UploadEvent } from "../../packages/client/test/identity/memory-coordinator.js";
 import { MemoryCoordinator } from "../../packages/client/test/identity/memory-coordinator.js";
 import { party, pid, URL } from "../../packages/client/test/identity/support.js";
-import { hostResource, node, pair, world } from "../../packages/client/test/identity/world.js";
+import {
+  addToRoster,
+  hostResource,
+  node,
+  pair,
+  world,
+} from "../../packages/client/test/identity/world.js";
 import { type CommitFault, T0, TestControl } from "./control-port.js";
 
 const uid = (n: number) => `0196f2a0-0000-7000-8000-${String(n).padStart(12, "0")}`;
@@ -54,10 +63,17 @@ const BASE = pid(30);
 const D_N = 7;
 const D = pid(D_N);
 
-async function setup() {
+async function setup(o: { readonly controlInRoster?: boolean } = {}) {
   const w = await world(2);
   const [X, Y] = w.resources as unknown as [ResourceId, ResourceId];
-  const control = new TestControl(R);
+  // C hosted and listed in the roster (§1), for the reconciliation order of §7.4.
+  let hosted: ResourceId | undefined;
+  if (o.controlInRoster === true) {
+    const h = await hostResource(w.server, w.P, SERVICE_CONTROL_PROFILE_ID);
+    await addToRoster(w.P, w.I, h.resource, { ...h.entry, endpoints: [...h.entry.endpoints] });
+    hosted = h.resource;
+  }
+  const control = new TestControl(R, hosted);
   // B, the base installation, approved by fingerprint before (A§4.1).
   control.write(R, "root", [
     {
@@ -802,5 +818,91 @@ describe("a cancel interrupted at each step is finished from the journal (A§4.3
       written: { kind: "acknowledged" },
     });
     expect(cancelsOf(t)).toBe(1);
+  });
+});
+
+describe("the reconciliation order of a client that implements the profile (§7.4)", {
+  timeout: 120_000,
+}, () => {
+  /** D consumed and bound in I (A1, A2), A3 not written: C was not synchronised for it. */
+  async function boundWithoutApproval() {
+    const t = await setup({ controlInRoster: true });
+    await bridgeRequests(t);
+    servicePairs(t);
+    const [review] = await pairingRequests({ ...t.w.P, session: t.s.session });
+    if (review === undefined) throw new Error("no request");
+    const port = t.control.port(R, "root");
+    const r = await approvePairing({
+      ...t.w.P,
+      review,
+      preset: "service",
+      scope: [t.X],
+      control: { ...port, state: () => undefined },
+      approvalRecord: { role: "section", origin: t.rid, generation: 1 },
+    });
+    expect(r.kind).toBe("approval-record-pending");
+    expect(grantsOf(t, t.X)).toBe(0);
+    return { t, port };
+  }
+  const reconcile = (t: T, view: (r: ResourceId) => ServiceControlPort | undefined) =>
+    reconcileDevices({ ...t.w.P, controlResources: view });
+  const forX = (t: T, r: Awaited<ReturnType<typeof reconcileDevices>>) =>
+    r.targets.find((x) => toHex(x.resource) === toHex(t.X));
+
+  test("C names D without an approval: deferred; once approvals[D] is present: registered", async () => {
+    const { t, port } = await boundWithoutApproval();
+    expect([
+      ...controlNames(
+        t.w.server.chain(t.w.I),
+        t.control.resource,
+        t.control.replica.validate(),
+        port.creatorsOf,
+      ),
+    ]).toEqual([toHex(D)]);
+    const view = (r: ResourceId) => (toHex(r) === toHex(t.control.resource) ? port : undefined);
+    const first = await reconcile(t, view);
+    expect(forX(t, first)?.deferred?.map((d) => ref(d.device))).toEqual([ref(D)]);
+    expect(grantsOf(t, t.X)).toBe(0);
+    // Another managing client writes the approval A3 would have (here: the root, by hand).
+    const leaf = t.w.server.chain(t.w.I).state.devices.get(toHex(D))?.chain?.leaf;
+    if (leaf === undefined) throw new Error("D is not bound in I");
+    t.control.write(R, "root", [
+      {
+        intent: "approval.create",
+        approval: {
+          role: "section",
+          resource: toBase64url(t.X),
+          principal: ref(D),
+          certDigest: toBase64url(leaf.payloadDigest),
+          certId: toBase64url(leaf.id),
+          generation: 1,
+          origin: t.rid,
+          at: T0,
+        },
+      },
+    ]);
+    const second = await reconcile(t, view);
+    expect(forX(t, second)?.deferred).toBeUndefined();
+    expect(grantsOf(t, t.X)).toBe(1);
+  });
+
+  test("a control Resource not synchronised, or not open here: every kind-1 registration waits", async () => {
+    const { t, port } = await boundWithoutApproval();
+    t.control.synchronised = false;
+    const r = await reconcile(t, () => port);
+    expect(forX(t, r)?.deferred?.map((d) => [ref(d.device), d.reason])).toEqual([
+      [ref(D), `the control Resource ${toHex(t.control.resource)} is not synchronised`],
+    ]);
+    t.control.synchronised = true;
+    const closed = await reconcile(t, () => undefined);
+    expect(forX(t, closed)?.deferred?.map((d) => ref(d.device))).toEqual([ref(D)]);
+    expect(grantsOf(t, t.X)).toBe(0);
+  });
+
+  test("without controlResources (a client that does not implement the profile) D is registered", async () => {
+    const { t } = await boundWithoutApproval();
+    const r = await reconcileDevices(t.w.P);
+    expect(forX(t, r)?.deferred).toBeUndefined();
+    expect(grantsOf(t, t.X)).toBe(1);
   });
 });
