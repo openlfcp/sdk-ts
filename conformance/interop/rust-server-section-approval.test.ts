@@ -19,6 +19,7 @@
 // LFCP_REQUIRE_LIVE=1; LFCP_SERVER_BIN runs a prebuilt server instead.
 
 import {
+  addToRoster,
   autoApproveSection,
   completePairing,
   createIdentityResource,
@@ -31,7 +32,9 @@ import {
   OperationJournal,
   queueControlRecord,
   queueKeyPackage,
+  reconcileDevices,
   requestPairing,
+  SERVICE_CONTROL_PROFILE,
   type SectionApprovalResult,
   type ServiceControlPort,
   serviceControlPort,
@@ -441,8 +444,37 @@ describe("section auto-approval ↔ Rust reference server (live, E-015)", () => 
             "pending",
           );
           expect((await chainOf(P, url, X)).records.length, boundary).toBe(1);
-          if (boundary === "A3 before the server's ACK")
+          if (boundary === "A3 before the server's ACK") {
             expect(bridge.profile.state().approvals[ref(idOf(D))], boundary).toBeUndefined();
+            // §7.4, §7.1: a reconciler of this client, which implements the profile, runs in
+            // this window. C, now in the roster, holds this client's A3 durable here but not
+            // accepted by the server: D's registration in X is deferred, nothing reaches X.
+            const listed = await addToRoster({
+              ...P,
+              resource: C,
+              entry: { profile: SERVICE_CONTROL_PROFILE, endpoints: [url], coordinator: url },
+            });
+            expect(["added", "present"], boundary).toContain(listed.kind);
+            expect(plugin.profile.state().approvals[ref(idOf(D))], boundary).toBeDefined();
+            expect(await portNow().acknowledged("approvals", ref(idOf(D))), boundary).toBe(false);
+            const gated = await reconcileDevices({
+              ...P,
+              only: [X],
+              rotate: false,
+              controlResources: (r) => (toHex(r) === toHex(C) ? portNow() : undefined),
+            });
+            const inX = gated.targets.find((t) => toHex(t.resource) === toHex(X));
+            expect(
+              inX?.deferred?.map((d) => [toHex(d.device), d.reason]),
+              boundary,
+            ).toEqual([
+              [
+                toHex(idOf(D)),
+                `the control Resource ${toHex(C)} names it and its approval for it is not accepted by the server yet`,
+              ],
+            ]);
+            expect((await chainOf(P, url, X)).records.length, boundary).toBe(1);
+          }
           hold = false;
           await restartPlugin();
         }
@@ -516,6 +548,19 @@ describe("section auto-approval ↔ Rust reference server (live, E-015)", () => 
           (o) => o.intent.session === s.session,
         );
         expect(op?.intent.approvedBy, boundary).toBe("pre-authorised");
+        if (boundary === "A3 before the server's ACK") {
+          // A3 accepted, D registered: the gated reconciler defers nothing and grants nothing twice.
+          expect(await portNow().acknowledged("approvals", ref(idOf(D))), boundary).toBe(true);
+          const after = await reconcileDevices({
+            ...P,
+            only: [X],
+            rotate: false,
+            controlResources: (r) => (toHex(r) === toHex(C) ? portNow() : undefined),
+          });
+          const inX = after.targets.find((t) => toHex(t.resource) === toHex(X));
+          expect(inX?.deferred, boundary).toBeUndefined();
+          expect((await chainOf(P, url, X)).records.filter(isD).length, boundary).toBe(1);
+        }
 
         const done = await completePairing({ ...D, operation: req.operation });
         expect(done.kind === "approved" && done.candidates.map((c) => c.status), boundary).toEqual([
