@@ -34,6 +34,7 @@ export {
   type ServiceControlReceiveResult,
   type ServiceControlRefusal,
   ServiceControlReplica,
+  type ServiceControlRequestRecord,
   type ServiceControlUnit,
   serviceControlCodec,
   serviceControlCodecFor,

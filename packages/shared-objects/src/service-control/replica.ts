@@ -42,12 +42,27 @@ import {
   deriveServiceControlActorId,
   SERVICE_CONTROL_PROFILE_ID,
   type ServiceControlContainer,
+  type ServiceControlRequest,
 } from "./values.js";
 import { applyServiceControlIntent, type ServiceControlIntent } from "./write.js";
 
 /** Wire authorization, decryption and the signer's class at control_ref happen before this boundary. */
 export interface ServiceControlUnit extends ServiceControlWriter {
   readonly bytes: Uint8Array;
+}
+
+/** One value `requests[rid]` held in C's admitted history (ServiceControlReplica.requestHistory). */
+export interface ServiceControlRequestRecord {
+  readonly rid: string;
+  readonly request: ServiceControlRequest;
+  /** Whether the entry is in the state readers see now (false: deleted since). */
+  readonly present: boolean;
+  /** §2.4: the change that created the value. */
+  readonly creators: readonly {
+    readonly hash: string;
+    readonly signer: PrincipalId;
+    readonly writerClass: ServiceControlWriterClass;
+  }[];
 }
 
 interface CheckedUnit {
@@ -391,6 +406,56 @@ export class ServiceControlReplica {
         out.push({ hash, signer: unit.signer.slice() as PrincipalId, writerClass });
     }
     return Object.freeze(out.map((o) => Object.freeze(o)));
+  }
+
+  /**
+   * Every value `requests[rid]` has held in the admitted history, deleted
+   * ones included (SERVICE-CONTROL-PROFILE-01 §7.4 Section rule, condition
+   * 1: "present or in `C`'s history"), each with the change that created it
+   * (§2.4: its unit's signer and the class admission judged it by). A
+   * request is created whole by one change and never written afterwards
+   * (§3), so its value is the entry as that change's causal history reads
+   * it (§5). A `rid` created by two concurrent changes is a conflicted
+   * entry (§5 rule 3: invalid, before and after any deletion) and is left
+   * out, as is a value §5 finds invalid. `present`: the entry is in the
+   * state readers see now.
+   */
+  requestHistory(): readonly ServiceControlRequestRecord[] {
+    const reader = new ScReader(A.getBackend(this.#doc));
+    const container = reader.map("_root", "requests");
+    if (container === undefined) return Object.freeze([]);
+    const made = new Map<
+      string,
+      { hash: string; signer: PrincipalId; writerClass: ServiceControlWriterClass }[]
+    >();
+    for (const [hash, unit] of this.#accepted) {
+      const writerClass = this.#classes.get(hash);
+      if (writerClass === undefined) continue;
+      const change = A.decodeChange(unit.bytes);
+      for (const op of change.ops as { action: string; obj: string; key?: unknown }[])
+        if (op.obj === container && op.action.startsWith("make") && typeof op.key === "string") {
+          const list = made.get(op.key) ?? [];
+          list.push({ hash, signer: unit.signer.slice() as PrincipalId, writerClass });
+          made.set(op.key, list);
+        }
+    }
+    const now = this.validate().requests;
+    const out: ServiceControlRequestRecord[] = [];
+    for (const [rid, creators] of [...made].sort(([a], [b]) => (a < b ? -1 : 1))) {
+      const creator = creators[0];
+      if (creators.length !== 1 || creator === undefined) continue;
+      const request = this.validate([creator.hash]).requests[rid];
+      if (request === undefined) continue;
+      out.push(
+        Object.freeze({
+          rid,
+          request,
+          present: Object.hasOwn(now, rid),
+          creators: Object.freeze([Object.freeze(creator)]),
+        }),
+      );
+    }
+    return Object.freeze(out);
   }
 
   /**

@@ -116,7 +116,12 @@ describe("ServiceControlDataProfile: C through the client's Data Unit applier", 
     expect(staged?.values).toHaveLength(1);
     expect(staged?.affectedNodeIds).toEqual([`cancels/${uid(1)}`]);
     staged?.apply();
-    staged?.committed([unitId()]);
+    const hash = String(staged?.values[0]?.hash);
+    // Staged: no unit carries the change yet; committed: its unit does.
+    expect(plugin.unitsOf(hash)).toEqual([]);
+    const own = unitId();
+    staged?.committed([own]);
+    expect(plugin.unitsOf(hash).map(toHex)).toEqual([toHex(own)]);
     expect(seen.map((e) => [e.origin, e.keys])).toEqual([["local", [`cancels/${uid(1)}`]]]);
     expect(() =>
       binding.stage([{ intent: "status.put", fields: { state: "paused" } }]),

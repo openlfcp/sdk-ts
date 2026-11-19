@@ -23,7 +23,9 @@ import {
   root,
   SERVICE,
   STATUS,
+  T0,
   uid,
+  X,
 } from "./support/service-control.js";
 
 const options = { resource, root, genesisSigner: root };
@@ -91,6 +93,58 @@ describe("ServiceControlReplica", () => {
     expect(replica.writerClassAt({ signer: B, signerClass: "service-device", actorSeq: 2 })).toBe(
       "service",
     );
+  });
+
+  it("lists every request C's history held, a deleted one included, with its creator (§7.4)", () => {
+    const init = initial();
+    const base = edit(init, personal, (d) => put(d.approvals, principalRef(B), approval(B)));
+    const fill = edit(base, B, (d) => {
+      for (const [k, v] of Object.entries(SERVICE)) put(d.service, k, v);
+      for (const [k, v] of Object.entries(STATUS)) put(d.status, k, v);
+    });
+    const asked = edit(fill, personal, (d) => put(d.requests, uid(1), request("pair-section")));
+    const failed = edit(asked, B, (d) => put(d.events, uid(1), { state: "failed", at: T0 }));
+    // §3: the service deletes a request once its event is final, whatever the final state.
+    const deleted = edit(failed, B, (d) => {
+      delete d.requests[uid(1)];
+    });
+    // Two managing clients create one rid concurrently: a conflicted entry (§5 rule 3).
+    const byRoot = edit(deleted, root, (d) => put(d.requests, uid(2), request("check")));
+    const byPersonal = edit(deleted, personal, (d) => put(d.requests, uid(2), request("pause")));
+    const { replica, result } = ServiceControlReplica.fromChanges(
+      [
+        unit(init, root, "root"),
+        unit(base, personal, "personal"),
+        unit(fill, B, "service-device"),
+        unit(asked, personal, "personal", 2),
+        unit(failed, B, "service-device", 2),
+        unit(deleted, B, "service-device", 3),
+        unit(byRoot, root, "root", 2),
+        unit(byPersonal, personal, "personal", 3),
+      ],
+      options,
+    );
+    expect(result.refused).toEqual([]);
+    expect(Object.keys(replica.validate().requests)).toEqual([]);
+    const history = replica.requestHistory();
+    expect(history.map((h) => [h.rid, h.request.op, h.present])).toEqual([
+      [uid(1), "pair-section", false],
+    ]);
+    expect(history[0]?.creators.map((c) => [c.signer, c.writerClass])).toEqual([
+      [personal, "personal"],
+    ]);
+    expect(history[0]?.request.binding).toBe(X);
+    // While it is present, the same record says so.
+    const before = ServiceControlReplica.fromChanges(
+      [
+        unit(init, root, "root"),
+        unit(base, personal, "personal"),
+        unit(fill, B, "service-device"),
+        unit(asked, personal, "personal", 2),
+      ],
+      options,
+    ).replica;
+    expect(before.requestHistory().map((h) => [h.rid, h.present])).toEqual([[uid(1), true]]);
   });
 
   it("refuses a change of a writer whose class the pre-state does not give, and its dependants", () => {
