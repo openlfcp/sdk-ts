@@ -62,6 +62,24 @@ const statusKey = (resource: ResourceId, operationId: string) =>
   `batch-status:${toHex(resource)}:${operationId}`;
 const unitKey = (resource: ResourceId, unit: string) => `receipt-unit:${toHex(resource)}:${unit}`;
 
+const ackKey = (resource: ResourceId, unit: string) => `unit-ack:${toHex(resource)}:${unit}`;
+
+/**
+ * Whether the server acknowledged this client's unit `unit` (hex) of
+ * `resource`: an ACK named it, durable acceptance evidence or not (§4.1).
+ * Kept apart from the batch's status, which a released receipt forgets,
+ * and from `evidence-unavailable`, which a server below durability 2 gives
+ * a batch before any ACK. A terminal NACK, or a re-offer after the server
+ * lost the unit, takes it back. Only units of a receipt are recorded.
+ */
+export async function unitAcknowledged(
+  storage: Pick<LfcpStorage, "localMarks">,
+  resource: ResourceId,
+  unit: string,
+): Promise<boolean> {
+  return (await storage.localMarks.get(ackKey(resource, unit))) !== undefined;
+}
+
 /** The index writes of a new receipt (in the commit's transaction). */
 export function receiptIndexWrites(resource: ResourceId, receipt: Receipt): StorageWrite[] {
   return receipt.unitIds.map((u) => ({
@@ -255,6 +273,14 @@ export async function recordEvidence(
     const s = await stored(storage, resource, op);
     let next: Stored = s;
     let touched: string[] = [];
+    // Each unit's own ACK, outliving the receipt (unitAcknowledged).
+    for (const u of mine)
+      writes.push({
+        op: "put-local-mark",
+        key: ackKey(resource, u),
+        value:
+          evidence.kind === "accepted" || evidence.kind === "unconfirmed" ? evidence.kind : null,
+      });
     switch (evidence.kind) {
       case "accepted":
         touched = mine.filter((u) => !s.accepted.includes(u));

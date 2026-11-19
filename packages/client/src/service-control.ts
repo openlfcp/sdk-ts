@@ -299,17 +299,19 @@ async function createAsRoot(
  * shared-objects' ServiceControlDataProfile: the state readers see, who
  * created an entry (ServiceControlReplica.creatorsOf), the request history
  * (ServiceControlReplica.requestHistory), and commits with receipts. A
- * committed change is `acknowledged` once its batch is accepted, or
- * acknowledged by a server without acceptance evidence
- * (`evidence-unavailable`); a change admission refuses before anything is
- * queued (§4) is `rejected` with its diagnostic. `acknowledged(container,
- * key)` reads the same receipts: a change that created the entry counts
- * once a unit carrying it (ServiceControlDataProfile.unitsOf) is in no
- * batch of this client that is not accepted or acknowledged yet (a unit
- * received from the coordinator is in none).
+ * committed change is `acknowledged` once the server acknowledged every
+ * unit carrying it (SyncClient.unitAcknowledged: an ACK that named the
+ * unit, durable acceptance evidence or not; a batch's
+ * `evidence-unavailable` alone is no ACK); a change admission refuses
+ * before anything is queued (§4) is `rejected` with its diagnostic, as is
+ * one a terminal NACK refused. `acknowledged(container, key)` holds once
+ * a unit carrying a change that created the entry
+ * (ServiceControlDataProfile.unitsOf) is acknowledged: by an ACK recorded
+ * here for this client's own unit, kept after its receipt is released, or
+ * as a unit of another writer received from the coordinator.
  */
 export function serviceControlPort(o: {
-  readonly client: Pick<SyncClient, "commit" | "statusSnapshot">;
+  readonly client: Pick<SyncClient, "commit" | "statusSnapshot" | "unitAcknowledged">;
   readonly profile: {
     state(): ServiceControlStateView & { readonly usable?: boolean };
     readonly replica: {
@@ -339,20 +341,18 @@ export function serviceControlPort(o: {
       container: Parameters<ServiceControlPort["creatorsOf"]>[0],
       key: string,
     ): Promise<boolean> => {
-      const creators = o.profile.replica.creatorsOf(container, key);
-      if (creators.length === 0) return false;
-      const open = new Set<string>();
-      for (const b of (await o.client.statusSnapshot(o.resource)).batches)
-        if (b.status !== "accepted" && b.status !== "evidence-unavailable")
-          for (const u of b.unitIds) open.add(toHex(u));
-      return creators.some((c) => o.profile.unitsOf(c.hash).some((u) => !open.has(toHex(u))));
+      for (const c of o.profile.replica.creatorsOf(container, key))
+        for (const u of o.profile.unitsOf(c.hash))
+          if (await o.client.unitAcknowledged(o.resource, u)) return true;
+      return false;
     },
     commit: async (
       intents: readonly unknown[],
       operationId: string,
     ): Promise<ServiceControlCommitOutcome> => {
+      let units: readonly DataUnitId[];
       try {
-        await o.client.commit(o.resource, intents, { operationId });
+        units = (await o.client.commit(o.resource, intents, { operationId })).unitIds;
       } catch (e) {
         const diagnostic = (e as { diagnostic?: unknown } | null)?.diagnostic;
         if (typeof diagnostic === "string") return { kind: "rejected", code: diagnostic };
@@ -363,9 +363,10 @@ export function serviceControlPort(o: {
       );
       if (batch?.status === "rejected")
         return { kind: "rejected", code: batch.rejection?.code ?? "rejected" };
-      return batch?.status === "accepted" || batch?.status === "evidence-unavailable"
-        ? { kind: "acknowledged" }
-        : { kind: "queued" };
+      if (units.length === 0) return { kind: "queued" };
+      for (const u of units)
+        if (!(await o.client.unitAcknowledged(o.resource, u))) return { kind: "queued" };
+      return { kind: "acknowledged" };
     },
   });
 }

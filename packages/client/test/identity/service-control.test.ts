@@ -1,6 +1,5 @@
 import { dataUnitId, type PrincipalId, resourceId, toHex } from "@openlfcp/core";
 import { describe, expect, test } from "vitest";
-import type { BatchStatusName } from "../../src/batch-status.js";
 import { fetchDeks, loadIdentityDocument, syncChain } from "../../src/identity/context.js";
 import { resourceRef } from "../../src/identity/document.js";
 import {
@@ -92,26 +91,20 @@ describe("serviceControlSignerFacts (§2.3 at control_ref)", () => {
 
 describe("serviceControlPort.acknowledged (SERVICE-CONTROL-PROFILE-01 §7.1, IDENTITY §9.1)", () => {
   const unit = (n: number) => dataUnitId(new Uint8Array(32).fill(n));
-  /** A port over a fake client whose batches have `status`, and a profile whose entry has `hashes`. */
-  function portWith(
-    batches: readonly { status: BatchStatusName; units: readonly number[] }[],
-    creators: Record<string, readonly number[]>,
-  ) {
+  /** A port whose entry was created by changes carried by `creators` (hash → units), `acked` the units ACKed. */
+  function portWith(creators: Record<string, readonly number[]>, acked: readonly number[]) {
     const resource = resourceId(new Uint8Array(32).fill(9));
-    return serviceControlPort({
+    const asked: string[] = [];
+    const port = serviceControlPort({
       resource,
       client: {
         commit: async () => ({}) as never,
-        statusSnapshot: async () =>
-          ({
-            batches: batches.map((b, i) => ({
-              operationId: `op-${i}`,
-              status: b.status,
-              unitIds: b.units.map(unit),
-              acceptedUnitIds: [],
-              affectedNodeIds: [],
-            })),
-          }) as never,
+        statusSnapshot: async () => ({ batches: [] }) as never,
+        unitAcknowledged: async (r, u) => {
+          expect(toHex(r)).toBe(toHex(resource));
+          asked.push(toHex(u));
+          return acked.some((n) => toHex(unit(n)) === toHex(u));
+        },
       },
       profile: {
         state: () => ({ approvals: {}, requests: {}, pairing: {}, cancels: {} }),
@@ -127,32 +120,20 @@ describe("serviceControlPort.acknowledged (SERVICE-CONTROL-PROFILE-01 §7.1, IDE
         unitsOf: (hash) => (creators[hash] ?? []).map(unit),
       },
     });
+    return { port, asked };
   }
 
-  test("own change queued or pending: not acknowledged; accepted, or received: acknowledged", async () => {
+  test("only an acknowledged unit of a creating change counts", async () => {
     const key = "p:x";
-    for (const status of ["saved", "pending", "blocked", "rejected"] as const)
-      expect(
-        await portWith([{ status, units: [1] }], { a: [1] }).acknowledged("approvals", key),
-        status,
-      ).toBe(false);
-    for (const status of ["accepted", "evidence-unavailable"] as const)
-      expect(
-        await portWith([{ status, units: [1] }], { a: [1] }).acknowledged("approvals", key),
-        status,
-      ).toBe(true);
-    // A unit in no batch of this client was received from the coordinator.
-    expect(await portWith([], { a: [2] }).acknowledged("approvals", key)).toBe(true);
+    expect(await portWith({ a: [1] }, []).port.acknowledged("approvals", key)).toBe(false);
+    expect(await portWith({ a: [1] }, [1]).port.acknowledged("approvals", key)).toBe(true);
     // Staged, not committed yet: no unit carries it.
-    expect(await portWith([], { a: [] }).acknowledged("approvals", key)).toBe(false);
+    expect(await portWith({ a: [] }, [1]).port.acknowledged("approvals", key)).toBe(false);
     // No value.
-    expect(await portWith([], {}).acknowledged("approvals", key)).toBe(false);
-    // Two equal approvals (§5 rule 3): another client's accepted one counts.
-    expect(
-      await portWith([{ status: "pending", units: [1] }], { a: [1], b: [3] }).acknowledged(
-        "approvals",
-        key,
-      ),
-    ).toBe(true);
+    expect(await portWith({}, [1]).port.acknowledged("approvals", key)).toBe(false);
+    // Two equal approvals (§5 rule 3): another client's acknowledged one counts.
+    const two = portWith({ a: [1], b: [3] }, [3]);
+    expect(await two.port.acknowledged("approvals", key)).toBe(true);
+    expect(two.asked).toEqual([toHex(unit(1)), toHex(unit(3))]);
   });
 });

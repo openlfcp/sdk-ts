@@ -3,6 +3,7 @@ import {
   type DataUnitId,
   dataEpoch,
   hash32,
+  type ResourceId,
   resourceId,
   toHex,
 } from "@openlfcp/core";
@@ -48,6 +49,7 @@ import {
   type StatusEvent,
   SyncClient,
   saveControlChain,
+  serviceControlPort,
   setWriteBarrier,
 } from "../src/index.js";
 import { FakeServer, settle } from "./fake-server.js";
@@ -952,5 +954,112 @@ describe("a refusal of the Resource (LFCP-02-115)", () => {
     // An access-refused barrier is not a proof: the reason stays the server's.
     await setWriteBarrier(d.storage, chain.R, { state: "access-refused" });
     expect((await d.sync.canWrite(chain.R)).reason).not.toBe("revoked");
+  });
+});
+
+// svc-1 review r1 (SERVICE-CONTROL-PROFILE-01 §7.1, §7.4; IDENTITY §9.1): a
+// change counts as acknowledged only on an ACK that named its unit, never on
+// evidence-unavailable alone (a server below durability 2) nor on its batch
+// being gone (a released receipt).
+describe("a unit's own ACK (SyncClient.unitAcknowledged, serviceControlPort)", () => {
+  /** serviceControlPort over the device: the entry was created by the change its receipt carries. */
+  const portOver = (
+    d: Awaited<ReturnType<typeof device>>,
+    R: ResourceId,
+    units: () => DataUnitId[],
+  ) =>
+    serviceControlPort({
+      client: d.sync,
+      resource: R,
+      profile: {
+        state: () => ({ approvals: {}, requests: {}, pairing: {}, cancels: {} }),
+        replica: {
+          creatorsOf: () => [
+            { hash: "h", signer: OWNER.signer.descriptor.principalId, writerClass: "root" },
+          ],
+          requestHistory: () => [],
+        },
+        unitsOf: () => units(),
+      },
+    });
+
+  it("durability 1, DATA_PUT unanswered: evidence-unavailable, not acknowledged; the ACK acknowledges", async () => {
+    const server = new FakeServer();
+    server.durability = 1n;
+    const chain = chainFor(230);
+    const srv = serve(server, chain);
+    srv.put = "silent";
+    const d = await device(server, chain);
+    await d.live();
+    let units: DataUnitId[] = [];
+    const port = portOver(d, chain.R, () => units);
+    const outcome = await port.commit(["a"], "op-1");
+    const receipt = await receiptOf(d.storage, chain.R, "op-1");
+    units = [...(receipt?.unitIds ?? [])];
+    await settle(50);
+    await d.sync.idle();
+    expect((await d.sync.statusSnapshot(chain.R)).batches).toMatchObject([
+      { operationId: "op-1", status: "evidence-unavailable" },
+    ]);
+    expect(outcome).toEqual({ kind: "queued" });
+    expect(await d.sync.unitAcknowledged(chain.R, units[0] as DataUnitId)).toBe(false);
+    expect(await port.acknowledged("approvals", "p:x")).toBe(false);
+    expect(await port.commit(["a"], "op-1")).toEqual({ kind: "queued" });
+    // The server answers (not durable: below durability 2): an ACK all the same.
+    srv.put = "plain";
+    await d.at(60_000);
+    expect(await port.acknowledged("approvals", "p:x")).toBe(true);
+    expect(await port.commit(["a"], "op-1")).toEqual({ kind: "acknowledged" });
+  });
+
+  it("a terminal NACK, then the receipt released: still not acknowledged", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(231);
+    const srv = serve(server, chain);
+    srv.put = ERROR_CODE.AUTHORIZATION_FAILED;
+    const d = await device(server, chain);
+    await d.live();
+    const receipt = await d.sync.commit(chain.R, ["a"], { operationId: "op-1" });
+    await settle(50);
+    await d.sync.idle();
+    const port = portOver(d, chain.R, () => [...receipt.unitIds]);
+    expect((await batchStatus(d.storage, chain.R, "op-1", 2n))?.status).toBe("rejected");
+    expect(await port.acknowledged("approvals", "p:x")).toBe(false);
+    await releaseReceipt(d.storage, chain.R, "op-1");
+    expect((await d.sync.statusSnapshot(chain.R)).batches).toEqual([]);
+    expect(await d.sync.unitAcknowledged(chain.R, receipt.unitIds[0] as DataUnitId)).toBe(false);
+    expect(await port.acknowledged("approvals", "p:x")).toBe(false);
+  });
+
+  it("an accepted unit stays acknowledged once its receipt is released; a re-offer takes it back", async () => {
+    const server = new FakeServer();
+    const chain = chainFor(232);
+    serve(server, chain);
+    const d = await device(server, chain);
+    await d.live();
+    const receipt = await d.sync.commit(chain.R, ["a"], { operationId: "op-1" });
+    await settle(50);
+    await d.sync.idle();
+    const unit = receipt.unitIds[0] as DataUnitId;
+    expect(await d.sync.unitAcknowledged(chain.R, unit)).toBe(true);
+    await releaseReceipt(d.storage, chain.R, "op-1");
+    expect(await d.sync.unitAcknowledged(chain.R, unit)).toBe(true);
+    // Another Resource's ACK says nothing of this unit.
+    expect(await d.sync.unitAcknowledged(resourceId(bytes32(1)), unit)).toBe(false);
+
+    const s2 = new FakeServer();
+    const chain2 = chainFor(233);
+    const srv2 = serve(s2, chain2);
+    const d2 = await device(s2, chain2);
+    await d2.live();
+    const r2 = await d2.sync.commit(chain2.R, ["a"], { operationId: "op-1" });
+    await settle(50);
+    await d2.sync.idle();
+    expect(await d2.sync.unitAcknowledged(chain2.R, r2.unitIds[0] as DataUnitId)).toBe(true);
+    srv2.stored = [];
+    srv2.put = "silent";
+    await d2.at(31_000);
+    expect(d2.events.some((e) => e.kind === "reoffered")).toBe(true);
+    expect(await d2.sync.unitAcknowledged(chain2.R, r2.unitIds[0] as DataUnitId)).toBe(false);
   });
 });
