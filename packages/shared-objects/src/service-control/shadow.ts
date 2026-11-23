@@ -25,7 +25,13 @@ interface Elem {
 
 type Obj =
   | { readonly kind: "map"; readonly keys: Map<string, readonly Live[]> }
-  | { readonly kind: "list"; readonly elems: Elem[]; readonly byId: Map<string, Elem> };
+  | {
+      readonly kind: "list";
+      /** Text: an element is as wide as its visible string in UTF-16 code units, as the engine counts. */
+      readonly text: boolean;
+      readonly elems: Elem[];
+      readonly byId: Map<string, Elem>;
+    };
 
 /** The change as the shadow needs it: its hash, actor and operations (A.decodeChange). */
 export type ShadowChange = Pick<A.DecodedChange, "hash" | "actor" | "startOp" | "ops">;
@@ -158,7 +164,7 @@ export class ShadowDoc implements ScBackend {
       const fresh: Obj =
         made === "map"
           ? { kind: "map", keys: new Map() }
-          : { kind: "list", elems: [], byId: new Map() };
+          : { kind: "list", text: made === "text", elems: [], byId: new Map() };
       this.#objs.set(id, fresh);
       undo.push(() => this.#objs.delete(id));
     } else if (o.action === "set") {
@@ -236,7 +242,10 @@ export class ShadowDoc implements ScBackend {
     if (o.kind === "map") return typeof key === "string" ? (o.keys.get(key) ?? []) : [];
     if (typeof key !== "number") return [];
     let i = key;
-    for (const e of o.elems) if (e.vals.length > 0 && i-- === 0) return e.vals;
+    for (const e of o.elems) {
+      i -= widthOf(o, e);
+      if (i < 0) return e.vals;
+    }
     return [];
   }
 
@@ -268,9 +277,16 @@ export class ShadowDoc implements ScBackend {
     const o = this.#obj(obj);
     if (o.kind === "map") return this.keys(obj).length;
     let n = 0;
-    for (const e of o.elems) if (e.vals.length > 0) n++;
+    for (const e of o.elems) n += widthOf(o, e);
     return n;
   }
+}
+
+/** How many indices an element takes: none when deleted, its UTF-16 length in text, else one. */
+function widthOf(o: { readonly text: boolean }, e: Elem): number {
+  const v = e.vals.at(-1);
+  if (v === undefined) return 0;
+  return o.text && typeof v.value === "string" ? v.value.length : 1;
 }
 
 /** The value as the engine returns it: a fresh Date and a copy of bytes, never shared state. */

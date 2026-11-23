@@ -102,7 +102,13 @@ function randomEdit(d: any, rnd: () => number): void {
       break;
     default: {
       const at = Math.floor(rnd() * (d.t.length + 1));
-      A.splice(d, ["t"], at, rnd() < 0.3 ? Math.min(2, d.t.length - at) : 0, pick(["x", "yz", ""]));
+      A.splice(
+        d,
+        ["t"],
+        at,
+        rnd() < 0.3 ? Math.min(2, d.t.length - at) : 0,
+        pick(["x", "yz", "", "\u{1F600}", "é\u{1F44D}\u{1F3FD}"]),
+      );
     }
   }
 }
@@ -218,6 +224,34 @@ describe("the shadow of C's visible state equals a full replay", () => {
     expect(accepted.length).toBeGreaterThan(100);
     expect(concurrent).toBeGreaterThan(0);
   }, 120_000);
+
+  it("counts Text in UTF-16 code units, through edits, undo and redo", () => {
+    const actor = "aa01";
+    let doc = A.change(A.init<Doc>({ actor }), (d) => {
+      d.t = "a\u{1F600}b";
+    });
+    const history = [A.getLastLocalChange(doc) as Uint8Array];
+    const shadow = new ShadowDoc();
+    shadow.applyChecked(checkChange(history[0] as Uint8Array));
+    expect(shadow.length(shadow.getWithType("_root", "t")?.[1] as string)).toBe(4);
+    expectSame(shadow, replay(history));
+    const edits: ((d: Doc) => void)[] = [
+      (d) => A.splice(d, ["t"], 3, 0, "\u{1F680}z"),
+      (d) => A.splice(d, ["t"], 1, 2, "é"),
+      (d) => A.splice(d, ["t"], 0, 1, "\u{1F44D}\u{1F3FD}"),
+    ];
+    for (const edit of edits) {
+      doc = A.change(doc, edit);
+      const bytes = A.getLastLocalChange(doc) as Uint8Array;
+      shadow.applyChecked(checkChange(bytes));
+      history.push(bytes);
+      expectSame(shadow, replay(history));
+    }
+    const redo = Array.from({ length: edits.length }, () => shadow.undo()).reverse();
+    expectSame(shadow, replay(history.slice(0, 1)));
+    for (const c of redo) if (c !== undefined) shadow.apply(c);
+    expectSame(shadow, replay(history));
+  });
 });
 
 describe("the shadow's limits", () => {
