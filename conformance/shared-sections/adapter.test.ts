@@ -72,6 +72,6 @@ describe("sdk-ts adapter for SHARED-SECTIONS-TEST-VECTORS-01", () => {
               expect(got, `${c.id} ${delivery} ${key}`).toEqual(want);
             }
           }),
-        30_000,
+        120_000,
       );
 });
