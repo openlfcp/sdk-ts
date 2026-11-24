@@ -73,6 +73,11 @@ function splitId(id: string): { ctr: number; actor: string } {
  */
 export class ReferenceHistory {
   readonly #byHash = new Map<string, Entry>();
+  /**
+   * A§3.5 (E-030): each distinct target once. Most operations of a long history land where
+   * earlier ones did (a heartbeat on status.heartbeatAt), so the index grows by a pointer each.
+   */
+  readonly #targets = new Map<string, Target>();
   /** Each actor's changes by sequence number (index seq - 1). */
   readonly #byActor = new Map<string, Entry[]>();
 
@@ -107,13 +112,23 @@ export class ReferenceHistory {
       actor: change.actor,
       seq: change.seq,
       startOp: change.startOp,
-      ops: change.ops.map((op, i) => targetOf(op, `${change.startOp + i}@${change.actor}`)),
+      ops: change.ops.map((op, i) =>
+        this.#target(targetOf(op, `${change.startOp + i}@${change.actor}`)),
+      ),
       clock,
     };
     this.#byHash.set(hash, entry);
     const list = this.#byActor.get(change.actor) ?? [];
     list[change.seq - 1] = entry;
     this.#byActor.set(change.actor, list);
+  }
+
+  #target(t: Target): Target {
+    const key = `${t.obj}\u0000${t.slot}\u0000${+t.insert}${+t.del}${t.make ?? "-"}${+t.counterPut}`;
+    const known = this.#targets.get(key);
+    if (known !== undefined) return known;
+    this.#targets.set(key, t);
+    return t;
   }
 
   /** The change of `actor` holding operation counter `ctr`, among its first `upToSeq` changes. */
