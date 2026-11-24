@@ -291,6 +291,34 @@ describe("the shadow of C's visible state equals a full replay", () => {
       expectSame(shadow, replay(history));
     }
   });
+
+  it("reads timestamps beyond the safe integers as the engine does, through undo and redo", () => {
+    const MAX64 = 2n ** 63n - 1n;
+    for (const t of [2n ** 53n, -(2n ** 53n) - 1n, MAX64, -MAX64 - 1n]) {
+      const engine = A.getBackend(A.init<unknown>({ actor: "aa01" }));
+      const history: Uint8Array[] = [];
+      const shadow = new ShadowDoc();
+      const commit = () => {
+        engine.commit();
+        const bytes = engine.getLastLocalChange() as Uint8Array;
+        shadow.applyChecked(checkChange(bytes));
+        history.push(bytes);
+        expectSame(shadow, replay(history));
+      };
+      engine.put("_root", "a", 1, "int");
+      commit();
+      // The engine takes a bigint here, though its Value type does not say so.
+      engine.put("_root", "t", t as unknown as number, "timestamp");
+      commit();
+      const [type, value] = shadow.getWithType("_root", "t") ?? [];
+      expect(type).toBe("timestamp");
+      expect(Number.isNaN((value as Date).getTime())).toBe(true);
+      const redo = shadow.undo();
+      expectSame(shadow, replay(history.slice(0, 1)));
+      if (redo !== undefined) shadow.apply(redo);
+      expectSame(shadow, replay(history));
+    }
+  });
 });
 
 describe("the shadow's limits", () => {

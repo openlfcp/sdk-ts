@@ -302,9 +302,13 @@ function widthOf(o: { readonly text: boolean }, e: Elem): number {
   return o.text && typeof v.value === "string" ? v.value.length : 1;
 }
 
-/** The value as the engine returns it: a fresh Date and a copy of bytes, never shared state. */
+/**
+ * The value as the engine returns it: a fresh Date and a copy of bytes, never
+ * shared state. A timestamp operand beyond the safe integers decodes as a
+ * bigint, which the engine reads as a number, so as an Invalid Date.
+ */
 function engineValue(v: Live): unknown {
-  if (v.type === "timestamp") return new Date(v.value as number);
+  if (v.type === "timestamp") return new Date(Number(v.value as number | bigint));
   if (v.type === "bytes") return Uint8Array.from(v.value as Uint8Array);
   return v.value;
 }
