@@ -443,4 +443,31 @@ describe("the replica's indexes equal the full search of the admitted history", 
     expect(argsOf(replica).nested.value).toBe(1);
     expectSameRequestHistory(replica);
   });
+
+  it("a request with byte values and timestamps is admitted and handed out as fresh copies", () => {
+    const init = initial();
+    // put() writes objects as maps: the bytes and the timestamp are set as Automerge scalars.
+    const made = edit(init, root, (d) => {
+      put(d.requests, uid(1), request("check", { extra: {} }));
+      const r = d.requests[uid(1)];
+      r.args.payload = new Uint8Array([1, 2, 3]);
+      r.args.when = new Date(0);
+      r.extra.blob = new Uint8Array([4]);
+    });
+    const replica = ServiceControlReplica.empty(options);
+    const r = replica.receiveChanges([
+      { bytes: last(init), signer: root, signerClass: "root", actorSeq: 1 },
+      { bytes: last(made), signer: root, signerClass: "root", actorSeq: 2 },
+    ]);
+    expect(r.admitted).toHaveLength(2);
+    expectSameRequestHistory(replica);
+    type Bytes = { payload: Uint8Array; when: Date };
+    const argsOf = (x: ServiceControlReplica) => x.requestHistory()[0]?.request.args as Bytes;
+    const { payload, when } = argsOf(replica);
+    payload[0] = 9;
+    when.setTime(1);
+    expect(argsOf(replica).payload).toEqual(new Uint8Array([1, 2, 3]));
+    expect(argsOf(replica).when.getTime()).toBe(0);
+    expectSameRequestHistory(replica);
+  });
 });

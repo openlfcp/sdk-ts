@@ -29,6 +29,7 @@ import { admitBatch, type DocumentSequences } from "../admission/sequence.js";
 import { isWasmTrap } from "../replica.js";
 import {
   checkServiceControlUnit,
+  detached,
   refuseServiceControl,
   ServiceControlAdmission,
   type ServiceControlAdmissionDiagnostic,
@@ -512,7 +513,7 @@ export class ServiceControlReplica {
       out.push(
         Object.freeze({
           rid,
-          request: creation.request,
+          request: detached(creation.request),
           present: Object.hasOwn(now, rid),
           creators: Object.freeze([Object.freeze({ hash: creation.hash, ...author })]),
         }),

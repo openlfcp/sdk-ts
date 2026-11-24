@@ -771,10 +771,34 @@ function stringField(reader: ScReader, map: string | undefined, field: string): 
   return isStr(v) ? v[1] : undefined;
 }
 
+/** Byte values and timestamps of a request: freezing cannot make them read-only (ArrayBuffer view, Date). */
+const isMutableLeaf = (v: object): boolean => ArrayBuffer.isView(v) || v instanceof Date;
+
+/** Freezes every map and list of `value`; its bytes and timestamps are copied when handed out (detached). */
 function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object") {
+  if (value !== null && typeof value === "object" && !isMutableLeaf(value)) {
     for (const v of Object.values(value)) deepFreeze(v);
     Object.freeze(value);
   }
   return value;
+}
+
+/**
+ * `value` (frozen by deepFreeze) with a fresh copy of each byte value and
+ * timestamp, the frozen maps and lists without one shared as they are.
+ */
+export function detached<T>(value: T): T {
+  if (value === null || typeof value !== "object") return value;
+  if (value instanceof Date) return new Date(value.getTime()) as T;
+  if (ArrayBuffer.isView(value)) return (value as unknown as Uint8Array).slice() as T;
+  let copy: Record<string, unknown> | unknown[] | undefined;
+  for (const [k, v] of Object.entries(value)) {
+    const d = detached(v);
+    if (d === v) continue;
+    copy ??= Array.isArray(value)
+      ? [...(value as unknown[])]
+      : { ...(value as Record<string, unknown>) };
+    (copy as Record<string, unknown>)[k] = d;
+  }
+  return copy === undefined ? value : (Object.freeze(copy) as T);
 }
