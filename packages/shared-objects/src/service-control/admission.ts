@@ -200,7 +200,10 @@ type Clock = ReadonlyMap<string, number>;
 export interface ServiceControlAdmissionMode {
   /** Judge a change on the shadow model when its pre-state is in reach (default true). */
   readonly incremental?: boolean;
-  /** How many of the newest changes the shadow can roll back to a fork point (default 256). */
+  /**
+   * How many of the newest changes the shadow can roll back to a fork point
+   * (default 256); under 1, every change is judged on the engine path.
+   */
   readonly window?: number;
 }
 
@@ -336,7 +339,11 @@ export class ServiceControlAdmission {
     }
     const clock = this.#clockOf(change.deps);
     const shadow = this.#shadow;
-    const back = shadow !== undefined && this.incremental ? this.#forkDepth(clock) : undefined;
+    // A window under one cannot hold the change itself to take it back when it is refused.
+    const back =
+      shadow !== undefined && this.incremental && shadow.window >= 1
+        ? this.#forkDepth(clock)
+        : undefined;
     if (shadow !== undefined && back !== undefined) {
       // The pre-state: the newest `back` changes rolled back, those of the change's history applied again.
       const undone = Array.from({ length: back }, () => shadow.undo() as ShadowChange).reverse();

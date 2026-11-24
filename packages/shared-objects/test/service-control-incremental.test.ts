@@ -131,6 +131,44 @@ describe("incremental admission of C decides as the engine path", () => {
     expect(paths.engine).toBeGreaterThan(0);
   });
 
+  it("a refused change then a valid sibling, with no undo window and with one", () => {
+    const year = syntheticYear({ days: 0 });
+    const writer = year.units.at(-1) as YearUnit;
+    const actor = checkChange(writer.bytes).actor;
+    let doc = A.init<{ bindings: Record<string, Record<string, unknown>> }>({ actor });
+    [doc] = A.applyChanges(
+      doc,
+      year.units.map((u) => u.bytes),
+    );
+    const key = Object.keys(doc.bindings)[0] as string;
+    const sibling = (edit: (b: Record<string, unknown>) => void) =>
+      A.getLastLocalChange(
+        A.change(A.clone(doc, { actor }), (d) => edit(d.bindings[key] as Record<string, unknown>)),
+      ) as Uint8Array;
+    // LIMIT_EXCEEDED, then a change that only moves the binding's lastCompleteCheckAt.
+    const oversized = sibling((b) => {
+      b.list = new A.ImmutableString("x".repeat(9000));
+    });
+    const valid = sibling((b) => {
+      b.lastCompleteCheckAt = new A.ImmutableString("2026-02-01T00:00:00Z");
+    });
+    const units = withChanges([
+      ...year.units,
+      { ...writer, bytes: oversized },
+      { ...writer, bytes: valid },
+    ]);
+    const full = decide(units, year.options, { incremental: false });
+    expect(full.decisions.at(-2)).toEqual({
+      refused: "ServiceControlAdmissionError: LIMIT_EXCEEDED",
+    });
+    expect(typeof full.decisions.at(-1)).toBe("string");
+    for (const window of [0, 1, 256]) {
+      const incremental = decide(units, year.options, { window });
+      expect(incremental.decisions).toEqual(full.decisions);
+      expect(incremental.state).toEqual(full.state);
+    }
+  }, 120_000);
+
   it("the replica admits a synthetic history whole, as one batch and unit by unit", () => {
     const year = syntheticYear({ days: 3, seed: 9 });
     const whole = ServiceControlReplica.fromChanges(year.units, year.options);
