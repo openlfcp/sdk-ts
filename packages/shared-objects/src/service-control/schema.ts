@@ -3,7 +3,7 @@ import { fromBase64url, principalId } from "@openlfcp/core";
 import { isIdentityDescriptor, isResourceRef } from "../identity/values.js";
 import { pointerToken } from "../validate.js";
 import { isPrincipalRef, isUtcTimestamp } from "../values.js";
-import { isMapValue, isStr, isUint, ScReader, type ScValue } from "./reader.js";
+import { isMapValue, isObject, isStr, isUint, ScReader, type ScValue } from "./reader.js";
 import {
   deviceFingerprint,
   EVENT_STATES,
@@ -151,6 +151,25 @@ function checkValue(
   found: Set<ServiceControlDiagnostic>,
 ): void {
   if (v === undefined) return;
+  if (typeof type !== "string" && !("enum" in type) && isObject(v)) {
+    // An object is checked again only when it or something below it changed (ScReader.memo).
+    const own = reader.memo(type, String(v[1]), () => {
+      const f = new Set<ServiceControlDiagnostic>();
+      checkObject(reader, type, v, f);
+      return [...f];
+    });
+    for (const d of own) found.add(d);
+    return;
+  }
+  checkObject(reader, type, v, found);
+}
+
+function checkObject(
+  reader: ScReader,
+  type: FieldType,
+  v: ScValue,
+  found: Set<ServiceControlDiagnostic>,
+): void {
   if (typeof type === "string") {
     if (type === "u") return void (isUint(v) || found.add("INVALID_FIELD_TYPE"));
     if (type === "b") return void (v[0] === "boolean" || found.add("INVALID_FIELD_TYPE"));

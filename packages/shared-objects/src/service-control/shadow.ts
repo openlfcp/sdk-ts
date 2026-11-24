@@ -127,6 +127,16 @@ function engineInt(b: bigint): number | bigint {
 export class ShadowDoc implements ScBackend {
   readonly #objs = new Map<string, Obj>([["_root", { kind: "map", keys: new Map() }]]);
   readonly #log: Logged[] = [];
+  /** The object each object was made in, for the versions of its ancestors. */
+  readonly #parents = new Map<string, string>();
+  /** The tick of the newest operation, applied or rolled back, in each object or below it. */
+  readonly #versions = new Map<string, number>();
+  #tick = 0;
+  /** The visible keys of a map in the engine's order, as of a version of the map. */
+  readonly #sorted = new Map<
+    string,
+    { readonly version: number; readonly keys: readonly string[] }
+  >();
 
   /** @param window how many of the newest changes can be rolled back. */
   constructor(readonly window = 256) {}
@@ -134,6 +144,21 @@ export class ShadowDoc implements ScBackend {
   /** How many changes `undo` can roll back. */
   get depth(): number {
     return this.#log.length;
+  }
+
+  /**
+   * A§3.5 (E-030): a number that changes whenever `obj` or anything below it
+   * changes (an operation applied or rolled back), never back to an earlier
+   * value, so a reading of `obj` at a version holds while it stays the same.
+   */
+  version(obj: string): number {
+    return this.#versions.get(obj) ?? 0;
+  }
+
+  #touch(obj: string): void {
+    const tick = ++this.#tick;
+    for (let o: string | undefined = obj; o !== undefined; o = this.#parents.get(o))
+      this.#versions.set(o, tick);
   }
 
   /** Applies a checked change (its dependencies already applied). */
@@ -175,6 +200,9 @@ export class ShadowDoc implements ScBackend {
     const o = op as typeof op & { elemId?: string; insert?: boolean; datatype?: string };
     const obj = this.#objs.get(o.obj);
     if (obj === undefined) throw new ShadowUnsupported(`an operation on unknown object ${o.obj}`);
+    // Rolled back last (the undo log runs backwards), as the operation's other inverses are done.
+    undo.push(() => this.#touch(o.obj));
+    this.#touch(o.obj);
     const made = OBJECT_TYPES[o.action];
     let created: Live | undefined;
     if (made !== undefined) {
@@ -184,6 +212,9 @@ export class ShadowDoc implements ScBackend {
           ? { kind: "map", keys: new Map() }
           : { kind: "list", text: made === "text", elems: [], byId: new Map() };
       this.#objs.set(id, fresh);
+      this.#parents.set(id, o.obj);
+      // A new version even when the ID is made again after a rollback.
+      this.#versions.set(id, ++this.#tick);
       undo.push(() => this.#objs.delete(id));
     } else if (o.action === "set") {
       const [type, value] = scalarOf(o);
@@ -285,9 +316,14 @@ export class ShadowDoc implements ScBackend {
     this.#current(heads);
     const o = this.#obj(obj);
     if (o.kind !== "map") return [];
+    const version = this.version(obj);
+    const cached = this.#sorted.get(obj);
+    if (cached?.version === version) return [...cached.keys];
     const out: string[] = [];
     for (const [k, vals] of o.keys) if (vals.length > 0) out.push(k);
-    return out.sort(compareKeys);
+    out.sort(compareKeys);
+    this.#sorted.set(obj, { version, keys: out });
+    return [...out];
   }
 
   length(obj: string, heads?: unknown): number {

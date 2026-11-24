@@ -9,7 +9,20 @@ export interface ScBackend {
   getAll(obj: string, key: string | number, heads?: string[]): unknown[];
   keys(obj: string, heads?: string[]): string[];
   length(obj: string, heads?: string[]): number;
+  /**
+   * A§3.5 (E-030): a model of the current state may give each object a
+   * version that changes whenever the object or anything below it changes
+   * (ShadowDoc.version); a reading of an object is then reused while its
+   * version stays the same, so a change is validated on the paths it wrote.
+   */
+  version?(obj: string): number;
 }
+
+/** Readings of objects at their versions, by backend and by what was read. */
+const MEMO = new WeakMap<
+  ScBackend,
+  Map<unknown, Map<string, { readonly version: number; readonly value: unknown }>>
+>();
 
 /** One value of the backend: a scalar with its type, or an object with its ID. */
 export type ScValue = readonly [type: string, value: unknown];
@@ -33,6 +46,8 @@ export function utf8Length(text: string): number {
   }
   return n;
 }
+
+const SIZE = Symbol("size");
 
 /**
  * The document read through the backend, at the given heads (the causal
@@ -70,6 +85,25 @@ export class ScReader {
     return this.backend.length(obj, this.#heads());
   }
 
+  /**
+   * `read()` of the object `obj` (a reading of what, `what`, names), reused
+   * while the backend's version of `obj` is the same; computed every time at
+   * explicit heads or on a backend without versions.
+   */
+  memo<T>(what: unknown, obj: string, read: () => T): T {
+    const version = this.heads === undefined ? this.backend.version?.(obj) : undefined;
+    if (version === undefined) return read();
+    const readings = MEMO.get(this.backend) ?? new Map();
+    MEMO.set(this.backend, readings);
+    const byObj = readings.get(what) ?? new Map();
+    readings.set(what, byObj);
+    const hit = byObj.get(obj);
+    if (hit?.version === version) return hit.value as T;
+    const value = read();
+    byObj.set(obj, { version, value });
+    return value;
+  }
+
   /** The projection of `obj[key]` when it is a map, else undefined. */
   map(obj: string, key: string): string | undefined {
     const v = this.get(obj, key);
@@ -105,19 +139,23 @@ export class ScReader {
     const [type, value] = v;
     if (type === "str") return utf8Length(String(value));
     if (type === "map" || type === "table") {
-      let n = 0;
       const id = String(value);
-      for (const k of this.keys(id)) {
-        const keyBytes = utf8Length(k);
-        for (const e of this.all(id, k)) n += keyBytes + this.size(e);
-      }
-      return n;
+      return this.memo(SIZE, id, () => {
+        let n = 0;
+        for (const k of this.keys(id)) {
+          const keyBytes = utf8Length(k);
+          for (const e of this.all(id, k)) n += keyBytes + this.size(e);
+        }
+        return n;
+      });
     }
     if (type === "list") {
       const id = String(value);
-      let n = 0;
-      for (let i = 0; i < this.length(id); i++) n += this.size(this.get(id, i));
-      return n;
+      return this.memo(SIZE, id, () => {
+        let n = 0;
+        for (let i = 0; i < this.length(id); i++) n += this.size(this.get(id, i));
+        return n;
+      });
     }
     return 8;
   }

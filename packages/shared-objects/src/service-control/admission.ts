@@ -192,6 +192,7 @@ const ROW: Readonly<Record<string, readonly ServiceControlWriterClass[]>> = {
 };
 const ROOT_KEYS: ReadonlySet<string> = new Set(SERVICE_CONTROL_ROOT_KEYS);
 const MAX_OPEN_REQUESTS = 32;
+const UNREVOKED = Symbol("unrevoked bases");
 const MAX_OPEN_PAIR_SECTION = 1;
 
 type Clock = ReadonlyMap<string, number>;
@@ -304,16 +305,21 @@ export class ServiceControlAdmission {
   unrevokedBases(heads: readonly string[]): string[] {
     const approvals = this.#containers.get("approvals");
     if (approvals === undefined || heads.length === 0) return [];
-    return this.#unrevoked(new ScReader(A.getBackend(this.document), heads));
+    return [...this.#unrevoked(new ScReader(A.getBackend(this.document), heads))];
   }
 
-  #unrevoked(reader: ScReader): string[] {
+  #unrevoked(reader: ScReader): readonly string[] {
     const approvals = this.#containers.get("approvals");
     if (approvals === undefined) return [];
-    return reader.keys(approvals).filter((key) => {
-      const a = readApproval(reader, approvals, key, this.#resource);
-      return a !== undefined && a.role === "base" && !a.revoked;
-    });
+    // Read again on the shadow only when `approvals` changed (ScReader.memo).
+    return reader.memo(UNREVOKED, approvals, () =>
+      Object.freeze(
+        reader.keys(approvals).filter((key) => {
+          const a = readApproval(reader, approvals, key, this.#resource);
+          return a !== undefined && a.role === "base" && !a.revoked;
+        }),
+      ),
+    );
   }
 
   /** §2.3: the class of `writer` for a change with these dependencies (all admitted). */
