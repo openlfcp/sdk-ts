@@ -2,11 +2,14 @@
 // and each binding at most once a minute, the transitions inside that minute merged.
 
 import { describe, expect, it } from "vitest";
+import { checkChange } from "../src/admission/framing.js";
 import {
   HEARTBEAT_INTERVAL_MS,
+  ServiceControlReplica,
   ServiceControlStatusSchedule,
   TRANSITION_INTERVAL_MS,
 } from "../src/service-control/index.js";
+import { syntheticYear } from "./support/service-control-year.js";
 
 const T0 = Date.parse("2026-01-05T00:00:00Z");
 const MIN = 60_000;
@@ -144,4 +147,27 @@ describe("A§3.5 transitions", () => {
       fields: { pending: { toApple: 108, toLfcp: 0 } },
     });
   });
+});
+
+describe("A§3.5 the write-frequency reduction keeps C's dedup evidence", () => {
+  it("every answer stays in the history after cleanup, from a daily Snapshot and its tail too", () => {
+    const year = syntheticYear({ days: 14 });
+    const { replica, result } = ServiceControlReplica.fromChanges(year.units, year.options);
+    expect(result.refused).toEqual([]);
+    // The root's units after initialize and the approval are its answers (A§3.4 step 4 dedups on them).
+    const answers = year.units.filter((u) => u.signerClass === "root").slice(2);
+    expect(answers.length).toBeGreaterThan(10);
+    // Cleaned up from the state readers see, never from the history.
+    expect(Object.keys(replica.validate().answers).length).toBeLessThan(answers.length);
+    for (const u of year.units) expect(replica.hasChange(checkChange(u.bytes).hash)).toBe(true);
+
+    const at = year.snapshots.at(-2) as number;
+    expect(year.snapshots).toHaveLength(14);
+    const prefix = year.units.slice(0, at);
+    const snapshot = ServiceControlReplica.fromChanges(prefix, year.options).replica.snapshot();
+    const cold = ServiceControlReplica.fromSnapshot(snapshot, year.options, prefix);
+    expect(cold.receiveChanges(year.units.slice(at)).refused).toEqual([]);
+    expect(cold.heads()).toEqual(replica.heads());
+    for (const u of answers) expect(cold.hasChange(checkChange(u.bytes).hash)).toBe(true);
+  }, 60_000);
 });

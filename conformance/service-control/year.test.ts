@@ -1,8 +1,8 @@
 // A§3.5 (E-030): admission and cold connect of C on a bridge-style synthetic history, against the
 // budget (admission ≤ 5 s, cold connect ≤ 10 s). Measured, not held: LFCP_SC_YEAR=14,365 runs
 // those lengths in days and prints the figures (the bridge's nightly c-year job holds the whole
-// client to the budget). Cold connect here is the SDK's part: the replica from a Snapshot and
-// every unit, then the reads a client makes of C (validate, creatorsOf, requestHistory), here and
+// client to the budget). Cold connect here is the SDK's part: the replica from the plugin's latest
+// Snapshot (daily, A§3.5) and the units it carries, the tail after it, then the reads a client makes of C (validate, creatorsOf, requestHistory), here and
 // again in a process of its own for its peak RSS (budget ≤ 200 MiB; cold-client.mjs).
 
 import { checkChange } from "@openlfcp/shared-objects/admission";
@@ -30,12 +30,19 @@ describe.skipIf(DAYS.length === 0)("A§3.5 admission and cold connect of C", () 
     it(`${days} days of bridge-style history`, () => {
       const [year, generate] = timed(() => syntheticYear({ days }));
       const bytes = year.units.reduce((n, u) => n + u.bytes.length, 0);
-      const [admitted, admission] = timed(() =>
-        ServiceControlReplica.fromChanges(year.units, year.options),
+      // The worst case: a client connecting just before the plugin's next Snapshot, the tail a
+      // whole period (the last Snapshot is taken at the end of the history).
+      const at = year.snapshots.at(-2) ?? year.units.length;
+      const [prefix, tail] = [year.units.slice(0, at), year.units.slice(at)];
+      const [admitted, before] = timed(() =>
+        ServiceControlReplica.fromChanges(prefix, year.options),
       );
       expect(admitted.result.refused).toEqual([]);
       const replica = admitted.replica;
       const snapshot = replica.snapshot();
+      const [rest, after] = timed(() => replica.receiveChanges(tail));
+      expect(rest.refused).toEqual([]);
+      const admission = before + after;
       const [, engine] =
         days <= 31
           ? timed(() => {
@@ -45,8 +52,9 @@ describe.skipIf(DAYS.length === 0)("A§3.5 admission and cold connect of C", () 
             })
           : [undefined, Number.NaN];
       const [cold, fromSnapshot] = timed(() =>
-        ServiceControlReplica.fromSnapshot(snapshot, year.options, year.units),
+        ServiceControlReplica.fromSnapshot(snapshot, year.options, prefix),
       );
+      const [, tailMs] = timed(() => cold.receiveChanges(tail));
       const [state, validate] = timed(() => cold.validate());
       const [, creatorsOf] = timed(() => {
         cold.creatorsOf("bindings", Object.keys(state.bindings)[0] ?? "");
@@ -60,11 +68,12 @@ describe.skipIf(DAYS.length === 0)("A§3.5 admission and cold connect of C", () 
         generateMs: generate,
         admissionMs: admission,
         engineAdmissionMs: engine,
-        coldConnectMs: fromSnapshot + validate + creatorsOf + requestHistory,
-        cold: { fromSnapshot, validate, creatorsOf, requestHistory },
+        tailUnits: tail.length,
+        coldConnectMs: fromSnapshot + tailMs + validate + creatorsOf + requestHistory,
+        cold: { fromSnapshot, tail: tailMs, validate, creatorsOf, requestHistory },
         heapMiB: Math.round(process.memoryUsage().heapUsed / 2 ** 20),
         rssMiB: Math.round(process.memoryUsage().rss / 2 ** 20),
-        coldClient: measureColdClient(snapshot, year.units, year.options),
+        coldClient: measureColdClient(snapshot, year.units, tail.length, year.options),
       };
       console.info(`E-030 C admission: ${JSON.stringify(figures)}`);
     }, 3_600_000);

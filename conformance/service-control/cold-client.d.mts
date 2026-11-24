@@ -4,6 +4,7 @@ export interface ColdClientFigures {
   readonly coldConnectMs: number;
   readonly cold: {
     readonly fromSnapshot: number;
+    readonly tail: number;
     readonly validate: number;
     readonly creatorsOf: number;
     readonly requestHistory: number;
@@ -13,9 +14,13 @@ export interface ColdClientFigures {
   /** The child's peak resident set size over its whole run. */
   readonly peakRssMiB: number;
   readonly heapMiB: number;
+  readonly tailUnits: number;
 }
 
-/** Runs a cold client on `snapshot` and `units` in a process of its own and returns its figures. */
+/**
+ * Runs a cold client on `snapshot` and `units` (the history, its last `tail` units after the
+ * Snapshot) in a process of its own and returns its figures.
+ */
 export function measureColdClient(
   snapshot: Uint8Array,
   units: readonly {
@@ -24,6 +29,7 @@ export function measureColdClient(
     readonly signerClass: string;
     readonly bytes: Uint8Array;
   }[],
+  tail: number,
   options: {
     readonly resource: Uint8Array;
     readonly root: Uint8Array;
