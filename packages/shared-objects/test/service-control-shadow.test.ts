@@ -252,6 +252,45 @@ describe("the shadow of C's visible state equals a full replay", () => {
     for (const c of redo) if (c !== undefined) shadow.apply(c);
     expectSame(shadow, replay(history));
   });
+
+  it("keeps the engine's int64 values and number/bigint split at the boundaries, through undo and redo", () => {
+    const SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+    const MAX64 = 2n ** 63n - 1n;
+    const cases: [number | bigint, number][] = [
+      [Number.MAX_SAFE_INTEGER - 1, 1],
+      [Number.MAX_SAFE_INTEGER, 1],
+      [SAFE + 2n, 1],
+      [-SAFE, -1],
+      [-SAFE - 1n, 1],
+      [MAX64, 1],
+      [-MAX64 - 1n, -1],
+    ];
+    for (const [initial, by] of cases) {
+      const engine = A.getBackend(A.init<unknown>({ actor: "aa01" }));
+      const history: Uint8Array[] = [];
+      const shadow = new ShadowDoc();
+      const commit = () => {
+        engine.commit();
+        const bytes = engine.getLastLocalChange() as Uint8Array;
+        shadow.applyChecked(checkChange(bytes));
+        history.push(bytes);
+        expectSame(shadow, replay(history));
+      };
+      // The engine takes a bigint here, though its Value type does not say so.
+      engine.put("_root", "n", initial as number, "counter");
+      engine.put("_root", "i", initial as number, "int");
+      commit();
+      engine.increment("_root", "n", by);
+      commit();
+      engine.increment("_root", "n", by);
+      commit();
+      expect(shadow.getAll("_root", "n")).toEqual(engine.getAll("_root", "n"));
+      const redo = [shadow.undo(), shadow.undo()].reverse();
+      expectSame(shadow, replay(history.slice(0, 1)));
+      for (const c of redo) if (c !== undefined) shadow.apply(c);
+      expectSame(shadow, replay(history));
+    }
+  });
 });
 
 describe("the shadow's limits", () => {

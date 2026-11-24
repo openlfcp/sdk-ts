@@ -86,13 +86,26 @@ function scalarOf(op: { datatype?: string; value?: unknown }): [string, unknown]
       break;
     case "int":
     case "counter":
-      return [op.datatype, v];
+      return [op.datatype, engineInt(int64Of(v))];
     case "float64":
       return ["f64", v];
     case "timestamp":
       return ["timestamp", v];
   }
   throw new ShadowUnsupported(`a value of datatype ${String(op.datatype)}`);
+}
+
+/** An int64 operand as a bigint; anything else is not a value the shadow models. */
+function int64Of(v: unknown): bigint {
+  if (typeof v === "bigint" || Number.isSafeInteger(v)) return BigInt(v as number | bigint);
+  throw new ShadowUnsupported(`an integer operand ${String(v)}`);
+}
+
+const SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+/** An int64 as the engine reads it: a number in [-(2^53 - 1), 2^53 - 1), else a bigint. */
+function engineInt(b: bigint): number | bigint {
+  return b >= -SAFE && b < SAFE ? Number(b) : b;
 }
 
 /**
@@ -180,7 +193,7 @@ export class ShadowDoc implements ScBackend {
           !pred.has(v.id)
             ? [v]
             : v.type === "counter"
-              ? [{ ...v, value: (v.value as number) + (o.value as number) }]
+              ? [{ ...v, value: engineInt(BigInt.asIntN(64, int64Of(v.value) + int64Of(o.value))) }]
               : [],
         );
       const kept = vals.filter((v) => !pred.has(v.id));
