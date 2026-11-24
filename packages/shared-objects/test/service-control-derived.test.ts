@@ -392,4 +392,24 @@ describe("the replica's indexes equal the full search of the admitted history", 
     expect(expectSameCreators(replica)).toBeGreaterThan(20);
     expectSameRequestHistory(replica);
   }, 120_000);
+
+  it("a request taken from requestHistory cannot change what later calls return", () => {
+    const init = initial();
+    const made = edit(init, root, (d) =>
+      put(d.requests, uid(1), request("check", { args: { nested: { value: 1 } } })),
+    );
+    const replica = ServiceControlReplica.empty(options);
+    replica.receiveChanges([
+      { bytes: last(init), signer: root, signerClass: "root", actorSeq: 1 },
+      { bytes: last(made), signer: root, signerClass: "root", actorSeq: 2 },
+    ]);
+    type Nested = { nested: { value: number } };
+    const argsOf = (r: ServiceControlReplica) => r.requestHistory()[0]?.request.args as Nested;
+    const { nested } = argsOf(replica);
+    expect(() => {
+      nested.value = 999;
+    }).toThrow(TypeError);
+    expect(argsOf(replica).nested.value).toBe(1);
+    expectSameRequestHistory(replica);
+  });
 });

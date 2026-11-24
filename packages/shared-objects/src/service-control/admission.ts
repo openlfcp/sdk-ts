@@ -605,7 +605,10 @@ export class ServiceControlAdmission {
     for (const op of ops)
       if (op.obj === requests && op.action.startsWith("make") && typeof op.key === "string") {
         const made = this.requestCreations.get(op.key) ?? [];
-        const request = readServiceControlRequest(post, requests, op.key, this.#resource);
+        // Frozen whole: requestHistory() hands this same value to every caller.
+        const request = deepFreeze(
+          readServiceControlRequest(post, requests, op.key, this.#resource),
+        );
         made.push({ hash: change.hash, request });
         this.requestCreations.set(op.key, made);
       }
@@ -766,4 +769,12 @@ function stringField(reader: ScReader, map: string | undefined, field: string): 
   if (map === undefined) return undefined;
   const v = reader.get(map, field);
   return isStr(v) ? v[1] : undefined;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const v of Object.values(value)) deepFreeze(v);
+    Object.freeze(value);
+  }
+  return value;
 }
