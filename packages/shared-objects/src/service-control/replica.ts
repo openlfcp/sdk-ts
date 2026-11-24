@@ -12,6 +12,7 @@ import {
   type CheckedChange,
   checkChange,
   checkSaveHeader,
+  decodedOf,
   frameChange,
   frameSnapshot,
   refusedChangeHash,
@@ -28,6 +29,7 @@ import { admitBatch, type DocumentSequences } from "../admission/sequence.js";
 import { isWasmTrap } from "../replica.js";
 import {
   checkServiceControlUnit,
+  detached,
   refuseServiceControl,
   ServiceControlAdmission,
   type ServiceControlAdmissionDiagnostic,
@@ -122,6 +124,20 @@ export class ServiceControlReplica {
   readonly #classes = new Map<string, ServiceControlWriterClass>();
   readonly #waiting = new Map<string, CheckedUnit>();
   readonly #sequences = new Map<string, number>();
+  /**
+   * A§3.5 (E-030): the operation IDs each admitted change made, by actor in
+   * sequence order (an actor's later change starts after its earlier ones):
+   * the change that made a value, found without walking the history.
+   */
+  readonly #made = new Map<
+    string,
+    {
+      readonly start: number;
+      readonly end: number;
+      readonly hash: string;
+      readonly order: number;
+    }[]
+  >();
   #references = new ReferenceHistory();
 
   get #doc(): A.Doc<unknown> {
@@ -249,6 +265,7 @@ export class ServiceControlReplica {
     this.#classes.clear();
     this.#waiting.clear();
     this.#sequences.clear();
+    this.#made.clear();
     this.#receive(before);
     this.#admission.flush();
     this.#admission.incremental = false;
@@ -292,6 +309,15 @@ export class ServiceControlReplica {
     for (const c of result.admitted) {
       this.#accepted.set(c.hash, unitOf(c));
       this.#sequences.set(c.actor, c.seq);
+      const { startOp } = decodedOf(c);
+      const made = this.#made.get(c.actor) ?? [];
+      made.push({
+        start: startOp,
+        end: startOp + decodedOf(c).ops.length,
+        hash: c.hash,
+        order: this.#accepted.size,
+      });
+      this.#made.set(c.actor, made);
     }
     for (const c of result.waiting) this.#waiting.set(c.hash, pending.get(c.hash) as CheckedUnit);
     for (const r of result.refused) {
@@ -431,19 +457,35 @@ export class ServiceControlReplica {
         const [counter, actor] = String(v[1]).split("@");
         return { counter: Number(counter), actor };
       });
+    // The changes that made them, in the order they were admitted.
+    const creators = new Map<string, number>();
+    for (const m of made) {
+      const c = this.#madeBy(m.actor ?? "", m.counter);
+      if (c !== undefined) creators.set(c.hash, c.order);
+    }
     const out: { hash: string; signer: PrincipalId; writerClass: ServiceControlWriterClass }[] = [];
-    if (made.length === 0) return Object.freeze(out);
-    for (const [hash, unit] of this.#accepted) {
-      const change = A.decodeChange(unit.bytes);
-      const end = change.startOp + change.ops.length;
+    for (const [hash] of [...creators].sort(([, a], [, b]) => a - b)) {
+      const unit = this.#accepted.get(hash);
       const writerClass = this.#classes.get(hash);
-      if (writerClass === undefined) continue;
-      if (
-        made.some((m) => m.actor === change.actor && m.counter >= change.startOp && m.counter < end)
-      )
-        out.push({ hash, signer: unit.signer.slice() as PrincipalId, writerClass });
+      if (unit === undefined || writerClass === undefined) continue;
+      out.push({ hash, signer: unit.signer.slice() as PrincipalId, writerClass });
     }
     return Object.freeze(out.map((o) => Object.freeze(o)));
+  }
+
+  /** The admitted change of `actor` whose operations include the counter `counter`. */
+  #madeBy(actor: string, counter: number) {
+    const made = this.#made.get(actor) ?? [];
+    if (!Number.isSafeInteger(counter)) return undefined;
+    let [lo, hi] = [0, made.length - 1];
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const c = made[mid] as (typeof made)[number];
+      if (counter < c.start) hi = mid - 1;
+      else if (counter >= c.end) lo = mid + 1;
+      else return c;
+    }
+    return undefined;
   }
 
   /**
@@ -459,37 +501,21 @@ export class ServiceControlReplica {
    * state readers see now.
    */
   requestHistory(): readonly ServiceControlRequestRecord[] {
-    const reader = new ScReader(A.getBackend(this.#doc));
-    const container = reader.map("_root", "requests");
-    if (container === undefined) return Object.freeze([]);
-    const made = new Map<
-      string,
-      { hash: string; signer: PrincipalId; writerClass: ServiceControlWriterClass }[]
-    >();
-    for (const [hash, unit] of this.#accepted) {
-      const writerClass = this.#classes.get(hash);
-      if (writerClass === undefined) continue;
-      const change = A.decodeChange(unit.bytes);
-      for (const op of change.ops as { action: string; obj: string; key?: unknown }[])
-        if (op.obj === container && op.action.startsWith("make") && typeof op.key === "string") {
-          const list = made.get(op.key) ?? [];
-          list.push({ hash, signer: unit.signer.slice() as PrincipalId, writerClass });
-          made.set(op.key, list);
-        }
-    }
+    // A§3.5 (E-030): each value as admission read it on the change that made it.
     const now = this.validate().requests;
     const out: ServiceControlRequestRecord[] = [];
-    for (const [rid, creators] of [...made].sort(([a], [b]) => (a < b ? -1 : 1))) {
-      const creator = creators[0];
-      if (creators.length !== 1 || creator === undefined) continue;
-      const request = this.validate([creator.hash]).requests[rid];
-      if (request === undefined) continue;
+    const made = [...this.#admission.requestCreations].sort(([a], [b]) => (a < b ? -1 : 1));
+    for (const [rid, creations] of made) {
+      const [creation] = creations;
+      if (creations.length !== 1 || creation?.request === undefined) continue;
+      const author = this.authorOf(creation.hash);
+      if (author === undefined) continue;
       out.push(
         Object.freeze({
           rid,
-          request,
+          request: detached(creation.request),
           present: Object.hasOwn(now, rid),
-          creators: Object.freeze([Object.freeze(creator)]),
+          creators: Object.freeze([Object.freeze({ hash: creation.hash, ...author })]),
         }),
       );
     }

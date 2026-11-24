@@ -20,6 +20,7 @@ import {
   eventIsFinal,
   eventStateOf,
   readApproval,
+  readServiceControlRequest,
   SERVICE_CONTROL_DIAGNOSTIC_ORDER,
 } from "./schema.js";
 import { type ShadowChange, ShadowDoc, ShadowUnsupported } from "./shadow.js";
@@ -29,6 +30,7 @@ import {
   type EventState,
   SERVICE_CONTROL_PROFILE_ID,
   SERVICE_CONTROL_ROOT_KEYS,
+  type ServiceControlRequest,
   WHOLE_CONTAINERS,
 } from "./values.js";
 
@@ -192,6 +194,7 @@ const ROW: Readonly<Record<string, readonly ServiceControlWriterClass[]>> = {
 };
 const ROOT_KEYS: ReadonlySet<string> = new Set(SERVICE_CONTROL_ROOT_KEYS);
 const MAX_OPEN_REQUESTS = 32;
+const UNREVOKED = Symbol("unrevoked bases");
 const MAX_OPEN_PAIR_SECTION = 1;
 
 type Clock = ReadonlyMap<string, number>;
@@ -250,6 +253,15 @@ export class ServiceControlAdmission {
   #pending: Uint8Array[] = [];
   /** Off: every change is judged on the engine path (the shadow still follows). */
   incremental: boolean;
+  /**
+   * A§3.5 (E-030): for each `rid`, every admitted change that made a value
+   * of `requests[rid]`, with the request §5 reads at that change (its causal
+   * history and itself), undefined when invalid there (ServiceControlReplica.requestHistory).
+   */
+  readonly requestCreations = new Map<
+    string,
+    { readonly hash: string; readonly request: ServiceControlRequest | undefined }[]
+  >();
   /** Changes judged on the shadow (`forked`: at a fork point, newest changes rolled back) and on the engine. */
   readonly judged = { shadow: 0, forked: 0, engine: 0 };
 
@@ -304,16 +316,21 @@ export class ServiceControlAdmission {
   unrevokedBases(heads: readonly string[]): string[] {
     const approvals = this.#containers.get("approvals");
     if (approvals === undefined || heads.length === 0) return [];
-    return this.#unrevoked(new ScReader(A.getBackend(this.document), heads));
+    return [...this.#unrevoked(new ScReader(A.getBackend(this.document), heads))];
   }
 
-  #unrevoked(reader: ScReader): string[] {
+  #unrevoked(reader: ScReader): readonly string[] {
     const approvals = this.#containers.get("approvals");
     if (approvals === undefined) return [];
-    return reader.keys(approvals).filter((key) => {
-      const a = readApproval(reader, approvals, key, this.#resource);
-      return a !== undefined && a.role === "base" && !a.revoked;
-    });
+    // Read again on the shadow only when `approvals` changed (ScReader.memo).
+    return reader.memo(UNREVOKED, approvals, () =>
+      Object.freeze(
+        reader.keys(approvals).filter((key) => {
+          const a = readApproval(reader, approvals, key, this.#resource);
+          return a !== undefined && a.role === "base" && !a.revoked;
+        }),
+      ),
+    );
   }
 
   /** §2.3: the class of `writer` for a change with these dependencies (all admitted). */
@@ -584,6 +601,17 @@ export class ServiceControlAdmission {
       undo?.();
       this.#refuse(found);
     }
+    const requests = container("requests");
+    for (const op of ops)
+      if (op.obj === requests && op.action.startsWith("make") && typeof op.key === "string") {
+        const made = this.requestCreations.get(op.key) ?? [];
+        // Frozen whole: requestHistory() hands this same value to every caller.
+        const request = deepFreeze(
+          readServiceControlRequest(post, requests, op.key, this.#resource),
+        );
+        made.push({ hash: change.hash, request });
+        this.requestCreations.set(op.key, made);
+      }
     this.#commit(change, decoded, clock);
     return cls;
   }
@@ -741,4 +769,36 @@ function stringField(reader: ScReader, map: string | undefined, field: string): 
   if (map === undefined) return undefined;
   const v = reader.get(map, field);
   return isStr(v) ? v[1] : undefined;
+}
+
+/** Byte values and timestamps of a request: freezing cannot make them read-only (ArrayBuffer view, Date). */
+const isMutableLeaf = (v: object): boolean => ArrayBuffer.isView(v) || v instanceof Date;
+
+/** Freezes every map and list of `value`; its bytes and timestamps are copied when handed out (detached). */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !isMutableLeaf(value)) {
+    for (const v of Object.values(value)) deepFreeze(v);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * `value` (frozen by deepFreeze) with a fresh copy of each byte value and
+ * timestamp, the frozen maps and lists without one shared as they are.
+ */
+export function detached<T>(value: T): T {
+  if (value === null || typeof value !== "object") return value;
+  if (value instanceof Date) return new Date(value.getTime()) as T;
+  if (ArrayBuffer.isView(value)) return (value as unknown as Uint8Array).slice() as T;
+  let copy: Record<string, unknown> | unknown[] | undefined;
+  for (const [k, v] of Object.entries(value)) {
+    const d = detached(v);
+    if (d === v) continue;
+    copy ??= Array.isArray(value)
+      ? [...(value as unknown[])]
+      : { ...(value as Record<string, unknown>) };
+    (copy as Record<string, unknown>)[k] = d;
+  }
+  return copy === undefined ? value : (Object.freeze(copy) as T);
 }
