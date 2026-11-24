@@ -2,7 +2,8 @@
 // budget (admission ≤ 5 s, cold connect ≤ 10 s). Measured, not held: LFCP_SC_YEAR=14,365 runs
 // those lengths in days and prints the figures (the bridge's nightly c-year job holds the whole
 // client to the budget). Cold connect here is the SDK's part: the replica from a Snapshot and
-// every unit, then the reads a client makes of C (validate, creatorsOf, requestHistory).
+// every unit, then the reads a client makes of C (validate, creatorsOf, requestHistory), here and
+// again in a process of its own for its peak RSS (budget ≤ 200 MiB; cold-client.mjs).
 
 import { checkChange } from "@openlfcp/shared-objects/admission";
 import {
@@ -11,6 +12,7 @@ import {
 } from "@openlfcp/shared-objects/service-control";
 import { describe, expect, it } from "vitest";
 import { syntheticYear } from "../../packages/shared-objects/test/support/service-control-year.js";
+import { measureColdClient } from "./cold-client.mjs";
 
 const DAYS = (process.env.LFCP_SC_YEAR ?? "")
   .split(",")
@@ -62,6 +64,7 @@ describe.skipIf(DAYS.length === 0)("A§3.5 admission and cold connect of C", () 
         cold: { fromSnapshot, validate, creatorsOf, requestHistory },
         heapMiB: Math.round(process.memoryUsage().heapUsed / 2 ** 20),
         rssMiB: Math.round(process.memoryUsage().rss / 2 ** 20),
+        coldClient: measureColdClient(snapshot, year.units, year.options),
       };
       console.info(`E-030 C admission: ${JSON.stringify(figures)}`);
     }, 3_600_000);
