@@ -22,6 +22,7 @@ import {
   readApproval,
   SERVICE_CONTROL_DIAGNOSTIC_ORDER,
 } from "./schema.js";
+import { type ShadowChange, ShadowDoc, ShadowUnsupported } from "./shadow.js";
 import {
   deriveServiceControlActorId,
   EVENT_STATES,
@@ -195,6 +196,30 @@ const MAX_OPEN_PAIR_SECTION = 1;
 
 type Clock = ReadonlyMap<string, number>;
 
+/** How admission reads C: on the shadow model, or on the engine alone (the exact path). */
+export interface ServiceControlAdmissionMode {
+  /** Judge a change on the shadow model when its pre-state is in reach (default true). */
+  readonly incremental?: boolean;
+  /**
+   * How many of the newest changes the shadow can roll back to a fork point
+   * (default 256); under 1, every change is judged on the engine path.
+   */
+  readonly window?: number;
+}
+
+/**
+ * The engine refused a batch of changes admission had accepted on the
+ * shadow model: the decisions of that batch are not exact, and the admission
+ * is not usable any more. Its owner judges the history again, the batch on
+ * the engine path (ServiceControlReplica.receiveChanges).
+ */
+export class ServiceControlBatchError extends Error {
+  constructor(cause: unknown) {
+    super(`the engine refused a batch admitted on the shadow model: ${String(cause)}`, { cause });
+    this.name = "ServiceControlBatchError";
+  }
+}
+
 /**
  * SERVICE-CONTROL-PROFILE-01 §4 over one working document. Every condition
  * of §3 is judged on the change's pre-state (its causal history) and SC4/SC7
@@ -215,14 +240,49 @@ export class ServiceControlAdmission {
   readonly #held = new Map<string, { actor: string; seq: number }[]>();
   /** The vector clock of every admitted change. */
   readonly #clocks = new Map<string, Clock>();
+  /**
+   * A§3.5 (E-030): the admitted state as plain JavaScript, a change judged
+   * on it when its pre-state is the current state with the newest changes
+   * rolled back; undefined once a change it cannot model is admitted.
+   */
+  #shadow: ShadowDoc | undefined;
+  /** Admitted on the shadow, not yet applied to the engine (one batch). */
+  #pending: Uint8Array[] = [];
+  /** Off: every change is judged on the engine path (the shadow still follows). */
+  incremental: boolean;
+  /** Changes judged on the shadow (`forked`: at a fork point, newest changes rolled back) and on the engine. */
+  readonly judged = { shadow: 0, forked: 0, engine: 0 };
 
-  constructor(readonly options: ServiceControlOptions) {
+  constructor(
+    readonly options: ServiceControlOptions,
+    mode: ServiceControlAdmissionMode = {},
+  ) {
     this.#resource = toBase64url(options.resource);
     this.#doc = A.init();
+    this.incremental = mode.incremental ?? true;
+    this.#shadow = new ShadowDoc(mode.window);
   }
 
+  /** The engine's document of the admitted history (the pending batch applied first). */
   get document(): A.Doc<unknown> {
+    this.flush();
     return this.#doc;
+  }
+
+  /**
+   * Applies the changes admitted on the shadow to the engine in one batch.
+   * Throws ServiceControlBatchError when the engine refuses it.
+   */
+  flush(): void {
+    if (this.#pending.length === 0) return;
+    const batch = this.#pending;
+    this.#pending = [];
+    try {
+      [this.#doc] = A.applyChanges(this.#doc, batch);
+    } catch (e) {
+      if (isWasmTrap(e)) throw e;
+      throw new ServiceControlBatchError(e);
+    }
   }
 
   #clockOf(deps: readonly string[]): Map<string, number> {
@@ -244,7 +304,12 @@ export class ServiceControlAdmission {
   unrevokedBases(heads: readonly string[]): string[] {
     const approvals = this.#containers.get("approvals");
     if (approvals === undefined || heads.length === 0) return [];
-    const reader = new ScReader(A.getBackend(this.#doc), heads);
+    return this.#unrevoked(new ScReader(A.getBackend(this.document), heads));
+  }
+
+  #unrevoked(reader: ScReader): string[] {
+    const approvals = this.#containers.get("approvals");
+    if (approvals === undefined) return [];
     return reader.keys(approvals).filter((key) => {
       const a = readApproval(reader, approvals, key, this.#resource);
       return a !== undefined && a.role === "base" && !a.revoked;
@@ -266,16 +331,113 @@ export class ServiceControlAdmission {
    */
   accept(change: CheckedChange, writer: ServiceControlWriter): ServiceControlWriterClass {
     const decoded = decodedOf(change);
-    const ops = decoded.ops as Op[];
     if (change.deps.length === 0) {
-      this.#acceptInitial(change, ops);
+      this.#acceptInitial(change, decoded.ops as Op[]);
       this.#commit(change, decoded);
+      this.#shadowApply(decoded);
       return this.writerClassAt([], writer);
     }
-    const found = new Set<ServiceControlAdmissionDiagnostic>();
-    const pre = new ScReader(A.getBackend(this.#doc), change.deps);
     const clock = this.#clockOf(change.deps);
-    const cls = this.writerClassAt(change.deps, writer);
+    const shadow = this.#shadow;
+    // A window under one cannot hold the change itself to take it back when it is refused.
+    const back =
+      shadow !== undefined && this.incremental && shadow.window >= 1
+        ? this.#forkDepth(clock)
+        : undefined;
+    if (shadow !== undefined && back !== undefined) {
+      // The pre-state: the newest `back` changes rolled back, those of the change's history applied again.
+      const undone = Array.from({ length: back }, () => shadow.undo() as ShadowChange).reverse();
+      const outside = (c: ShadowChange) => (clock.get(c.actor) ?? 0) < c.seq;
+      for (const c of undone) if (!outside(c)) shadow.apply(c);
+      const redo = undone.filter(outside);
+      let applied = false;
+      let accepted = false;
+      try {
+        const cls = this.#judge(change, writer, decoded, clock, new ScReader(shadow), () => {
+          shadow.apply(decoded);
+          applied = true;
+          return new ScReader(shadow);
+        });
+        accepted = true;
+        this.#pending.push(change.bytes);
+        this.judged.shadow++;
+        if (redo.length > 0) this.judged.forked++;
+        return cls;
+      } catch (e) {
+        if (!(e instanceof ShadowUnsupported)) throw e;
+      } finally {
+        if (applied && !accepted) shadow.undo();
+        for (const c of redo) shadow.apply(c);
+      }
+    }
+    // The exact path: the engine at the change's heads.
+    this.flush();
+    this.judged.engine++;
+    const cls = this.#judge(
+      change,
+      writer,
+      decoded,
+      clock,
+      new ScReader(A.getBackend(this.#doc), change.deps),
+      () => {
+        this.#apply(change);
+        return new ScReader(A.getBackend(this.#doc), [change.hash]);
+      },
+      () => this.#rebuild(),
+    );
+    this.#shadowApply(decoded);
+    return cls;
+  }
+
+  /** The shadow follows a change the engine path admitted, or is dropped when it cannot. */
+  #shadowApply(decoded: A.DecodedChange): void {
+    try {
+      this.#shadow?.apply(decoded);
+    } catch (e) {
+      if (!(e instanceof ShadowUnsupported)) throw e;
+      this.#shadow = undefined;
+    }
+  }
+
+  /**
+   * How many of the newest changes on the shadow's undo log to roll back so
+   * that every older one is in the history `clock` names (each actor's
+   * changes are contiguous in it, so the clock's sum is its size);
+   * undefined when the fork point is beyond the window.
+   */
+  #forkDepth(clock: Clock): number | undefined {
+    const shadow = this.#shadow as ShadowDoc;
+    let size = 0;
+    for (const seq of clock.values()) size += seq;
+    let inside = 0;
+    for (let back = 0; back <= shadow.depth; back++) {
+      if (size === this.#changes.length - back + inside) return back;
+      const c = shadow.recent(back);
+      if (c !== undefined && (clock.get(c.actor) ?? 0) >= c.seq) inside++;
+    }
+    return undefined;
+  }
+
+  /**
+   * §3 on `pre`, then SC4/SC7 on the post-state `post()` gives (the change
+   * applied); `undo` takes the change back off when it is refused there.
+   */
+  #judge(
+    change: CheckedChange,
+    writer: ServiceControlWriter,
+    decoded: A.DecodedChange,
+    clock: Map<string, number>,
+    pre: ScReader,
+    applyPost: () => ScReader,
+    undo?: () => void,
+  ): ServiceControlWriterClass {
+    const ops = decoded.ops as Op[];
+    const found = new Set<ServiceControlAdmissionDiagnostic>();
+    const cls = serviceControlWriterClass(
+      writer.signerClass,
+      writer.signer,
+      writer.signerClass === "service-device" ? this.#unrevoked(pre) : [],
+    );
     const container = (name: string) => this.#containers.get(name) as string;
     const preEntry = (top: string, key: string): ScValue | undefined =>
       pre.get(container(top), key);
@@ -394,8 +556,7 @@ export class ServiceControlAdmission {
     if (found.size > 0) this.#refuse(found);
 
     // SC4 and SC7 on the post-state of what the change creates or writes.
-    this.#apply(change);
-    const post = new ScReader(A.getBackend(this.#doc), [change.hash]);
+    const post = applyPost();
     const postMap = (top: string, key: string) => post.map(container(top), key);
     for (const [top, key] of absentAfter) if (postMap(top, key) !== undefined) forbid();
     for (const t of touched) {
@@ -420,7 +581,7 @@ export class ServiceControlAdmission {
         found.add("LIMIT_EXCEEDED");
     }
     if (found.size > 0) {
-      this.#rebuild();
+      undo?.();
       this.#refuse(found);
     }
     this.#commit(change, decoded, clock);
@@ -543,6 +704,7 @@ export class ServiceControlAdmission {
 
   /** Back to the admitted history: the working document had a refused change applied. */
   #rebuild(): void {
+    this.#pending = [];
     A.free(this.#doc);
     [this.#doc] = A.applyChanges(A.init(), this.#changes);
   }

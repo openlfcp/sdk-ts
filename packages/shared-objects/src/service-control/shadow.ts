@@ -33,8 +33,8 @@ type Obj =
       readonly byId: Map<string, Elem>;
     };
 
-/** The change as the shadow needs it: its hash, actor and operations (A.decodeChange). */
-export type ShadowChange = Pick<A.DecodedChange, "hash" | "actor" | "startOp" | "ops">;
+/** The change as the shadow needs it: its hash, actor, sequence and operations (A.decodeChange). */
+export type ShadowChange = Pick<A.DecodedChange, "hash" | "actor" | "seq" | "startOp" | "ops">;
 
 interface Logged {
   readonly change: ShadowChange;
@@ -156,6 +156,11 @@ export class ShadowDoc implements ScBackend {
     }
     this.#log.push({ change, undo });
     if (this.#log.length > this.window) this.#log.shift();
+  }
+
+  /** The change `back` places before the newest on the undo log (0: the newest). */
+  recent(back: number): ShadowChange | undefined {
+    return this.#log[this.#log.length - 1 - back]?.change;
   }
 
   /** Rolls the newest applied change back exactly and returns it; undefined when the log is empty. */

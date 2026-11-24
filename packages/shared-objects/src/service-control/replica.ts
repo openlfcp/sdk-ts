@@ -32,6 +32,7 @@ import {
   ServiceControlAdmission,
   type ServiceControlAdmissionDiagnostic,
   ServiceControlAdmissionError,
+  ServiceControlBatchError,
   type ServiceControlOptions,
   type ServiceControlWriter,
   type ServiceControlWriterClass,
@@ -115,13 +116,13 @@ const copyOptions = (o: ServiceControlOptions): ServiceControlOptions => ({
  * authority: the classes of §2.3 only restrict who changes what.
  */
 export class ServiceControlReplica {
-  readonly #admission: ServiceControlAdmission;
+  #admission: ServiceControlAdmission;
   readonly #options: ServiceControlOptions;
   readonly #accepted = new Map<string, ServiceControlUnit>();
   readonly #classes = new Map<string, ServiceControlWriterClass>();
   readonly #waiting = new Map<string, CheckedUnit>();
   readonly #sequences = new Map<string, number>();
-  readonly #references = new ReferenceHistory();
+  #references = new ReferenceHistory();
 
   get #doc(): A.Doc<unknown> {
     return this.#admission.document;
@@ -223,7 +224,42 @@ export class ServiceControlReplica {
     return this.receiveChanges([{ ...writer, bytes: unframeChange(plaintext).bytes }]);
   }
 
+  /**
+   * Admits `units` with the units held before. Admission judges them on its
+   * shadow model and applies the admitted ones to the engine in one batch;
+   * when the engine refuses that batch, the history before it is admitted
+   * again and the batch is judged on the engine path, change by change.
+   */
   receiveChanges(units: readonly ServiceControlUnit[]): ServiceControlReceiveResult {
+    const held = [...this.#waiting.values()].map((p) => p.unit);
+    let result: ServiceControlReceiveResult | undefined;
+    try {
+      result = this.#receive(units);
+      this.#admission.flush();
+      return result;
+    } catch (e) {
+      if (!(e instanceof ServiceControlBatchError)) throw e;
+    }
+    // A batch flushed inside #receive failed before it recorded any admission.
+    const batch = new Set(result?.admitted ?? []);
+    const before = [...this.#accepted].filter(([hash]) => !batch.has(hash)).map(([, u]) => u);
+    this.#admission = new ServiceControlAdmission(this.#options);
+    this.#references = new ReferenceHistory();
+    this.#accepted.clear();
+    this.#classes.clear();
+    this.#waiting.clear();
+    this.#sequences.clear();
+    this.#receive(before);
+    this.#admission.flush();
+    this.#admission.incremental = false;
+    try {
+      return this.#receive([...held, ...units]);
+    } finally {
+      this.#admission.incremental = true;
+    }
+  }
+
+  #receive(units: readonly ServiceControlUnit[]): ServiceControlReceiveResult {
     const refused: ServiceControlRefusal[] = [];
     const pending = new Map(this.#waiting);
     for (const unit of units) {
@@ -249,7 +285,9 @@ export class ServiceControlReplica {
         this.#classes.set(c.hash, this.#admission.accept(c, unitOf(c)));
       },
     );
-    for (const r of result.refused) if (isWasmTrap(r.error)) throw r.error;
+    // The engine refused a batch flushed before the engine path: not a refusal of this change.
+    for (const r of result.refused)
+      if (isWasmTrap(r.error) || r.error instanceof ServiceControlBatchError) throw r.error;
     this.#waiting.clear();
     for (const c of result.admitted) {
       this.#accepted.set(c.hash, unitOf(c));
