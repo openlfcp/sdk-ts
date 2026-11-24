@@ -232,14 +232,16 @@ export class ServiceControlReplica {
    */
   receiveChanges(units: readonly ServiceControlUnit[]): ServiceControlReceiveResult {
     const held = [...this.#waiting.values()].map((p) => p.unit);
-    const result = this.#receive(units);
+    let result: ServiceControlReceiveResult | undefined;
     try {
+      result = this.#receive(units);
       this.#admission.flush();
       return result;
     } catch (e) {
       if (!(e instanceof ServiceControlBatchError)) throw e;
     }
-    const batch = new Set(result.admitted);
+    // A batch flushed inside #receive failed before it recorded any admission.
+    const batch = new Set(result?.admitted ?? []);
     const before = [...this.#accepted].filter(([hash]) => !batch.has(hash)).map(([, u]) => u);
     this.#admission = new ServiceControlAdmission(this.#options);
     this.#references = new ReferenceHistory();
@@ -283,7 +285,9 @@ export class ServiceControlReplica {
         this.#classes.set(c.hash, this.#admission.accept(c, unitOf(c)));
       },
     );
-    for (const r of result.refused) if (isWasmTrap(r.error)) throw r.error;
+    // The engine refused a batch flushed before the engine path: not a refusal of this change.
+    for (const r of result.refused)
+      if (isWasmTrap(r.error) || r.error instanceof ServiceControlBatchError) throw r.error;
     this.#waiting.clear();
     for (const c of result.admitted) {
       this.#accepted.set(c.hash, unitOf(c));
