@@ -172,6 +172,26 @@ export function refusedChangeHash(bytes: Uint8Array): string | undefined {
   return toHex(hash);
 }
 
+/**
+ * How many dependencies a change chunk's header names (the first field after the chunk length),
+ * read without decoding the change; undefined when the bytes are not such a chunk. For bytes
+ * checkChange admits it is the length of CheckedChange.deps.
+ */
+export function changeDependencyCount(bytes: Uint8Array): number | undefined {
+  if (refusedChangeHash(bytes) === undefined) return undefined;
+  let pos = HEADER;
+  while (((bytes[pos++] as number) & 0x80) !== 0);
+  let count = 0;
+  let scale = 1;
+  for (let i = 0; pos < bytes.length && i < 8; i++) {
+    const b = bytes[pos++] as number;
+    count += (b & 0x7f) * scale;
+    scale *= 128;
+    if ((b & 0x80) === 0) return count;
+  }
+  return undefined;
+}
+
 /** The operations checkChange read from the bytes (§11.3), for the references of §11.4. */
 const PARSED = new WeakMap<CheckedChange, ParsedChange>();
 
