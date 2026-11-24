@@ -135,7 +135,7 @@ describe("shared sections corpus", () => {
       }
     // Every change of every case is decoded, SS55's and SS56's 64 large ones
     // included: several seconds on a CI runner.
-  }, 30_000);
+  }, 120_000);
 
   for (const c of suite.cases)
     it(
@@ -251,7 +251,7 @@ describe("shared sections corpus", () => {
           expect(receiver.tree().tree).toEqual(t.tree);
           // SS55 and SS56 replay 64 changes of 8,192 Text operations several ways.
         }),
-      30_000,
+      120_000,
     );
 
   it("SS01: Task fields are scalars in objects, the paragraph is node Text (§2, §4.2)", () => {

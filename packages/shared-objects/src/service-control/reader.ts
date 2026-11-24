@@ -1,5 +1,15 @@
-import type * as A from "@automerge/automerge";
 import { UINT64_MAX } from "@openlfcp/core";
+
+/**
+ * The reads ScReader makes of a backend: the engine's, or a model of its
+ * current state (ShadowDoc). Reads at explicit heads are the engine's only.
+ */
+export interface ScBackend {
+  getWithType(obj: string, key: string | number, heads?: string[]): unknown;
+  getAll(obj: string, key: string | number, heads?: string[]): unknown[];
+  keys(obj: string, heads?: string[]): string[];
+  length(obj: string, heads?: string[]): number;
+}
 
 /** One value of the backend: a scalar with its type, or an object with its ID. */
 export type ScValue = readonly [type: string, value: unknown];
@@ -33,7 +43,7 @@ export function utf8Length(text: string): number {
  */
 export class ScReader {
   constructor(
-    readonly backend: ReturnType<typeof A.getBackend>,
+    readonly backend: ScBackend,
     readonly heads?: readonly string[],
   ) {}
 
@@ -42,7 +52,7 @@ export class ScReader {
   }
 
   get(obj: string, key: string | number): ScValue | undefined {
-    const v = this.backend.getWithType(obj, key, this.#heads());
+    const v = this.backend.getWithType(obj, key, this.#heads()) as unknown[] | null | undefined;
     return v === null || v === undefined ? undefined : ([String(v[0]), v[1]] as const);
   }
 
