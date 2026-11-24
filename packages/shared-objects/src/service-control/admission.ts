@@ -20,6 +20,7 @@ import {
   eventIsFinal,
   eventStateOf,
   readApproval,
+  readServiceControlRequest,
   SERVICE_CONTROL_DIAGNOSTIC_ORDER,
 } from "./schema.js";
 import { type ShadowChange, ShadowDoc, ShadowUnsupported } from "./shadow.js";
@@ -29,6 +30,7 @@ import {
   type EventState,
   SERVICE_CONTROL_PROFILE_ID,
   SERVICE_CONTROL_ROOT_KEYS,
+  type ServiceControlRequest,
   WHOLE_CONTAINERS,
 } from "./values.js";
 
@@ -251,6 +253,15 @@ export class ServiceControlAdmission {
   #pending: Uint8Array[] = [];
   /** Off: every change is judged on the engine path (the shadow still follows). */
   incremental: boolean;
+  /**
+   * A§3.5 (E-030): for each `rid`, every admitted change that made a value
+   * of `requests[rid]`, with the request §5 reads at that change (its causal
+   * history and itself), undefined when invalid there (ServiceControlReplica.requestHistory).
+   */
+  readonly requestCreations = new Map<
+    string,
+    { readonly hash: string; readonly request: ServiceControlRequest | undefined }[]
+  >();
   /** Changes judged on the shadow (`forked`: at a fork point, newest changes rolled back) and on the engine. */
   readonly judged = { shadow: 0, forked: 0, engine: 0 };
 
@@ -590,6 +601,14 @@ export class ServiceControlAdmission {
       undo?.();
       this.#refuse(found);
     }
+    const requests = container("requests");
+    for (const op of ops)
+      if (op.obj === requests && op.action.startsWith("make") && typeof op.key === "string") {
+        const made = this.requestCreations.get(op.key) ?? [];
+        const request = readServiceControlRequest(post, requests, op.key, this.#resource);
+        made.push({ hash: change.hash, request });
+        this.requestCreations.set(op.key, made);
+      }
     this.#commit(change, decoded, clock);
     return cls;
   }

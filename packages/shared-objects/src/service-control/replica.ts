@@ -500,37 +500,21 @@ export class ServiceControlReplica {
    * state readers see now.
    */
   requestHistory(): readonly ServiceControlRequestRecord[] {
-    const reader = new ScReader(A.getBackend(this.#doc));
-    const container = reader.map("_root", "requests");
-    if (container === undefined) return Object.freeze([]);
-    const made = new Map<
-      string,
-      { hash: string; signer: PrincipalId; writerClass: ServiceControlWriterClass }[]
-    >();
-    for (const [hash, unit] of this.#accepted) {
-      const writerClass = this.#classes.get(hash);
-      if (writerClass === undefined) continue;
-      const change = A.decodeChange(unit.bytes);
-      for (const op of change.ops as { action: string; obj: string; key?: unknown }[])
-        if (op.obj === container && op.action.startsWith("make") && typeof op.key === "string") {
-          const list = made.get(op.key) ?? [];
-          list.push({ hash, signer: unit.signer.slice() as PrincipalId, writerClass });
-          made.set(op.key, list);
-        }
-    }
+    // A§3.5 (E-030): each value as admission read it on the change that made it.
     const now = this.validate().requests;
     const out: ServiceControlRequestRecord[] = [];
-    for (const [rid, creators] of [...made].sort(([a], [b]) => (a < b ? -1 : 1))) {
-      const creator = creators[0];
-      if (creators.length !== 1 || creator === undefined) continue;
-      const request = this.validate([creator.hash]).requests[rid];
-      if (request === undefined) continue;
+    const made = [...this.#admission.requestCreations].sort(([a], [b]) => (a < b ? -1 : 1));
+    for (const [rid, creations] of made) {
+      const [creation] = creations;
+      if (creations.length !== 1 || creation?.request === undefined) continue;
+      const author = this.authorOf(creation.hash);
+      if (author === undefined) continue;
       out.push(
         Object.freeze({
           rid,
-          request,
+          request: creation.request,
           present: Object.hasOwn(now, rid),
-          creators: Object.freeze([Object.freeze(creator)]),
+          creators: Object.freeze([Object.freeze({ hash: creation.hash, ...author })]),
         }),
       );
     }

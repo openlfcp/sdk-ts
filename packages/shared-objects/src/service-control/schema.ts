@@ -383,6 +383,46 @@ function conflicted(reader: ScReader, v: ScValue): boolean {
   return false;
 }
 
+/**
+ * §5 for the present entry `name[key]` of a table (`id` its container): its
+ * projection when valid, else its first problem (a conflicted entry a human
+ * writes is INVALID_FIELD_TYPE, rule 3).
+ */
+function tableEntry(
+  reader: ScReader,
+  id: string,
+  name: string,
+  key: string,
+  resource: string,
+): ScValue | ServiceControlDiagnostic {
+  const all = reader.all(id, key);
+  const v = reader.get(id, key) as ScValue;
+  const d = firstDiagnostic(entryDiagnostics(reader, name, key, v, resource));
+  if (d !== undefined) return d;
+  if (HUMAN_ENTRIES.has(name) && (all.length > 1 || conflicted(reader, v)))
+    return "INVALID_FIELD_TYPE";
+  return v;
+}
+
+/**
+ * `validateServiceControl(…).requests[rid]` on the state `reader` reads, for
+ * a state whose root is valid (every state after an admitted change: §4
+ * refuses every operation on the root, SC1/SC2): the request §5 reads, or
+ * undefined when it is absent or invalid.
+ */
+export function readServiceControlRequest(
+  reader: ScReader,
+  requests: string,
+  rid: string,
+  resource: string,
+): ServiceControlRequest | undefined {
+  if (reader.get(requests, rid) === undefined) return undefined;
+  const entry = tableEntry(reader, requests, "requests", rid, resource);
+  return typeof entry === "string"
+    ? undefined
+    : (Object.freeze(reader.plain(entry)) as ServiceControlRequest);
+}
+
 const at = (...parts: string[]) => parts.map((p) => `/${pointerToken(p)}`).join("");
 
 /**
@@ -465,18 +505,9 @@ export function validateServiceControl(
     const out: Record<string, T> = {};
     const id = container(name);
     for (const key of reader.keys(id)) {
-      const all = reader.all(id, key);
-      const v = reader.get(id, key) as ScValue;
-      const d = firstDiagnostic(entryDiagnostics(reader, name, key, v, resource));
-      if (d !== undefined) {
-        fail(d, at(name, key));
-        continue;
-      }
-      if (HUMAN_ENTRIES.has(name) && (all.length > 1 || conflicted(reader, v))) {
-        fail("INVALID_FIELD_TYPE", at(name, key));
-        continue;
-      }
-      out[key] = read(v, String(v[1]));
+      const entry = tableEntry(reader, id, name, key, resource);
+      if (typeof entry === "string") fail(entry, at(name, key));
+      else out[key] = read(entry, String(entry[1]));
     }
     return out;
   };

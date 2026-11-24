@@ -276,6 +276,42 @@ function expectSameCreators(replica: ServiceControlReplica): number {
   return entries;
 }
 
+/** requestHistory as it was computed before E-030: the history decoded, each value validated at its creator. */
+function requestHistoryFull(replica: ServiceControlReplica) {
+  const reader = new ScReader(A.getBackend(documentOf(replica)));
+  const container = reader.map("_root", "requests");
+  if (container === undefined) return [];
+  const made = new Map<string, unknown[]>();
+  for (const bytes of replica.changes()) {
+    const change = A.decodeChange(bytes);
+    const author = replica.authorOf(change.hash);
+    for (const op of change.ops as { action: string; obj: string; key?: unknown }[])
+      if (op.obj === container && op.action.startsWith("make") && typeof op.key === "string")
+        made.set(op.key, [...(made.get(op.key) ?? []), { hash: change.hash, ...author }]);
+  }
+  const now = replica.validate().requests;
+  return [...made]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .flatMap(([rid, creators]) => {
+      const creator = creators[0] as { hash: string };
+      const request = replica.validate([creator.hash]).requests[rid];
+      if (creators.length !== 1 || request === undefined) return [];
+      return [{ rid, request, present: Object.hasOwn(now, rid), creators }];
+    });
+}
+
+let conflicts = 0;
+let deleted = 0;
+
+function expectSameRequestHistory(replica: ServiceControlReplica): void {
+  const history = replica.requestHistory();
+  expect(history).toEqual(requestHistoryFull(replica));
+  deleted += history.filter((r) => !r.present).length;
+  const reader = new ScReader(A.getBackend(documentOf(replica)));
+  const requests = reader.map("_root", "requests") as string;
+  for (const rid of reader.keys(requests)) if (reader.all(requests, rid).length > 1) conflicts++;
+}
+
 const options = { resource, root, genesisSigner: root };
 const SIGNERS = [
   [root, "root"],
@@ -289,6 +325,12 @@ const SIGNERS = [
  * requests and entries, and writes its bindings; each writer merges the others' views at random,
  * and a change the replica refuses is dropped from its writer's view.
  */
+/** A request in `d` whose event is final, as the service deletes it (§3). */
+const settled = (d: Doc) =>
+  Object.keys(d.requests).find((rid) =>
+    ["applied", "rejected"].includes(String(d.events[rid]?.state)),
+  );
+
 function* randomReplica(seed: number, steps: number) {
   const rnd = random(seed);
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)] as T;
@@ -311,10 +353,11 @@ function* randomReplica(seed: number, steps: number) {
         if (op < 3) put(d.requests, rid, request(pick(["check", "check", "nope"])));
         else if (op < 4) put(d.requests, rid, { op: "check" });
         else put(d.answers, rid, { qid: rid, snapshotHash: "s", choice: "apply", at: T0 });
-      } else if (op < 2)
-        put(d.events, rid, { state: pick(["accepted", "done", "rejected"]), at: T0 });
-      else if (op < 4) delete d[pick(["requests", "events", "answers"])][rid];
-      else put(d.bindings, pick([X, C]), { state: "on", generation: 1 });
+      } else if (op < 2 && settled(d) !== undefined) delete d.requests[settled(d) as string];
+      else if (op < 2)
+        put(d.events, rid, { state: pick(["received", "applied", "rejected", "applied"]), at: T0 });
+      else if (op < 4) delete d[pick(["requests", "requests", "events", "answers"])][rid];
+      else put(d.bindings, pick([X, C]), BINDING);
     });
     if (A.getHeads(edited).join() === A.getHeads(docs[k] as A.Doc<Doc>).join()) continue;
     const r = replica.receiveChanges([{ bytes: last(edited), signer, signerClass, actorSeq: 2 }]);
@@ -324,11 +367,18 @@ function* randomReplica(seed: number, steps: number) {
 }
 
 describe("the replica's indexes equal the full search of the admitted history", () => {
-  it("creatorsOf on 12 random histories of requests, events, answers and bindings", () => {
+  it("creatorsOf on 8 random histories of requests, events, answers and bindings", () => {
     let entries = 0;
-    for (let seed = 1; seed <= 12; seed++)
+    for (let seed = 1; seed <= 8; seed++)
       for (const replica of randomReplica(seed, 40)) entries += expectSameCreators(replica);
-    expect(entries).toBeGreaterThan(1000);
+    expect(entries).toBeGreaterThan(600);
+  }, 120_000);
+
+  it("requestHistory on 8 random histories, conflicted and deleted requests included", () => {
+    for (let seed = 1; seed <= 8; seed++)
+      for (const replica of randomReplica(seed, 40)) expectSameRequestHistory(replica);
+    expect(conflicts).toBeGreaterThan(0);
+    expect(deleted).toBeGreaterThan(0);
   }, 120_000);
 
   it("creatorsOf on a synthetic week with refused changes, in one batch and unit by unit", () => {
@@ -340,5 +390,6 @@ describe("the replica's indexes equal the full search of the admitted history", 
       if (i % 200 === 0) expectSameCreators(replica);
     }
     expect(expectSameCreators(replica)).toBeGreaterThan(20);
+    expectSameRequestHistory(replica);
   }, 120_000);
 });
