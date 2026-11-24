@@ -12,12 +12,15 @@ import {
   entryDiagnostics,
   ScReader,
   ServiceControlAdmission,
+  type ServiceControlContainer,
+  ServiceControlReplica,
   type ServiceControlSignerClass,
 } from "../src/service-control/index.js";
-import type { ScBackend } from "../src/service-control/reader.js";
+import { isObject, type ScBackend } from "../src/service-control/reader.js";
 import { ShadowDoc } from "../src/service-control/shadow.js";
-import { WHOLE_CONTAINERS } from "../src/service-control/values.js";
+import { SERVICE_CONTROL_ROOT_KEYS, WHOLE_CONTAINERS } from "../src/service-control/values.js";
 import {
+  approval,
   B,
   C,
   type Doc,
@@ -25,13 +28,17 @@ import {
   initial,
   last,
   personal,
+  principalRef,
   put,
+  request,
+  resource,
   root,
   T0,
   uid,
   X,
 } from "./support/service-control.js";
 import bridgeUnits from "./support/service-control-bridge-units.json" with { type: "json" };
+import { syntheticYear } from "./support/service-control-year.js";
 
 function random(seed: number) {
   let s = seed;
@@ -221,5 +228,117 @@ describe("validation reused on the shadow's unchanged objects equals validation 
     }
     expectSameDiagnostics(shadow, A.getBackend(admission.document));
     expect(fixture.units.length - refused).toBeGreaterThan(100);
+  }, 120_000);
+});
+
+/** The engine's document of the replica's admitted history. */
+const documentOf = (replica: ServiceControlReplica) => A.load<unknown>(replica.save());
+
+/** creatorsOf as it was computed before E-030: every admitted change decoded and searched. */
+function creatorsFull(replica: ServiceControlReplica, container: string, key: string) {
+  const reader = new ScReader(A.getBackend(documentOf(replica)));
+  const map = reader.map("_root", container);
+  if (map === undefined) return [];
+  const made = reader
+    .all(map, key)
+    .filter(isObject)
+    .map((v) => {
+      const [counter, actor] = String(v[1]).split("@");
+      return { counter: Number(counter), actor };
+    });
+  const out: unknown[] = [];
+  for (const bytes of replica.changes()) {
+    const change = A.decodeChange(bytes);
+    const end = change.startOp + change.ops.length;
+    if (
+      made.some((m) => m.actor === change.actor && m.counter >= change.startOp && m.counter < end)
+    )
+      out.push({ hash: change.hash, ...replica.authorOf(change.hash) });
+  }
+  return out;
+}
+
+const byHash = (xs: readonly unknown[]) =>
+  [...xs].sort((a, b) => ((a as { hash: string }).hash < (b as { hash: string }).hash ? -1 : 1));
+
+/** Every entry of every container of C: creatorsOf equals the full search. */
+function expectSameCreators(replica: ServiceControlReplica): number {
+  const reader = new ScReader(A.getBackend(documentOf(replica)));
+  let entries = 0;
+  for (const container of SERVICE_CONTROL_ROOT_KEYS.slice(2)) {
+    const map = reader.map("_root", container);
+    for (const key of map === undefined ? [] : [...reader.keys(map), "absent"]) {
+      const c = container as ServiceControlContainer;
+      expect(byHash(replica.creatorsOf(c, key))).toEqual(byHash(creatorsFull(replica, c, key)));
+      entries++;
+    }
+  }
+  return entries;
+}
+
+const options = { resource, root, genesisSigner: root };
+const SIGNERS = [
+  [root, "root"],
+  [personal, "personal"],
+  [B, "service-device"],
+] as const;
+
+/**
+ * A random history of C through a replica: the root and the personal device create requests
+ * (valid, invalid, the same rid concurrently) and answers, the service writes events, deletes
+ * requests and entries, and writes its bindings; each writer merges the others' views at random,
+ * and a change the replica refuses is dropped from its writer's view.
+ */
+function* randomReplica(seed: number, steps: number) {
+  const rnd = random(seed);
+  const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)] as T;
+  const init = initial();
+  const base = edit(init, personal, (d) => put(d.approvals, principalRef(B), approval(B)));
+  const replica = ServiceControlReplica.empty(options);
+  replica.receiveChanges([
+    { bytes: last(init), signer: root, signerClass: "root", actorSeq: 1 },
+    { bytes: last(base), signer: personal, signerClass: "personal", actorSeq: 1 },
+  ]);
+  const docs = SIGNERS.map(() => A.clone(base));
+  for (let step = 0; step < steps; step++) {
+    const k = Math.floor(rnd() * docs.length);
+    const [signer, signerClass] = SIGNERS[k] as (typeof SIGNERS)[number];
+    if (rnd() < 0.4) docs[k] = A.merge(docs[k] as A.Doc<Doc>, A.clone(pick(docs)));
+    const rid = uid(1 + Math.floor(rnd() * 6));
+    const edited = edit(docs[k] as A.Doc<Doc>, signer, (d) => {
+      const op = Math.floor(rnd() * 6);
+      if (signerClass !== "service-device") {
+        if (op < 3) put(d.requests, rid, request(pick(["check", "check", "nope"])));
+        else if (op < 4) put(d.requests, rid, { op: "check" });
+        else put(d.answers, rid, { qid: rid, snapshotHash: "s", choice: "apply", at: T0 });
+      } else if (op < 2)
+        put(d.events, rid, { state: pick(["accepted", "done", "rejected"]), at: T0 });
+      else if (op < 4) delete d[pick(["requests", "events", "answers"])][rid];
+      else put(d.bindings, pick([X, C]), { state: "on", generation: 1 });
+    });
+    if (A.getHeads(edited).join() === A.getHeads(docs[k] as A.Doc<Doc>).join()) continue;
+    const r = replica.receiveChanges([{ bytes: last(edited), signer, signerClass, actorSeq: 2 }]);
+    if (r.admitted.length > 0) docs[k] = edited;
+    yield replica;
+  }
+}
+
+describe("the replica's indexes equal the full search of the admitted history", () => {
+  it("creatorsOf on 12 random histories of requests, events, answers and bindings", () => {
+    let entries = 0;
+    for (let seed = 1; seed <= 12; seed++)
+      for (const replica of randomReplica(seed, 40)) entries += expectSameCreators(replica);
+    expect(entries).toBeGreaterThan(1000);
+  }, 120_000);
+
+  it("creatorsOf on a synthetic week with refused changes, in one batch and unit by unit", () => {
+    const year = syntheticYear({ days: 7, refusals: true });
+    expectSameCreators(ServiceControlReplica.fromChanges(year.units, year.options).replica);
+    const replica = ServiceControlReplica.empty(year.options);
+    for (const [i, unit] of year.units.entries()) {
+      replica.receiveChanges([unit]);
+      if (i % 200 === 0) expectSameCreators(replica);
+    }
+    expect(expectSameCreators(replica)).toBeGreaterThan(20);
   }, 120_000);
 });
