@@ -393,6 +393,37 @@ describe("the replica's indexes equal the full search of the admitted history", 
     expectSameRequestHistory(replica);
   }, 120_000);
 
+  it("creatorsOf and requestHistory on the recorded units of the bridge's synthetic year", () => {
+    const fixture = bridgeUnits as {
+      resource: string;
+      root: string;
+      genesisSigner: string;
+      units: { signer: string; seq: number; cls: ServiceControlSignerClass; bytes: string }[];
+    };
+    const replica = ServiceControlReplica.empty({
+      resource: resourceId(fromHex(fixture.resource)),
+      root: principalId(fromHex(fixture.root)),
+      genesisSigner: principalId(fromHex(fixture.genesisSigner)),
+    });
+    for (const [i, unit] of fixture.units.entries()) {
+      replica.receiveChanges([
+        {
+          bytes: fromBase64url(unit.bytes),
+          signer: principalId(fromHex(unit.signer)),
+          signerClass: unit.cls,
+          actorSeq: unit.seq,
+        },
+      ]);
+      if (i % 50 === 0) {
+        expectSameCreators(replica);
+        expectSameRequestHistory(replica);
+      }
+    }
+    expect(expectSameCreators(replica)).toBeGreaterThan(20);
+    // The recording holds the service's writes only: no change of it makes a request.
+    expectSameRequestHistory(replica);
+  }, 120_000);
+
   it("a request taken from requestHistory cannot change what later calls return", () => {
     const init = initial();
     const made = edit(init, root, (d) =>
