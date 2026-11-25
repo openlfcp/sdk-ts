@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 
 const SELF = fileURLToPath(import.meta.url);
 const MIB = 2 ** 20;
+// Keeps the replica reachable across the final GC, so the live set includes it.
+let held;
 const b64 = (bytes) => Buffer.from(bytes).toString("base64url");
 
 /** [header length][header JSON][snapshot length][snapshot]{[signer 32][actorSeq u32][class u8][length u32][bytes]}* */
@@ -106,7 +108,35 @@ async function child(file) {
     peakRssMiB: Math.round((process.resourceUsage().maxRSS * 1024) / MIB),
     heapMiB: Math.round(process.memoryUsage().heapUsed / MIB),
   };
+  // The live set: what a full GC keeps with the replica still held (the child runs with --expose-gc).
+  held = cold;
+  globalThis.gc();
+  const after = process.memoryUsage();
+  figures.liveHeapMiB = Math.round(after.heapUsed / MIB);
+  // Off-heap buffers, Automerge's wasm memory among them.
+  figures.arrayBuffersMiB = Math.round(after.arrayBuffers / MIB);
   process.stdout.write(`${JSON.stringify(figures)}\n`);
+}
+
+/**
+ * From --trace-gc lines ("Scavenge|Mark-Compact <used> (<committed>) -> <used> (<committed>) MB"):
+ * the largest heap a GC found (live set plus the garbage V8 let accumulate before collecting) and
+ * the largest committed heap. Garbage at the peak is that heap less the live set.
+ */
+function heapPeak(lines, liveHeapMiB) {
+  let peakHeapMiB = 0;
+  let peakCommittedMiB = 0;
+  for (const l of lines) {
+    const m = / ms: \S+ ([\d.]+) \(([\d.]+)\) -> ([\d.]+) \(([\d.]+)\) MB/.exec(l);
+    if (m === null) continue;
+    peakHeapMiB = Math.max(peakHeapMiB, Number(m[1]));
+    peakCommittedMiB = Math.max(peakCommittedMiB, Number(m[2]), Number(m[4]));
+  }
+  return {
+    peakHeapMiB: Math.round(peakHeapMiB),
+    peakCommittedHeapMiB: Math.round(peakCommittedMiB),
+    garbageAtPeakMiB: Math.round(peakHeapMiB - liveHeapMiB),
+  };
 }
 
 /** `units`: the history, its last `tail` units after the Snapshot. */
@@ -115,9 +145,14 @@ export function measureColdClient(snapshot, units, tail, options) {
   try {
     const file = join(dir, "c.bin");
     write(file, snapshot, units, tail, options);
-    const run = spawnSync(process.execPath, [SELF, file], { encoding: "utf8" });
+    const run = spawnSync(process.execPath, ["--expose-gc", "--trace-gc", SELF, file], {
+      encoding: "utf8",
+      maxBuffer: 256 * MIB,
+    });
     if (run.status !== 0) throw new Error(`cold client exited ${run.status}: ${run.stderr}`);
-    return JSON.parse(run.stdout.trim().split("\n").at(-1));
+    const lines = run.stdout.trim().split("\n");
+    const figures = JSON.parse(lines.findLast((l) => l.startsWith("{")));
+    return { ...figures, ...heapPeak(lines, figures.liveHeapMiB) };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
