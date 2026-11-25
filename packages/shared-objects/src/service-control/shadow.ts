@@ -59,16 +59,25 @@ function compareIds(a: string, b: string): number {
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
-/** Keys in the engine's order: by Unicode code point (UTF-8 byte order), not UTF-16 unit. */
-function compareKeys(a: string, b: string): number {
-  const x = Array.from(a, (c) => c.codePointAt(0) as number);
-  const y = Array.from(b, (c) => c.codePointAt(0) as number);
-  for (let i = 0; i < Math.min(x.length, y.length); i++) {
-    const d = (x[i] as number) - (y[i] as number);
-    if (d !== 0) return d;
+/**
+ * Keys in the engine's order: by Unicode code point (UTF-8 byte order), not UTF-16 unit. Keys are
+ * well-formed (the canonical walk decodes them as fatal UTF-8), so at the first unit that differs
+ * a surrogate, half of a code point above U+FFFF, sorts after every other unit. A§3.5 (E-030):
+ * read in place, as the keys of a map are sorted again each time it changes.
+ */
+export function compareKeys(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a.charCodeAt(i);
+    const y = b.charCodeAt(i);
+    if (x !== y) return codePointRank(x) - codePointRank(y);
   }
-  return x.length - y.length;
+  return a.length - b.length;
 }
+
+/** A UTF-16 unit's place in code point order: surrogates (0xd800-0xdfff) after 0xe000-0xffff. */
+const codePointRank = (u: number): number =>
+  u >= 0xd800 && u <= 0xdfff ? u + 0x2000 : u >= 0xe000 ? u - 0x800 : u;
 
 /** The engine type and value of a decoded scalar operation. */
 function scalarOf(op: { datatype?: string; value?: unknown }): [string, unknown] {

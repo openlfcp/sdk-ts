@@ -7,6 +7,7 @@
 
 import * as A from "@automerge/automerge";
 import { fromBase64url, fromHex, principalId, resourceId } from "@openlfcp/core";
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { checkChange } from "../src/admission/framing.js";
 import {
@@ -16,7 +17,7 @@ import {
   type ServiceControlSignerClass,
 } from "../src/service-control/index.js";
 import type { ScBackend } from "../src/service-control/reader.js";
-import { ShadowDoc, ShadowUnsupported } from "../src/service-control/shadow.js";
+import { compareKeys, ShadowDoc, ShadowUnsupported } from "../src/service-control/shadow.js";
 import type { Doc } from "./support/service-control.js";
 import bridgeUnits from "./support/service-control-bridge-units.json" with { type: "json" };
 
@@ -354,5 +355,52 @@ describe("the shadow's limits", () => {
     for (let i = 0; i < 3; i++) expect(shadow.undo()).toBeDefined();
     expect(shadow.undo()).toBeUndefined();
     expect(shadow.getWithType("_root", "n")).toEqual(["int", 1]);
+  });
+});
+
+describe("the shadow's key order", () => {
+  // The engine's order: UTF-8 bytes, which is code point order.
+  const utf8 = new TextEncoder();
+  const byBytes = (a: string, b: string): number => {
+    const [x, y] = [utf8.encode(a), utf8.encode(b)];
+    for (let i = 0; i < Math.min(x.length, y.length); i++)
+      if (x[i] !== y[i]) return (x[i] as number) - (y[i] as number);
+    return x.length - y.length;
+  };
+  const sign = (n: number) => Math.sign(n);
+
+  it("orders well-formed keys by UTF-8 bytes", () => {
+    const tricky = [
+      "",
+      "a",
+      "ab",
+      "\u{ffff}",
+      "\u{e000}",
+      "\u{d7ff}",
+      "\u{10000}",
+      "\u{1f600}x",
+      "\u{10ffff}",
+    ];
+    for (const a of tricky)
+      for (const b of tricky) expect(sign(compareKeys(a, b))).toBe(sign(byBytes(a, b)));
+    // Well-formed: no lone surrogates, mostly around the BMP's surrogate block and above it.
+    const unit = fc
+      .oneof(
+        fc.integer({ min: 0x61, max: 0x63 }),
+        fc.integer({ min: 0xd7fe, max: 0xd7ff }),
+        fc.integer({ min: 0xe000, max: 0xe001 }),
+        fc.integer({ min: 0xfffe, max: 0xffff }),
+        fc.integer({ min: 0x10000, max: 0x10001 }),
+        fc.integer({ min: 0x10fffe, max: 0x10ffff }),
+      )
+      .map((c) => String.fromCodePoint(c));
+    const key = fc.string({ unit, maxLength: 4 });
+    fc.assert(
+      fc.property(key, key, (a, b) => {
+        expect(sign(compareKeys(a, b))).toBe(sign(byBytes(a, b)));
+        expect(sign(compareKeys(a, a + b))).toBe(sign(byBytes(a, a + b)));
+      }),
+      { numRuns: 2000 },
+    );
   });
 });
