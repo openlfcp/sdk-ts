@@ -168,6 +168,18 @@ describe("ServiceControlReplica", () => {
     ).toThrow(/verified carrying unit/);
   });
 
+  it("keeps the Snapshot's document as its engine's and applies the tail to it (A§3.5)", () => {
+    const units = history();
+    const { replica } = ServiceControlReplica.fromChanges(units, options);
+    const prefix = ServiceControlReplica.fromChanges(units.slice(0, -1), options).replica;
+    const reopened = ServiceControlReplica.fromSnapshot(prefix.snapshot(), options, units);
+    expect(reopened.validate()).toEqual(prefix.validate());
+    expect(reopened.receiveChanges(units.slice(-1)).refused).toEqual([]);
+    expect(reopened.heads()).toEqual(replica.heads());
+    expect(reopened.changes().length).toBe(units.length);
+    expect(reopened.validate()).toEqual(replica.validate());
+  });
+
   it("binds a unit's codec to its signer's actor", () => {
     const [init] = history();
     const codec = serviceControlCodecFor({ resourceId: resource, actor: root });

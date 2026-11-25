@@ -82,8 +82,13 @@ const TYPE_DELTA = 3;
 const TYPE_BOOLEAN = 4;
 const TYPE_STRING = 5;
 const TYPE_RAW = 7;
-/** Input fed to the inflater per push: each push yields at most ~1,032x its size. */
+/**
+ * The least input fed to the inflater per push: each push yields at most ~1,032x its size. A§3.5
+ * (E-030): a push takes as much more as the budget left covers, as every push allocates and copies
+ * the inflater's 32 KiB window (1 KiB pushes cost a 1-year C Snapshot ~56 MiB of peak RSS).
+ */
 const INFLATE_SLICE = 1024;
+const INFLATE_RATIO = 1032;
 
 const refuse = (why: string): never => {
   throw new ProfileInvalidError(
@@ -354,8 +359,11 @@ function inflateCapped(input: Uint8Array, budget: number): Uint8Array {
     else parts.push(chunk);
   });
   try {
-    for (let i = 0; i < input.length && !over; i += INFLATE_SLICE)
-      inflater.push(input.subarray(i, i + INFLATE_SLICE), i + INFLATE_SLICE >= input.length);
+    for (let i = 0; i < input.length && !over; ) {
+      const slice = Math.max(INFLATE_SLICE, Math.floor((budget - total) / INFLATE_RATIO));
+      inflater.push(input.subarray(i, i + slice), i + slice >= input.length);
+      i += slice;
+    }
     if (input.length === 0) inflater.push(new Uint8Array(0), true);
   } catch (e) {
     failed = e;
