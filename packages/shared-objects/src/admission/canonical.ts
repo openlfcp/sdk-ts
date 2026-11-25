@@ -85,8 +85,12 @@ function utf8(bytes: Uint8Array, what: string): string {
   }
 }
 
-const hex = (b: Uint8Array): string =>
-  Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+const HEX = Array.from({ length: 256 }, (_, x) => x.toString(16).padStart(2, "0"));
+const hex = (b: Uint8Array): string => {
+  let s = "";
+  for (const x of b) s += HEX[x] as string;
+  return s;
+};
 
 /** Byte-wise lexicographic order, a shorter prefix first. */
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
@@ -522,13 +526,16 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
     if (rows !== undefined && rows.length !== predRows)
       refuse(`column 0x${spec.toString(16)} has ${rows.length} rows, not ${predRows}`);
 
+  // Each actor in hex once (A§3.5: not once per operation that names it).
+  const actorHex = hex(actor);
+  const othersHex = others.map(hex);
   const actorOf = (index: Row): string => {
     const i = num(index);
     if (i === null) return refuse("an actor index is null");
-    if (i === 0) return hex(actor);
-    const o = others[i - 1];
+    if (i === 0) return actorHex;
+    const o = othersHex[i - 1];
     if (o === undefined) return refuse("an actor index is out of range");
-    return hex(o);
+    return o;
   };
   const named = new Set<number>();
   const counter = (v: Row, what: string): number => {
@@ -556,6 +563,8 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
   }
   if (rawAt !== raw.length) refuse("the value bytes are longer than their metadata");
 
+  // Rule 8: the start op is below 2^32 even for a change without operations (CAN-8).
+  if (startOp >= BigInt(U32)) refuse("the start op is 2^32 or more");
   if (startOp + BigInt(N) - 1n >= BigInt(U32)) refuse("the last operation counter is 2^32 or more");
   const start = Number(startOp);
 
@@ -676,13 +685,13 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
     refuse("the other actors are not exactly those the operations name");
 
   return Object.freeze({
-    actor: hex(actor),
+    actor: actorHex,
     seq: Number(seq),
     startOp: start,
     time: Number(time),
     message,
     deps: Object.freeze(deps.map(hex)),
-    otherActors: Object.freeze(others.map(hex)),
+    otherActors: Object.freeze(othersHex),
     ops: Object.freeze(ops),
     beginsWithAuthor: authored,
   });

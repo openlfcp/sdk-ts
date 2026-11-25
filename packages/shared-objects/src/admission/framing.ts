@@ -61,6 +61,10 @@ export interface CheckedChange {
  * parse, trailing bytes such as a second concatenated change, and a
  * checksum that does not match the change hash. Automerge JS 3.5.0 parses
  * a change without verifying its checksum, so the check is done here.
+ *
+ * A§3.5 (E-030): the bytes are decoded once, by the canonical walk of §11.3,
+ * which reads everything the engine's decode gives; the engine's own decode
+ * (decodedOf) runs only for a caller that asks for it.
  */
 export function checkChange(bytes: Uint8Array): CheckedChange {
   const type = chunkType(bytes, "the change");
@@ -70,70 +74,68 @@ export function checkChange(bytes: Uint8Array): CheckedChange {
   // §11.1: what the change expands to and its structure, before Automerge decodes it.
   const expansion = checkChangeExpansion(bytes);
   // §11.3: the canonical encoding, by the format's properties, still before the engine.
+  decodes++;
   const parsed = checkCanonicalChange(bytes);
-  let decoded: A.DecodedChange;
-  try {
-    decoded = A.decodeChange(bytes);
-  } catch (e) {
-    // Canonical uint64 values are legal (SOP §11.3 rule 6), but the JS
-    // engine's JSON decoder refuses integers it cannot represent as number.
-    // The canonical parser has already checked and decoded them losslessly.
-    if (
-      !(e instanceof RangeError) ||
-      !/^Error: -?\d+ can't be represented as a JavaScript number$/.test(e.message) ||
-      !parsed.ops.some((op) => typeof op.value === "bigint")
-    )
-      return reject(`invalid Automerge change bytes (§11): ${(e as Error).message}`);
-    const hash = refusedChangeHash(bytes);
-    if (hash === undefined)
-      return reject("the Automerge change checksum does not match its hash (§11)");
-    const actions = ["makeMap", "set", "makeList", "del", "makeText", "inc", "makeTable", "mark"];
-    const types: Record<number, string> = {
-      3: "uint",
-      4: "int",
-      5: "float64",
-      8: "counter",
-      9: "timestamp",
-    };
-    decoded = {
-      actor: parsed.actor,
-      seq: parsed.seq,
-      startOp: parsed.startOp,
-      time: parsed.time,
-      message: parsed.message,
-      author: null,
-      hash,
-      deps: [...parsed.deps],
-      ops: parsed.ops.map((op) => ({
-        action: actions[op.action],
-        obj: op.obj,
-        pred: [...op.pred],
-        ...(op.key.kind === "prop"
-          ? { key: op.key.name }
-          : { elemId: op.key.kind === "head" ? "_head" : op.key.id }),
-        ...(op.insert ? { insert: true } : {}),
-        ...([1, 5, 7].includes(op.action) ? { value: op.value } : {}),
-        ...(types[op.valueType] === undefined ? {} : { datatype: types[op.valueType] }),
-        ...(op.name === null ? {} : { name: op.name }),
-        ...(op.expand ? { expand: true } : {}),
-      })),
-    } as A.DecodedChange;
-  }
-  if (toHex(bytes.subarray(4, 8)) !== decoded.hash.slice(0, 8))
-    reject("the Automerge change checksum does not match its hash (§11)");
+  // The canonical walk has checked that the chunk length covers the bytes exactly.
+  const hash = refusedChangeHash(bytes);
+  if (hash === undefined)
+    return reject("the Automerge change checksum does not match its hash (§11)");
   const checked: CheckedChange = Object.freeze({
     bytes: Uint8Array.from(bytes),
-    hash: decoded.hash,
-    actor: decoded.actor,
-    seq: decoded.seq,
-    deps: Object.freeze([...decoded.deps]),
+    hash,
+    actor: parsed.actor,
+    seq: parsed.seq,
+    deps: parsed.deps,
     otherActors: expansion.otherActors,
     beginsWithAuthor: parsed.beginsWithAuthor,
   });
-  DECODED.set(checked, decoded);
   PARSED.set(checked, parsed);
   return checked;
 }
+
+/**
+ * The change in the form A.decodeChange gives it, built from the canonical walk
+ * (no decode of its own) for the operations, which the walk reads losslessly:
+ * an integer beyond 2^53 is a bigint where the engine's decode refuses it. The
+ * header's message is the bytes' (an empty one is ""), a mark operation's
+ * action is "mark" and there is no author. A§3.5 (E-030): admission of C
+ * reads a change through this; it is not kept.
+ */
+export function decodedView(change: CheckedChange): A.DecodedChange {
+  const parsed = parsedOf(change);
+  return {
+    actor: parsed.actor,
+    seq: parsed.seq,
+    startOp: parsed.startOp,
+    time: parsed.time,
+    message: parsed.message,
+    author: null,
+    hash: change.hash,
+    deps: [...parsed.deps],
+    ops: parsed.ops.map((op) => ({
+      action: ACTIONS[op.action],
+      obj: op.obj,
+      pred: [...op.pred],
+      ...(op.key.kind === "prop"
+        ? { key: op.key.name }
+        : { elemId: op.key.kind === "head" ? "_head" : op.key.id }),
+      ...(op.insert ? { insert: true } : {}),
+      ...(op.action === 1 || op.action === 5 || op.action === 7 ? { value: op.value } : {}),
+      ...(DATATYPES[op.valueType] === undefined ? {} : { datatype: DATATYPES[op.valueType] }),
+      ...(op.name === null ? {} : { name: op.name }),
+      ...(op.expand ? { expand: true } : {}),
+    })),
+  } as A.DecodedChange;
+}
+
+const ACTIONS = ["makeMap", "set", "makeList", "del", "makeText", "inc", "makeTable", "mark"];
+const DATATYPES: Readonly<Record<number, string>> = {
+  3: "uint",
+  4: "int",
+  5: "float64",
+  8: "counter",
+  9: "timestamp",
+};
 
 /**
  * The change hash of bytes checkChange refused, read without decoding them:
@@ -199,24 +201,50 @@ const PARSED = new WeakMap<CheckedChange, ParsedChange>();
 export function parsedOf(change: CheckedChange): ParsedChange {
   let p = PARSED.get(change);
   if (p === undefined) {
+    decodes++;
     p = checkCanonicalChange(change.bytes);
     PARSED.set(change, p);
   }
   return p;
 }
 
-/** The decoded form checkChange made, kept for the change's lifetime (decoding is not cheap). */
+/** The engine's decode of a change, made on first use and kept for the change's lifetime. */
 const DECODED = new WeakMap<CheckedChange, A.DecodedChange>();
 
-/** The decoded change, reusing the decode of checkChange when there was one. */
+/** The change as A.decodeChange gives it, decoded once per change on first use. */
 export function decodedOf(change: CheckedChange): A.DecodedChange {
-  const decoded = DECODED.get(change);
-  if (decoded !== undefined) return decoded;
-  // CheckedChange is structural: callers can pass a copy without the cached decode.
-  const checked = checkChange(change.bytes);
-  const result = DECODED.get(checked) as A.DecodedChange;
-  DECODED.set(change, result);
-  return result;
+  let decoded = DECODED.get(change);
+  if (decoded === undefined) {
+    decodes++;
+    try {
+      decoded = A.decodeChange(change.bytes);
+    } catch (e) {
+      // Canonical uint64 values are legal (SOP §11.3 rule 6), but the JS
+      // engine's JSON decoder refuses integers it cannot represent as number.
+      // The canonical walk has already checked and decoded them losslessly.
+      if (
+        !(e instanceof RangeError) ||
+        !/^Error: -?\d+ can't be represented as a JavaScript number$/.test(e.message) ||
+        !parsedOf(change).ops.some((op) => typeof op.value === "bigint")
+      )
+        return reject(`invalid Automerge change bytes (§11): ${(e as Error).message}`);
+      decoded = decodedView(change);
+    }
+    DECODED.set(change, decoded);
+  }
+  return decoded;
+}
+
+/** How many times the bytes of a change were decoded (walked in full, or by the engine). */
+let decodes = 0;
+
+/**
+ * A§3.5 (E-030) instrumentation: the number of full decodes of a change's
+ * bytes since the module loaded, the canonical walk and the engine's decode
+ * alike; the difference over a run is what it decoded.
+ */
+export function changeDecodeCount(): number {
+  return decodes;
 }
 
 /**

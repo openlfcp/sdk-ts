@@ -14,6 +14,16 @@ export interface ColdClientFigures {
   /** The child's peak resident set size over its whole run. */
   readonly peakRssMiB: number;
   readonly heapMiB: number;
+  /** Heap after a full GC at the end, the replica still held: the live set. */
+  readonly liveHeapMiB: number;
+  /** Off-heap ArrayBuffers after that GC (Automerge's wasm memory among them). */
+  readonly arrayBuffersMiB: number;
+  /** The largest heap a GC found over the run (--trace-gc): live set plus garbage. */
+  readonly peakHeapMiB: number;
+  /** The largest committed V8 heap over the run. */
+  readonly peakCommittedHeapMiB: number;
+  /** peakHeapMiB less liveHeapMiB. */
+  readonly garbageAtPeakMiB: number;
   readonly tailUnits: number;
 }
 

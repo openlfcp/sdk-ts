@@ -9,7 +9,7 @@ import {
   toHex,
 } from "@openlfcp/core";
 import { checkChangeActor } from "../admission/actor.js";
-import { type CheckedChange, decodedOf, parsedOf } from "../admission/framing.js";
+import { type CheckedChange, decodedView, parsedOf } from "../admission/framing.js";
 import { MAX_DOCUMENT_DEPTH } from "../admission/limits.js";
 import { ReferenceHistory } from "../admission/references.js";
 import { isWasmTrap } from "../replica.js";
@@ -347,7 +347,7 @@ export class ServiceControlAdmission {
    * ServiceControlAdmissionError; returns the writer's class (§2.3).
    */
   accept(change: CheckedChange, writer: ServiceControlWriter): ServiceControlWriterClass {
-    const decoded = decodedOf(change);
+    const decoded = decodedView(change);
     if (change.deps.length === 0) {
       this.#acceptInitial(change, decoded.ops as Op[]);
       this.#commit(change, decoded);

@@ -33,9 +33,11 @@ describe("lossless uint64 values in SOP admission", () => {
       A.getBackend(d).put("_root", "epoch", dataEpoch(UINT64_MAX), "uint");
     });
     const bytes = A.getLastLocalChange(doc) as Uint8Array;
+    // checkChange walks the bytes without the engine; its decode runs on first use (decodedOf).
+    const checked = checkChange(bytes);
     decoder.error = error;
     try {
-      expect(() => checkChange(bytes)).toThrow(
+      expect(() => decodedOf(checked)).toThrow(
         expect.objectContaining({ code: "PROFILE_INVALID", diagnostic: "INVALID_AUTOMERGE_BYTES" }),
       );
     } finally {

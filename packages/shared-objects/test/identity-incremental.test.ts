@@ -89,7 +89,8 @@ describe("incremental identity admission (P2)", () => {
     );
     expect(engine.scans).toBe(0);
     expect(engine.clones).toBe(1);
-    expect(engine.decodes).toBe(2);
+    // The candidate's admission decodes it once (checkChange walks the bytes without the engine).
+    expect(engine.decodes).toBe(1);
     expect(engine.applies).toBe(1);
     expect(change.seq).toBe(2001);
     expect(replica.roster()[resourceRef]?.name).toBe("next");
