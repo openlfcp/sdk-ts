@@ -208,6 +208,14 @@ export interface ServiceControlAdmissionMode {
    * (default 256); under 1, every change is judged on the engine path.
    */
   readonly window?: number;
+  /**
+   * A§3.5 (E-030): an engine document that already holds every change this
+   * admission will admit (a Snapshot's, ServiceControlReplica.fromSave). It is
+   * admission's document from the start and an admitted change is not applied
+   * to it again: the engine path reads it at the change's heads, never at the
+   * current state. A refusal goes back to a document of the admitted history.
+   */
+  readonly engine?: A.Doc<unknown>;
 }
 
 /**
@@ -251,6 +259,8 @@ export class ServiceControlAdmission {
   #shadow: ShadowDoc | undefined;
   /** Admitted on the shadow, not yet applied to the engine (one batch). */
   #pending: Uint8Array[] = [];
+  /** The document holds changes not admitted (yet): ServiceControlAdmissionMode.engine. */
+  #ahead: boolean;
   /** Off: every change is judged on the engine path (the shadow still follows). */
   incremental: boolean;
   /**
@@ -270,7 +280,8 @@ export class ServiceControlAdmission {
     mode: ServiceControlAdmissionMode = {},
   ) {
     this.#resource = toBase64url(options.resource);
-    this.#doc = A.init();
+    this.#doc = mode.engine ?? A.init();
+    this.#ahead = mode.engine !== undefined;
     this.incremental = mode.incremental ?? true;
     this.#shadow = new ShadowDoc(mode.window);
   }
@@ -289,6 +300,7 @@ export class ServiceControlAdmission {
     if (this.#pending.length === 0) return;
     const batch = this.#pending;
     this.#pending = [];
+    if (this.#ahead) return;
     try {
       [this.#doc] = A.applyChanges(this.#doc, batch);
     } catch (e) {
@@ -678,7 +690,8 @@ export class ServiceControlAdmission {
     if (this.#changes.length > 0)
       refuseServiceControl("INVALID_ROOT", "SC0: C already has its initial change");
     this.#apply(change);
-    const r = new ScReader(A.getBackend(this.#doc));
+    // At its heads: the document may hold the changes after it (ServiceControlAdmissionMode.engine).
+    const r = new ScReader(A.getBackend(this.#doc), [change.hash]);
     const keys = r.keys("_root");
     const profile = r.get("_root", "profile");
     const meta = r.map("_root", "meta");
@@ -717,7 +730,14 @@ export class ServiceControlAdmission {
     refuseServiceControl(diagnostic, `SERVICE-CONTROL-PROFILE-01 §4: ${diagnostic}`);
   }
 
+  /** The document holds exactly the admitted history: from now on admitted changes are applied. */
+  caughtUp(): void {
+    this.flush();
+    this.#ahead = false;
+  }
+
   #apply(change: CheckedChange): void {
+    if (this.#ahead) return;
     try {
       [this.#doc] = A.applyChanges(this.#doc, [change.bytes]);
     } catch (e) {
@@ -733,6 +753,7 @@ export class ServiceControlAdmission {
   /** Back to the admitted history: the working document had a refused change applied. */
   #rebuild(): void {
     this.#pending = [];
+    this.#ahead = false;
     A.free(this.#doc);
     [this.#doc] = A.applyChanges(A.init(), this.#changes);
   }

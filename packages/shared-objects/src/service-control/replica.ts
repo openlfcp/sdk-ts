@@ -152,12 +152,16 @@ export class ServiceControlReplica {
     return this.#admission.document;
   }
 
-  private constructor(options: ServiceControlOptions) {
+  /** `engine`: ServiceControlAdmissionMode.engine (fromSave). */
+  private constructor(options: ServiceControlOptions, engine?: A.Doc<unknown>) {
     this.#options = copyOptions(options);
     // Validate raw ID lengths.
     deriveServiceControlActorId(options.resource, options.root);
     deriveServiceControlActorId(options.resource, options.genesisSigner);
-    this.#admission = new ServiceControlAdmission(this.#options);
+    this.#admission = new ServiceControlAdmission(
+      this.#options,
+      engine === undefined ? {} : { engine },
+    );
   }
 
   #history(): DocumentSequences {
@@ -195,14 +199,12 @@ export class ServiceControlReplica {
     checkSaveHeader(save);
     checkSnapshotExpansion(save, limits);
     let changes: Uint8Array[];
+    let loaded: A.Doc<unknown> | undefined;
     try {
-      const loaded = A.load(save);
-      try {
-        changes = A.getAllChanges(loaded);
-      } finally {
-        A.free(loaded);
-      }
+      loaded = A.load(save);
+      changes = A.getAllChanges(loaded);
     } catch (e) {
+      if (loaded !== undefined) A.free(loaded);
       if (isWasmTrap(e)) throw e;
       refuseServiceControl("INVALID_AUTOMERGE_BYTES", `invalid snapshot: ${String(e)}`);
     }
@@ -224,16 +226,21 @@ export class ServiceControlReplica {
       else missing ??= hash ?? checkChange(bytes).hash;
     }
     changes = [];
-    if (initial !== 1)
-      refuseServiceControl("INVALID_ROOT", "a snapshot contains one initial change");
-    if (missing !== undefined)
+    if (initial !== 1 || missing !== undefined) {
+      A.free(loaded);
+      if (initial !== 1)
+        refuseServiceControl("INVALID_ROOT", "a snapshot contains one initial change");
       throw new LfcpError(
         "MISSING_DEPENDENCY",
         `snapshot change ${missing} needs its verified carrying unit`,
       );
-    const replica = ServiceControlReplica.empty(options);
-    // Admitted in causal slices (getAllChanges orders them so): the decodes of one slice and the
-    // engine's batch for it are all a slice holds, not the whole history at once.
+    }
+    // A§3.5 (E-030): the loaded document is the engine's from the start, not built again from
+    // the admitted changes; admission reads it at each change's heads. Admitted in full, it holds
+    // exactly the admitted history.
+    const replica = new ServiceControlReplica(options, loaded);
+    // Admitted in causal slices (getAllChanges orders them so): the decodes of one slice are all
+    // a slice holds, not the whole history at once.
     let error: ServiceControlRefusal | undefined;
     let waiting = 0;
     for (let i = 0; i < units.length; i += SNAPSHOT_SLICE) {
@@ -242,12 +249,15 @@ export class ServiceControlReplica {
       if (error !== undefined) break;
       waiting = result.waiting.length;
     }
-    if (error !== undefined || waiting > 0)
-      throw Object.assign(
-        new LfcpError("PROFILE_INVALID", error?.message ?? "snapshot has missing changes"),
-        { diagnostic: error?.diagnostic ?? "INVALID_AUTOMERGE_BYTES" },
-      );
-    return replica;
+    if (error === undefined && waiting === 0 && replica.#accepted.size === units.length) {
+      replica.#admission.caughtUp();
+      return replica;
+    }
+    A.free(replica.#doc);
+    throw Object.assign(
+      new LfcpError("PROFILE_INVALID", error?.message ?? "snapshot has missing changes"),
+      { diagnostic: error?.diagnostic ?? "INVALID_AUTOMERGE_BYTES" },
+    );
   }
 
   static fromSnapshot(
