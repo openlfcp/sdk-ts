@@ -59,6 +59,11 @@ export {
   validateServiceControl,
 } from "./schema.js";
 export {
+  HEARTBEAT_INTERVAL_MS,
+  ServiceControlStatusSchedule,
+  TRANSITION_INTERVAL_MS,
+} from "./status-schedule.js";
+export {
   deriveServiceControlActorId,
   deviceFingerprint,
   EVENT_STATES,

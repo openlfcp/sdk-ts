@@ -1,12 +1,14 @@
 // A bridge-style synthetic history of C (A§3.5, T§3 "synthetic year of C"), written straight
 // through the engine so a year takes linear time: the root initializes C and approves the bridge;
 // the bridge writes service and status, turns its bindings on (again once a month, a new
-// generation, with a preview), and writes a unit every 30 minutes carrying the heartbeat and the
-// bindings whose complete check moved (20 a day each, as the bridge's ControlClient batches them).
-// Two questions a week per binding: the root answers from a view that misses the bridge's latest
-// unit (a concurrent change), the bridge applies and resolves it, and cleans all three up after
-// 7 days. With `refusals`, units §4 refuses are mixed in: by writers outside their rows, and over the
-// entry limit (refused on the post-state).
+// generation, with a preview), and writes status and bindings as A§3.5 has it
+// (ServiceControlStatusSchedule): the complete checks that moved (20 a day each) ride the heartbeat
+// unit every 30 minutes, transitions are merged into one write a minute. Two questions a week per
+// binding: the root answers, at the bridge's next unit, from a view that misses it (a concurrent
+// change), the bridge applies and resolves it, and cleans all three up after 7 days. The plugin
+// publishes a Snapshot every `snapshotEveryDays` (default daily; `snapshots` holds the length of the
+// history at each). With `refusals`, units §4 refuses are mixed in: by writers outside their rows,
+// and over the entry limit (refused on the post-state).
 
 import * as A from "@automerge/automerge";
 import { type PrincipalId, principalId, resourceId, toBase64url, toHex } from "@openlfcp/core";
@@ -16,6 +18,7 @@ import {
   type ServiceControlIntent,
   type ServiceControlOptions,
   type ServiceControlSignerClass,
+  ServiceControlStatusSchedule,
 } from "../../src/service-control/index.js";
 import { applyServiceControlIntent } from "../../src/service-control/write.js";
 import { principalRef } from "../../src/values.js";
@@ -34,6 +37,7 @@ export interface YearOptions {
   readonly transitionsPerDay?: number;
   readonly questionsPerWeek?: number;
   readonly refusals?: boolean;
+  readonly snapshotEveryDays?: number;
 }
 
 const MINUTE = 60_000;
@@ -94,6 +98,8 @@ export function syntheticYear(o: YearOptions): {
   readonly units: readonly YearUnit[];
   /** Units mixed in to be refused. */
   readonly strays: ReadonlySet<string>;
+  /** How many units the history had at each Snapshot the plugin published. */
+  readonly snapshots: readonly number[];
 } {
   let s = o.seed ?? 1;
   const rnd = () => {
@@ -138,7 +144,8 @@ export function syntheticYear(o: YearOptions): {
     },
   ]);
   bridge.pull(rootLog);
-  bridge.write([
+  const schedule = new ServiceControlStatusSchedule();
+  const intents: ServiceControlIntent[] = [
     {
       intent: "service.put",
       fields: {
@@ -154,57 +161,49 @@ export function syntheticYear(o: YearOptions): {
         capacity: { sections: bindings.length, max: 8, devicesFree: 8 - bindings.length },
       },
     },
-    { intent: "status.put", fields: { state: "running", since: iso(T0), heartbeatAt: iso(T0) } },
-  ]);
+  ];
+  schedule.status({ state: "running", since: iso(T0) });
   const turnOn = (b: number, t: number) => {
     generation[b] = (generation[b] as number) + 1;
-    const binding = bindings[b] as string;
-    bridge.write([
-      {
-        intent: "binding.put",
-        binding,
-        fields: {
-          state: "on",
-          generation: generation[b],
-          list: `Shared list ${b + 1}`,
-          filter: "all",
-          lastCompleteCheckAt: iso(t),
-          pending: { toApple: 0, toLfcp: 0 },
-          refused: 0,
-          unconfirmed: 0,
-          preview: {
-            id: uid(1_000_000 + b * 1000 + (generation[b] as number)),
-            planHash: hex(b + (generation[b] as number)),
-            filter: "default",
-            list: `Shared list ${b + 1}`,
-            items: ["Buy milk", "Call the bank", "Renew passport", "Book flights", "Pay rent"],
-            counts: { toApple: 12, toLfcp: 3, unchanged: 40 },
-          },
-        },
+    schedule.binding(bindings[b] as string, {
+      state: "on",
+      generation: generation[b],
+      list: `Shared list ${b + 1}`,
+      filter: "all",
+      lastCompleteCheckAt: iso(t),
+      pending: { toApple: 0, toLfcp: 0 },
+      refused: 0,
+      unconfirmed: 0,
+      preview: {
+        id: uid(1_000_000 + b * 1000 + (generation[b] as number)),
+        planHash: hex(b + (generation[b] as number)),
+        filter: "default",
+        list: `Shared list ${b + 1}`,
+        items: ["Buy milk", "Call the bank", "Renew passport", "Book flights", "Pay rent"],
+        counts: { toApple: 12, toLfcp: 3, unchanged: 40 },
       },
-    ]);
+    });
   };
   for (const b of bindings.keys()) turnOn(b, T0);
+  bridge.write([...intents, ...schedule.take(T0)]);
 
   let next = 0;
   const cleanup: { at: number; qid: string; aid: string }[] = [];
   const answered: { at: number; qid: string; aid: string }[] = [];
+  /** Questions the root answers at the bridge's next unit, from its view up to `upTo`. */
+  let asked: { t: number; b: number; qid: string; aid: string; hash: string; upTo: number }[] = [];
+  const snapshots: number[] = [];
+  const snapshotEvery = (o.snapshotEveryDays ?? 1) * 48;
   for (let tick = 1; tick <= o.days * 48; tick++) {
     const t = T0 + tick * 30 * MINUTE;
     const day = Math.floor((t - T0) / DAY);
     if (tick % 48 === 0 && day % 30 === 0) for (const b of bindings.keys()) turnOn(b, t);
     bridge.pull(rootLog);
-    const intents: ServiceControlIntent[] = [
-      { intent: "status.put", fields: { heartbeatAt: iso(t) } },
-    ];
     bindings.forEach((binding, b) => {
       if (rnd() < perTick)
-        intents.push({
-          intent: "binding.put",
-          binding,
-          fields: { lastCompleteCheckAt: iso(t - b * MINUTE) },
-        });
+        schedule.binding(binding, { lastCompleteCheckAt: iso(t - b * MINUTE) }, { defer: true });
     });
+    const intents: ServiceControlIntent[] = [];
     // The bridge applies an answer at one of its next units (the Mac may sleep in between).
     for (const a of answered.filter((x) => x.at <= t)) {
       const at = iso(t);
@@ -224,12 +223,42 @@ export function syntheticYear(o: YearOptions): {
         { intent: "delete", container: "questions", key: qid },
       );
     }
-    bridge.write(intents);
+    if (intents.length > 0 || schedule.due(t)) bridge.write([...schedule.take(t), ...intents]);
+
+    for (const { t: q, b, qid, aid, hash, upTo } of asked) {
+      // The bridge's unit above is not in the root's view when it answers.
+      root.pull(bridgeLog, upTo);
+      root.write([
+        {
+          intent: "answer.create",
+          aid,
+          answer: { qid, snapshotHash: hash, choice: "restore", at: iso(q + 5 * MINUTE) },
+        },
+      ]);
+      answered.push({ at: t + Math.ceil(rnd() * 4) * 30 * MINUTE, qid, aid });
+      const at = iso(q + 5 * MINUTE);
+      if (o.refusals && rnd() < 0.5) {
+        // Refused on the pre-state (writers outside the row) and,
+        // over the entry limit, only on the post-state.
+        stray(bridge, [
+          {
+            intent: "answer.create",
+            aid: uid(next + 1),
+            answer: { qid, snapshotHash: hash, choice: "accept", at },
+          },
+        ]);
+        root.pull(bridgeLog);
+        stray(root, [{ intent: "status.put", fields: { heartbeatAt: at } }]);
+        const binding = bindings[b] as string;
+        stray(bridge, [{ intent: "binding.put", binding, fields: { list: "x".repeat(9000) } }]);
+      }
+    }
+    asked = [];
 
     for (const [b, binding] of bindings.entries()) {
       if (rnd() >= questionPerTick) continue;
       const [qid, aid] = [uid(++next), uid(++next)];
-      const snapshotHash = hex(next);
+      const hash = hex(next);
       bridge.write([
         {
           intent: "question.create",
@@ -239,7 +268,7 @@ export function syntheticYear(o: YearOptions): {
             generation: generation[b],
             kind: "mass_delete",
             anomalyId: uid(++next),
-            snapshotHash,
+            snapshotHash: hash,
             items: ["Buy milk", "Call the bank", "Renew passport", "Book flights", "Pay rent"],
             counts: { deleted: 14 },
             options: ["restore", "accept"],
@@ -247,35 +276,9 @@ export function syntheticYear(o: YearOptions): {
           },
         },
       ]);
-      root.pull(bridgeLog);
-      // The bridge's next unit is not in the root's view when it answers.
-      bridge.write([
-        { intent: "status.put", fields: { heartbeatAt: iso(t + 2 * MINUTE + b * 1000) } },
-      ]);
-      root.write([
-        {
-          intent: "answer.create",
-          aid,
-          answer: { qid, snapshotHash, choice: "restore", at: iso(t + 5 * MINUTE) },
-        },
-      ]);
-      answered.push({ at: t + Math.ceil(rnd() * 4) * 30 * MINUTE, qid, aid });
-      const at = iso(t + 5 * MINUTE);
-      if (o.refusals && rnd() < 0.5) {
-        // Refused on the pre-state (writers outside the row) and,
-        // over the entry limit, only on the post-state.
-        stray(bridge, [
-          {
-            intent: "answer.create",
-            aid: uid(next + 1),
-            answer: { qid, snapshotHash, choice: "accept", at },
-          },
-        ]);
-        root.pull(bridgeLog);
-        stray(root, [{ intent: "status.put", fields: { heartbeatAt: at } }]);
-        stray(bridge, [{ intent: "binding.put", binding, fields: { list: "x".repeat(9000) } }]);
-      }
+      asked.push({ t, b, qid, aid, hash, upTo: bridgeLog.length });
     }
+    if (tick % snapshotEvery === 0) snapshots.push(units.length);
   }
-  return { options, units, strays };
+  return { options, units, strays, snapshots };
 }

@@ -10,6 +10,7 @@ import {
 import { checkChangeActor } from "../admission/actor.js";
 import {
   type CheckedChange,
+  changeDependencyCount,
   checkChange,
   checkSaveHeader,
   decodedOf,
@@ -105,6 +106,13 @@ const refusal = (
   message: error instanceof Error ? error.message : String(error),
 });
 
+/**
+ * A§3.5 (E-030): how many units of a Snapshot's history admission takes at once. The decodes of a
+ * slice and the engine's batch for it are what a cold client holds beyond the replica, so its
+ * peak memory does not grow with the length of C's history.
+ */
+const SNAPSHOT_SLICE = 512;
+
 const copyOptions = (o: ServiceControlOptions): ServiceControlOptions => ({
   resource: o.resource.slice() as ResourceId,
   root: o.root.slice() as PrincipalId,
@@ -198,27 +206,47 @@ export class ServiceControlReplica {
       if (isWasmTrap(e)) throw e;
       refuseServiceControl("INVALID_AUTOMERGE_BYTES", `invalid snapshot: ${String(e)}`);
     }
-    const byHash = new Map(verifiedUnits.map((unit) => [checkChange(unit.bytes).hash, unit]));
-    const checked = changes.map(checkChange);
-    if (checked.filter((c) => c.deps.length === 0).length !== 1)
+    // A§3.5 (E-030): the units are found by hash alone. Admission decodes each that carries a
+    // change of the Snapshot (refusing bytes it cannot admit), a slice at a time, keeping no decode.
+    const byHash = new Map<string, ServiceControlUnit>();
+    for (const unit of verifiedUnits) {
+      const hash = refusedChangeHash(unit.bytes);
+      if (hash !== undefined) byHash.set(hash, unit);
+    }
+    let initial = 0;
+    let missing: string | undefined;
+    const units: ServiceControlUnit[] = [];
+    for (const bytes of changes) {
+      const hash = refusedChangeHash(bytes);
+      const unit = hash === undefined ? undefined : byHash.get(hash);
+      if (changeDependencyCount(bytes) === 0) initial++;
+      if (unit !== undefined && bytesEqual(unit.bytes, bytes)) units.push(unit);
+      else missing ??= hash ?? checkChange(bytes).hash;
+    }
+    changes = [];
+    if (initial !== 1)
       refuseServiceControl("INVALID_ROOT", "a snapshot contains one initial change");
-    const units = checked.map((change) => {
-      const unit = byHash.get(change.hash);
-      if (unit === undefined || !bytesEqual(unit.bytes, change.bytes))
-        throw new LfcpError(
-          "MISSING_DEPENDENCY",
-          `snapshot change ${change.hash} needs its verified carrying unit`,
-        );
-      return unit;
-    });
-    const { replica, result } = ServiceControlReplica.fromChanges(units, options);
-    if (result.refused.length > 0 || result.waiting.length > 0) {
-      const error = result.refused[0];
+    if (missing !== undefined)
+      throw new LfcpError(
+        "MISSING_DEPENDENCY",
+        `snapshot change ${missing} needs its verified carrying unit`,
+      );
+    const replica = ServiceControlReplica.empty(options);
+    // Admitted in causal slices (getAllChanges orders them so): the decodes of one slice and the
+    // engine's batch for it are all a slice holds, not the whole history at once.
+    let error: ServiceControlRefusal | undefined;
+    let waiting = 0;
+    for (let i = 0; i < units.length; i += SNAPSHOT_SLICE) {
+      const result = replica.receiveChanges(units.slice(i, i + SNAPSHOT_SLICE));
+      error ??= result.refused[0];
+      if (error !== undefined) break;
+      waiting = result.waiting.length;
+    }
+    if (error !== undefined || waiting > 0)
       throw Object.assign(
         new LfcpError("PROFILE_INVALID", error?.message ?? "snapshot has missing changes"),
         { diagnostic: error?.diagnostic ?? "INVALID_AUTOMERGE_BYTES" },
       );
-    }
     return replica;
   }
 

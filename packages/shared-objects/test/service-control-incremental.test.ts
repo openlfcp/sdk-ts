@@ -7,7 +7,11 @@
 import * as A from "@automerge/automerge";
 import { fromBase64url, fromHex, principalId, resourceId } from "@openlfcp/core";
 import { describe, expect, it } from "vitest";
-import { type CheckedChange, checkChange } from "../src/admission/framing.js";
+import {
+  type CheckedChange,
+  changeDependencyCount,
+  checkChange,
+} from "../src/admission/framing.js";
 import {
   checkServiceControlUnit,
   ServiceControlAdmission,
@@ -178,4 +182,31 @@ describe("incremental admission of C decides as the engine path", () => {
     expect(one.heads()).toEqual(whole.replica.heads());
     expect(one.validate()).toEqual(whole.replica.validate());
   }, 120_000);
+
+  it("a Snapshot over several slices of admission gives the replica its history gives", () => {
+    // A§3.5 (E-030): fromSnapshot admits the history 512 units at a time.
+    const year = syntheticYear({ days: 30, seed: 4, refusals: true });
+    const whole = ServiceControlReplica.fromChanges(year.units, year.options);
+    expect(whole.result.admitted.length).toBeGreaterThan(2 * 512);
+    const cold = ServiceControlReplica.fromSnapshot(
+      whole.replica.snapshot(),
+      year.options,
+      year.units,
+    );
+    expect(cold.heads()).toEqual(whole.replica.heads());
+    expect(cold.validate()).toEqual(whole.replica.validate());
+    for (const hash of whole.result.admitted)
+      expect(cold.authorOf(hash)).toEqual(whole.replica.authorOf(hash));
+    // The refused units are not in the Snapshot and change nothing.
+    for (const hash of year.strays) expect(cold.hasChange(hash)).toBe(false);
+  }, 120_000);
+
+  it("reads a change's dependency count from its header as checkChange decodes it", () => {
+    const year = syntheticYear({ days: 1 });
+    for (const u of year.units)
+      expect(changeDependencyCount(u.bytes)).toBe(checkChange(u.bytes).deps.length);
+    const first = (year.units[0] as YearUnit).bytes;
+    expect(changeDependencyCount(first)).toBe(0);
+    expect(changeDependencyCount(first.subarray(0, 20))).toBeUndefined();
+  });
 });
