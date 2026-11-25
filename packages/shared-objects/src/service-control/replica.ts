@@ -13,9 +13,9 @@ import {
   changeDependencyCount,
   checkChange,
   checkSaveHeader,
-  decodedOf,
   frameChange,
   frameSnapshot,
+  parsedOf,
   refusedChangeHash,
   unframeChange,
   unframeSnapshot,
@@ -337,11 +337,11 @@ export class ServiceControlReplica {
     for (const c of result.admitted) {
       this.#accepted.set(c.hash, unitOf(c));
       this.#sequences.set(c.actor, c.seq);
-      const { startOp } = decodedOf(c);
+      const { startOp, ops } = parsedOf(c);
       const made = this.#made.get(c.actor) ?? [];
       made.push({
         start: startOp,
-        end: startOp + decodedOf(c).ops.length,
+        end: startOp + ops.length,
         hash: c.hash,
         order: this.#accepted.size,
       });

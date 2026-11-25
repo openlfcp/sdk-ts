@@ -1,5 +1,5 @@
 import type * as A from "@automerge/automerge";
-import { type CheckedChange, decodedOf } from "../admission/framing.js";
+import { type CheckedChange, decodedView } from "../admission/framing.js";
 import type { ScBackend } from "./reader.js";
 
 /** A change or read the shadow cannot answer exactly: the caller asks the engine. */
@@ -163,7 +163,7 @@ export class ShadowDoc implements ScBackend {
 
   /** Applies a checked change (its dependencies already applied). */
   applyChecked(change: CheckedChange): void {
-    this.apply(decodedOf(change));
+    this.apply(decodedView(change));
   }
 
   /**

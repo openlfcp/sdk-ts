@@ -556,6 +556,8 @@ export function checkCanonicalChange(bytes: Uint8Array): ParsedChange {
   }
   if (rawAt !== raw.length) refuse("the value bytes are longer than their metadata");
 
+  // Rule 8: the start op is below 2^32 even for a change without operations (CAN-8).
+  if (startOp >= BigInt(U32)) refuse("the start op is 2^32 or more");
   if (startOp + BigInt(N) - 1n >= BigInt(U32)) refuse("the last operation counter is 2^32 or more");
   const start = Number(startOp);
 
