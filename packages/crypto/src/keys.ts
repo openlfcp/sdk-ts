@@ -1,7 +1,8 @@
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { bytesToNumberLE, concatBytes } from "@noble/curves/utils.js";
 import { sha512 } from "@noble/hashes/sha2.js";
-import { LfcpError } from "@openlfcp/core";
+import { fromHex, LfcpError } from "@openlfcp/core";
+import { detectNativeEd25519, type NativeEd25519Verify } from "./ed25519-native.js";
 import {
   type ActorDataKey,
   isSymmetricSecret,
@@ -201,6 +202,59 @@ export function isValidEd25519PublicKey(publicKey: Uint8Array): boolean {
   return a !== undefined && !a.isSmallOrder();
 }
 
+/** p = 2^255 − 19, the field modulus. */
+const P_FIELD = POINT.Fp.ORDER;
+const Y_MASK = (1n << 255n) - 1n;
+/**
+ * The y-coordinates of the eight small-order points (orders 1, 2, 4, 8).
+ * A canonical encoding is of small order iff its y (sign bit cleared) is
+ * one of these; x = 0 occurs only for y = ±1, which are in the set.
+ */
+const SMALL_ORDER_Y: ReadonlySet<bigint> = (() => {
+  /** A point of order 8. */
+  const t8 = POINT.fromBytes(
+    fromHex("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"),
+    false,
+  );
+  const ys = new Set<bigint>();
+  for (let i = 0n, q = POINT.ZERO; i < 8n; i++, q = q.add(t8)) {
+    ys.add(bytesToNumberLE(q.toBytes()) & Y_MASK);
+  }
+  return ys;
+})();
+
+/**
+ * Rules 2 and 3 on the encoding alone, without decompressing the point:
+ * y < p, and y is not that of a small-order point (which also covers x = 0
+ * with the sign bit set). An off-curve encoding passes here; the native
+ * equation check refuses it (A does not decode; R cannot match [S]B − [k]A).
+ */
+function passesEncodingRules(bytes: Uint8Array): boolean {
+  const y = bytesToNumberLE(bytes) & Y_MASK;
+  return y < P_FIELD && !SMALL_ORDER_Y.has(y);
+}
+
+/** undefined: not detected yet; null: no trustworthy native backend. */
+let nativeVerify: NativeEd25519Verify | null | undefined;
+
+function nativeBackend(): NativeEd25519Verify | null {
+  if (nativeVerify === undefined) nativeVerify = detectNativeEd25519();
+  return nativeVerify;
+}
+
+/**
+ * Test hook (not exported from the package index): replaces the native
+ * backend. null forces the noble path; undefined re-runs detection.
+ */
+export function setNativeEd25519ForTesting(verify: NativeEd25519Verify | null | undefined): void {
+  nativeVerify = verify;
+}
+
+/** Which backend `verifyEd25519` currently uses (detecting it if needed). */
+export function ed25519Backend(): "native" | "noble" {
+  return nativeBackend() === null ? "noble" : "native";
+}
+
 /**
  * Strict Ed25519 verification, LFCP-WIRE-01 §10.5.1. Returns false (never
  * throws) for any malformed or invalid input. The checks run in this order:
@@ -212,11 +266,10 @@ export function isValidEd25519PublicKey(publicKey: Uint8Array): boolean {
  * 4. the cofactorless equation [S]B = R + [k]A, where k = SHA-512 of the
  *    exact received R bytes, the exact A bytes and M, reduced mod L — rule 4.
  *
- * noble's `ed25519.verify` is not used: it checks the cofactored equation
- * ([8][S]B = [8]R + [8][k]A) and does not refuse a small-order R, so it
- * accepts signatures §10.5.1 rejects (a mixed-order A or R, a small-order
- * R). The rules are composed here from noble's point decoding and
- * arithmetic, and R and A are never re-encoded.
+ * Where the platform has a native Ed25519 that passes the known-answer
+ * probes of ed25519-native.ts (Node's crypto), rules 1–3 are checked here
+ * on the encodings and rule 4 is delegated to it; if it throws, the noble
+ * path decides. Both paths give the same answer for every input.
  */
 export function verifyEd25519(
   publicKey: Uint8Array,
@@ -232,6 +285,42 @@ export function verifyEd25519(
       signature.length !== 2 * KEY_LENGTH
     )
       return false;
+    const native = nativeBackend();
+    if (native !== null) {
+      if (
+        !passesEncodingRules(publicKey) ||
+        !passesEncodingRules(signature.subarray(0, KEY_LENGTH)) ||
+        bytesToNumberLE(signature.subarray(KEY_LENGTH)) >= L
+      )
+        return false;
+      try {
+        return native(publicKey, message, signature) === true;
+      } catch {
+        // e.g. an "unsupported" error from the platform: let noble decide.
+      }
+    }
+    return verifyEd25519Noble(publicKey, message, signature);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The strict verification on @noble/curves alone (inputs already of the
+ * right type and length).
+ *
+ * noble's `ed25519.verify` is not used: it checks the cofactored equation
+ * ([8][S]B = [8]R + [8][k]A) and does not refuse a small-order R, so it
+ * accepts signatures §10.5.1 rejects (a mixed-order A or R, a small-order
+ * R). The rules are composed here from noble's point decoding and
+ * arithmetic, and R and A are never re-encoded.
+ */
+export function verifyEd25519Noble(
+  publicKey: Uint8Array,
+  message: Uint8Array,
+  signature: Uint8Array,
+): boolean {
+  try {
     const rBytes = signature.subarray(0, KEY_LENGTH);
     const a = decodePoint(publicKey);
     const r = decodePoint(rBytes);
