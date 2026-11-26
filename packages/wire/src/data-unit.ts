@@ -22,7 +22,7 @@ import {
 import { ABILITY, hasAbility } from "./capability.js";
 import { cborMap, decodeStrict, encode } from "./cbor/index.js";
 import type { ControlState } from "./chain.js";
-import { type Signer, signObject, verifySignedObject } from "./cose.js";
+import { prepareSignedObject, type Signer, signObject, verifySignedObject } from "./cose.js";
 import { type ControlView, classifyDataUnit } from "./epoch.js";
 import {
   type DataUnitPayload,
@@ -375,6 +375,7 @@ async function verifyUnit(
       "MISSING_DEPENDENCY",
       "no Principal Descriptor is known for the actor (§13.1)",
     );
+  await prepareSignedObject(parsed.signed, actor);
   const signature = verifySignedObject(parsed.signed, actor);
   if (!signature.valid)
     return rejected(

@@ -1,8 +1,13 @@
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { bytesToNumberLE, concatBytes } from "@noble/curves/utils.js";
 import { sha512 } from "@noble/hashes/sha2.js";
-import { fromHex, LfcpError } from "@openlfcp/core";
-import { detectNativeEd25519, type NativeEd25519Verify } from "./ed25519-native.js";
+import { bytesEqual, fromHex, LfcpError } from "@openlfcp/core";
+import {
+  type AsyncEd25519Verify,
+  detectNativeEd25519,
+  detectWebCryptoEd25519,
+  type NativeEd25519Verify,
+} from "./ed25519-native.js";
 import {
   type ActorDataKey,
   isSymmetricSecret,
@@ -234,6 +239,15 @@ function passesEncodingRules(bytes: Uint8Array): boolean {
   return y < P_FIELD && !SMALL_ORDER_Y.has(y);
 }
 
+/** Rules 1–3 on the bytes of A and of the signature (R ‖ S). */
+function passesRules1to3(publicKey: Uint8Array, signature: Uint8Array): boolean {
+  return (
+    passesEncodingRules(publicKey) &&
+    passesEncodingRules(signature.subarray(0, KEY_LENGTH)) &&
+    bytesToNumberLE(signature.subarray(KEY_LENGTH)) < L
+  );
+}
+
 /** undefined: not detected yet; null: no trustworthy native backend. */
 let nativeVerify: NativeEd25519Verify | null | undefined;
 
@@ -241,6 +255,28 @@ function nativeBackend(): NativeEd25519Verify | null {
   if (nativeVerify === undefined) nativeVerify = detectNativeEd25519();
   return nativeVerify;
 }
+
+/** The WebCrypto backend: undefined until detection starts, then its result. */
+let webVerify: Promise<AsyncEd25519Verify | null> | undefined;
+/** Whether WebCrypto detection found a trustworthy backend; undefined until it settles. */
+let webDetected: boolean | undefined;
+
+function webBackend(): Promise<AsyncEd25519Verify | null> {
+  if (webVerify === undefined) {
+    webVerify = detectWebCryptoEd25519().then((verify) => {
+      webDetected = verify !== null;
+      return verify;
+    });
+  }
+  return webVerify;
+}
+
+/** Bound on pre-verified answers; the map is cleared when it is full. */
+const PREPARED_LIMIT = 4096;
+/** WebCrypto answers by A ‖ R ‖ S, with the message they were given for. */
+const prepared = new Map<string, { readonly message: Uint8Array; readonly valid: boolean }>();
+const preparedId = (publicKey: Uint8Array, signature: Uint8Array) =>
+  String.fromCharCode(...publicKey, ...signature);
 
 /**
  * Test hook (not exported from the package index): replaces the native
@@ -250,9 +286,71 @@ export function setNativeEd25519ForTesting(verify: NativeEd25519Verify | null | 
   nativeVerify = verify;
 }
 
-/** Which backend `verifyEd25519` currently uses (detecting it if needed). */
-export function ed25519Backend(): "native" | "noble" {
-  return nativeBackend() === null ? "noble" : "native";
+/**
+ * Test hook (not exported from the package index): replaces the WebCrypto
+ * backend. null disables it; undefined re-runs detection. Clears the
+ * pre-verified answers.
+ */
+export function setWebCryptoEd25519ForTesting(verify: AsyncEd25519Verify | null | undefined): void {
+  webVerify = verify === undefined ? undefined : Promise.resolve(verify);
+  webDetected = verify === undefined ? undefined : verify !== null;
+  prepared.clear();
+}
+
+/**
+ * Which backend `verifyEd25519` currently uses (detecting the synchronous
+ * native one if needed): "webcrypto" once WebCrypto detection has found one
+ * (see `detectEd25519Backend`) and there is no synchronous native backend.
+ */
+export function ed25519Backend(): "native" | "webcrypto" | "noble" {
+  if (nativeBackend() !== null) return "native";
+  return webDetected === true ? "webcrypto" : "noble";
+}
+
+/** Like `ed25519Backend`, after running WebCrypto detection if it is needed. */
+export async function detectEd25519Backend(): Promise<"native" | "webcrypto" | "noble"> {
+  if (nativeBackend() === null) await webBackend();
+  return ed25519Backend();
+}
+
+/**
+ * Pre-verifies a signature with WebCrypto's Ed25519, for runtimes without a
+ * synchronous native backend (browsers, mobile WebViews). WebCrypto is
+ * asynchronous only, so the async receive steps call this before the
+ * synchronous `verifyEd25519`, which then uses the answer once instead of
+ * the noble equation. Rules 1–3 are checked here first, exactly as on the
+ * native path, and WebCrypto is trusted only after it reproduced the
+ * known-answer probes (detected once). Never throws; when there is a
+ * synchronous native backend, no trustworthy WebCrypto, or WebCrypto
+ * rejects (e.g. "unsupported"), it records nothing and noble decides.
+ */
+export async function prepareEd25519Verify(
+  publicKey: Uint8Array,
+  message: Uint8Array,
+  signature: Uint8Array,
+): Promise<void> {
+  try {
+    if (
+      !(publicKey instanceof Uint8Array) ||
+      !(message instanceof Uint8Array) ||
+      !(signature instanceof Uint8Array) ||
+      publicKey.length !== KEY_LENGTH ||
+      signature.length !== 2 * KEY_LENGTH ||
+      nativeBackend() !== null ||
+      !passesRules1to3(publicKey, signature)
+    )
+      return;
+    const web = await webBackend();
+    if (web === null) return;
+    const a = Uint8Array.from(publicKey);
+    const m = Uint8Array.from(message);
+    const sig = Uint8Array.from(signature);
+    const valid = (await web(a, m, sig)) === true;
+    if (prepared.size >= PREPARED_LIMIT) prepared.clear();
+    prepared.set(preparedId(a, sig), { message: m, valid });
+  } catch {
+    // e.g. an "unsupported" rejection: nothing recorded, noble decides.
+  }
 }
 
 /**
@@ -269,7 +367,9 @@ export function ed25519Backend(): "native" | "noble" {
  * Where the platform has a native Ed25519 that passes the known-answer
  * probes of ed25519-native.ts (Node's crypto), rules 1–3 are checked here
  * on the encodings and rule 4 is delegated to it; if it throws, the noble
- * path decides. Both paths give the same answer for every input.
+ * path decides. Without it, an answer `prepareEd25519Verify` obtained from
+ * WebCrypto for these exact bytes is used (once). All paths give the same
+ * answer for every input.
  */
 export function verifyEd25519(
   publicKey: Uint8Array,
@@ -287,16 +387,18 @@ export function verifyEd25519(
       return false;
     const native = nativeBackend();
     if (native !== null) {
-      if (
-        !passesEncodingRules(publicKey) ||
-        !passesEncodingRules(signature.subarray(0, KEY_LENGTH)) ||
-        bytesToNumberLE(signature.subarray(KEY_LENGTH)) >= L
-      )
-        return false;
+      if (!passesRules1to3(publicKey, signature)) return false;
       try {
         return native(publicKey, message, signature) === true;
       } catch {
         // e.g. an "unsupported" error from the platform: let noble decide.
+      }
+    } else if (prepared.size > 0) {
+      const id = preparedId(publicKey, signature);
+      const answer = prepared.get(id);
+      if (answer !== undefined && bytesEqual(answer.message, message)) {
+        prepared.delete(id);
+        return answer.valid;
       }
     }
     return verifyEd25519Noble(publicKey, message, signature);

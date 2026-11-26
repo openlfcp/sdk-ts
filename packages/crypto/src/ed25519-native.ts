@@ -9,11 +9,13 @@
  * the cofactorless rejection of a mixed-order A and a mixed-order R.
  * Otherwise, or where no native Ed25519 exists, @noble/curves is used.
  *
- * The receive path is synchronous, so the backend must be too: Node's
- * `crypto.verify`, reached through `process.getBuiltinModule` so that this
- * portable package has no `node:` import. That covers Node and Electron
- * hosts (Obsidian desktop). WebCrypto's Ed25519 is asynchronous only and is
- * not used here; browsers and mobile WebViews take the noble path.
+ * The synchronous backend is Node's `crypto.verify`, reached through
+ * `process.getBuiltinModule` so that this portable package has no `node:`
+ * import. That covers Node and Electron hosts (Obsidian desktop). Where it
+ * is missing (browsers, mobile WebViews), WebCrypto's Ed25519 is used: it is
+ * asynchronous only, so the async receive steps pre-verify with it
+ * (`prepareEd25519Verify` in keys.ts) and the synchronous `verifyEd25519`
+ * consults those answers. It must pass the same probes, asynchronously.
  */
 import { fromHex } from "@openlfcp/core";
 
@@ -127,13 +129,85 @@ export function passesProbes(verify: NativeEd25519Verify): boolean {
   }
 }
 
-/** Detects a trustworthy native verifier; null if there is none. */
+/** Detects a trustworthy synchronous native verifier; null if there is none. */
 export function detectNativeEd25519(): NativeEd25519Verify | null {
   try {
     const nodeCrypto = loadNodeCrypto();
     if (nodeCrypto === undefined) return null;
     const verify = nodeCryptoVerifier(nodeCrypto);
     return passesProbes(verify) ? verify : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The asynchronous equation check of WebCrypto; may reject. */
+export type AsyncEd25519Verify = (
+  publicKey: Uint8Array,
+  message: Uint8Array,
+  signature: Uint8Array,
+) => Promise<boolean>;
+
+interface SubtleLike {
+  importKey(
+    format: "raw",
+    keyData: Uint8Array,
+    algorithm: { name: "Ed25519" },
+    extractable: false,
+    usages: ["verify"],
+  ): Promise<unknown>;
+  verify(
+    algorithm: { name: "Ed25519" },
+    key: unknown,
+    signature: Uint8Array,
+    data: Uint8Array,
+  ): Promise<boolean>;
+}
+
+function loadSubtle(): SubtleLike | undefined {
+  const subtle = (globalThis as { crypto?: { subtle?: Partial<SubtleLike> } }).crypto?.subtle;
+  return typeof subtle?.verify === "function" && typeof subtle.importKey === "function"
+    ? (subtle as SubtleLike)
+    : undefined;
+}
+
+/** A verifier over WebCrypto, caching one imported key per public key. */
+export function webCryptoVerifier(subtle: SubtleLike): AsyncEd25519Verify {
+  const keys = new Map<string, Promise<unknown>>();
+  const algorithm = { name: "Ed25519" } as const;
+  return async (publicKey, message, signature) => {
+    const id = String.fromCharCode(...publicKey);
+    let key = keys.get(id);
+    if (key === undefined) {
+      key = subtle.importKey("raw", Uint8Array.from(publicKey), algorithm, false, ["verify"]);
+      if (keys.size >= KEY_CACHE_LIMIT) keys.clear();
+      keys.set(id, key);
+      key.catch(() => keys.delete(id));
+    }
+    return subtle.verify(algorithm, await key, signature, message);
+  };
+}
+
+/** Whether the async `verify` reproduces every known answer; false if it rejects. */
+export async function passesProbesAsync(verify: AsyncEd25519Verify): Promise<boolean> {
+  try {
+    for (const p of PROBES) {
+      const got = await verify(fromHex(p.publicKey), fromHex(p.message), fromHex(p.signature));
+      if (got !== p.expect) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Detects a trustworthy WebCrypto Ed25519 verifier; null if there is none. */
+export async function detectWebCryptoEd25519(): Promise<AsyncEd25519Verify | null> {
+  try {
+    const subtle = loadSubtle();
+    if (subtle === undefined) return null;
+    const verify = webCryptoVerifier(subtle);
+    return (await passesProbesAsync(verify)) ? verify : null;
   } catch {
     return null;
   }

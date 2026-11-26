@@ -1,11 +1,20 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { fromHex, toHex } from "@openlfcp/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { detectNativeEd25519, passesProbes } from "../src/ed25519-native.js";
 import {
+  type AsyncEd25519Verify,
+  detectNativeEd25519,
+  detectWebCryptoEd25519,
+  passesProbes,
+  passesProbesAsync,
+} from "../src/ed25519-native.js";
+import {
+  detectEd25519Backend,
   ed25519Backend,
   generateSigningKeyPair,
+  prepareEd25519Verify,
   setNativeEd25519ForTesting,
+  setWebCryptoEd25519ForTesting,
   verifyEd25519,
   verifyEd25519Noble,
 } from "../src/keys.js";
@@ -26,7 +35,9 @@ const valid = () =>
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   setNativeEd25519ForTesting(undefined);
+  setWebCryptoEd25519ForTesting(undefined);
 });
 
 describe("native Ed25519 detection", () => {
@@ -172,3 +183,146 @@ describe("native and noble agree", () => {
     }
   });
 });
+
+// WebCrypto (browsers, Obsidian mobile): asynchronous, so the receive path
+// pre-verifies with prepareEd25519Verify and verifyEd25519 uses the answer.
+// Node 24 has WebCrypto Ed25519, so the real backend is exercised here with
+// the synchronous native one forced off.
+
+/** The WebCrypto answer for one input: prepare, then the synchronous verify. */
+async function viaWebCrypto(a: Uint8Array, m: Uint8Array, s: Uint8Array): Promise<boolean> {
+  setNativeEd25519ForTesting(null);
+  await prepareEd25519Verify(a, m, s);
+  return verifyEd25519(a, m, s);
+}
+
+function nobleAnswer(a: Uint8Array, m: Uint8Array, s: Uint8Array): boolean {
+  setNativeEd25519ForTesting(null);
+  return verifyEd25519(a, m, s);
+}
+
+/** Every input of the native agreement tests above, as [A, M, signature]. */
+function agreementCases(): [Uint8Array, Uint8Array, Uint8Array][] {
+  const out: [Uint8Array, Uint8Array, Uint8Array][] = [];
+  const [a, m, s] = valid();
+  const sHex = toHex(s);
+  const points = [...Object.values(BAD_POINTS), OFF_CURVE, base.publicKey];
+  for (const pa of points)
+    for (const pr of points) out.push([fromHex(pa), m, fromHex(pr + sHex.slice(64))]);
+  for (const tail of [L_LE, `${"ff".repeat(31)}0f`, `${sHex.slice(64, 126)}${"f0"}`])
+    out.push([a, m, fromHex(sHex.slice(0, 64) + tail)]);
+  for (const v of [...Object.values(RFC8032), ...Object.values(CONSTRUCTED)])
+    out.push([fromHex(v.publicKey), fromHex(v.message), fromHex(v.signature)]);
+  for (let i = 0; i < 10; i++) {
+    const key = generateSigningKeyPair();
+    const msg = Uint8Array.from({ length: 1 + i * 7 }, (_, j) => (i * 31 + j) & 0xff);
+    const sig = key.sign(msg);
+    const pk = key.publicKey;
+    out.push(
+      [pk, msg, sig],
+      [flip(pk, i % 32, i % 8), msg, sig],
+      [pk, flip(msg, i % msg.length, i % 8), sig],
+      [pk, msg, flip(sig, i % 32, i % 8)],
+      [pk, msg, flip(sig, 32 + (i % 32), i % 8)],
+      [pk, msg, flip(sig, 31, 7)],
+      [flip(pk, 31, 7), msg, sig],
+    );
+  }
+  out.push([a.subarray(0, 31), m, s], [a, m, s.subarray(0, 63)], [new Uint8Array(33), m, s]);
+  return out;
+}
+
+describe("WebCrypto Ed25519 detection", () => {
+  it("is used when there is no synchronous native backend", async () => {
+    setNativeEd25519ForTesting(null);
+    expect(await detectEd25519Backend()).toBe("webcrypto");
+    expect(ed25519Backend()).toBe("webcrypto");
+  });
+
+  it("is not consulted when the synchronous native backend exists", async () => {
+    const web = vi.fn<AsyncEd25519Verify>(async () => true);
+    setWebCryptoEd25519ForTesting(web);
+    await prepareEd25519Verify(...valid());
+    expect(web).not.toHaveBeenCalled();
+    expect(await detectEd25519Backend()).toBe("native");
+  });
+
+  it("detects once and caches the result", async () => {
+    const subtle = globalThis.crypto.subtle;
+    const importKey = vi.fn(subtle.importKey.bind(subtle));
+    vi.stubGlobal("crypto", { subtle: { importKey, verify: subtle.verify.bind(subtle) } });
+    setNativeEd25519ForTesting(null);
+    setWebCryptoEd25519ForTesting(undefined);
+    for (let i = 0; i < 5; i++) expect(await viaWebCrypto(...valid())).toBe(true);
+    // Three distinct probe keys, then the one key of the input, imported once.
+    expect(importKey).toHaveBeenCalledTimes(4);
+  });
+
+  it("falls back to noble when the platform has no WebCrypto", async () => {
+    vi.stubGlobal("crypto", {});
+    expect(await detectWebCryptoEd25519()).toBeNull();
+    setNativeEd25519ForTesting(null);
+    setWebCryptoEd25519ForTesting(undefined);
+    expect(await detectEd25519Backend()).toBe("noble");
+    expect(await viaWebCrypto(...valid())).toBe(true);
+    const [a, , s] = valid();
+    expect(await viaWebCrypto(a, Uint8Array.of(1), s)).toBe(false);
+    expect(await viaWebCrypto(...hex(CONSTRUCTED.MIXED_ORDER_A))).toBe(false);
+  });
+
+  it("refuses a WebCrypto without Ed25519 ('unsupported' at import)", async () => {
+    vi.stubGlobal("crypto", {
+      subtle: {
+        importKey: () => Promise.reject(new DOMException("unsupported", "NotSupportedError")),
+        verify: () => Promise.resolve(true),
+      },
+    });
+    expect(await detectWebCryptoEd25519()).toBeNull();
+  });
+
+  it("refuses a cofactored backend: the async probes catch it", async () => {
+    const cofactored: AsyncEd25519Verify = async (a, m, s) => ed25519.verify(s, m, a);
+    expect(await passesProbesAsync(cofactored)).toBe(false);
+    expect(await passesProbesAsync(async () => true)).toBe(false);
+    expect(await passesProbesAsync(async (a, m, s) => verifyEd25519Noble(a, m, s))).toBe(true);
+  });
+});
+
+describe("WebCrypto Ed25519 at verification", () => {
+  it("decides the synchronous verify for the exact prepared bytes, once", async () => {
+    // A lying backend shows whose answer is used; real ones pass the probes.
+    setWebCryptoEd25519ForTesting(async () => false);
+    const input = valid();
+    expect(await viaWebCrypto(...input)).toBe(false);
+    expect(verifyEd25519(...input)).toBe(true); // used once; then noble
+    await prepareEd25519Verify(...input);
+    const [a, m, s] = input;
+    expect(verifyEd25519(a, Uint8Array.of(...m, 0), s)).toBe(false); // other message: noble
+  });
+
+  it("lets noble decide when WebCrypto rejects ('unsupported')", async () => {
+    const web = vi.fn<AsyncEd25519Verify>(() => Promise.reject(new Error("unsupported")));
+    setWebCryptoEd25519ForTesting(web);
+    expect(await viaWebCrypto(...valid())).toBe(true);
+    const [a, , s] = valid();
+    expect(await viaWebCrypto(a, Uint8Array.of(1), s)).toBe(false);
+    expect(await viaWebCrypto(...hex(CONSTRUCTED.MIXED_ORDER_R))).toBe(false);
+    expect(web).toHaveBeenCalled();
+  });
+
+  it("agrees with noble on valid, invalid, malformed and non-canonical inputs", async () => {
+    const real = await detectWebCryptoEd25519();
+    expect(real).not.toBeNull();
+    const web = vi.fn(real as AsyncEd25519Verify);
+    setWebCryptoEd25519ForTesting(web);
+    for (const [a, m, s] of agreementCases()) {
+      const noble = nobleAnswer(a, m, s);
+      expect(await viaWebCrypto(a, m, s), `${toHex(a)} ${toHex(m)} ${toHex(s)}`).toBe(noble);
+    }
+    expect(web.mock.calls.length).toBeGreaterThan(50);
+  });
+});
+
+function hex(v: { publicKey: string; message: string; signature: string }) {
+  return [fromHex(v.publicKey), fromHex(v.message), fromHex(v.signature)] as const;
+}
