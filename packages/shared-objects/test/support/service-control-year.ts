@@ -38,6 +38,9 @@ export interface YearOptions {
   readonly questionsPerWeek?: number;
   readonly refusals?: boolean;
   readonly snapshotEveryDays?: number;
+  /** The root's and the bridge's Principals (default: fixed IDs that sign nothing). */
+  readonly root?: PrincipalId;
+  readonly bridge?: PrincipalId;
 }
 
 const MINUTE = 60_000;
@@ -109,15 +112,21 @@ export function syntheticYear(o: YearOptions): {
   const C = resourceId(bytes32(150));
   const options = {
     resource: C,
-    root: principalId(bytes32(41)),
-    genesisSigner: principalId(bytes32(41)),
+    root: o.root ?? principalId(bytes32(41)),
+    genesisSigner: o.root ?? principalId(bytes32(41)),
   };
   const units: YearUnit[] = [];
   const strays = new Set<string>();
   const rootLog: Uint8Array[] = [];
   const bridgeLog: Uint8Array[] = [];
   const root = new Writer(options.root, "root", C, units, rootLog);
-  const bridge = new Writer(principalId(bytes32(42)), "service-device", C, units, bridgeLog);
+  const bridge = new Writer(
+    o.bridge ?? principalId(bytes32(42)),
+    "service-device",
+    C,
+    units,
+    bridgeLog,
+  );
   const stray = (w: Writer, intents: ServiceControlIntent[]) => {
     w.stray(intents);
     strays.add(checkChange((units.at(-1) as YearUnit).bytes).hash);
