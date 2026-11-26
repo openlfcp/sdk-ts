@@ -2527,23 +2527,27 @@ export class SyncClient {
       if (run.length > 0) outcomes.push(...(await ctx.binding.applier.receiveBatch(view, run)));
       run = [];
     };
-    for (const bytes of units) {
-      let covered = false;
-      try {
-        const p = parseDataUnit(bytes).payload;
-        ctx.received = addSequence(ctx.received, p.actor, p.actorSeq);
-        covered = hasSequence(ctx.covered, p.actor, p.actorSeq);
-      } catch {
-        // malformed: the applier reports it
-      }
-      if (!covered) {
-        run.push(bytes);
-        continue;
+    // One storage transaction for the whole DATA_BATCH (E-030l): nothing below
+    // reports or advertises its units before it is durable.
+    await ctx.binding.applier.transaction(async () => {
+      for (const bytes of units) {
+        let covered = false;
+        try {
+          const p = parseDataUnit(bytes).payload;
+          ctx.received = addSequence(ctx.received, p.actor, p.actorSeq);
+          covered = hasSequence(ctx.covered, p.actor, p.actorSeq);
+        } catch {
+          // malformed: the applier reports it
+        }
+        if (!covered) {
+          run.push(bytes);
+          continue;
+        }
+        await flushRun();
+        outcomes.push(await ctx.binding.applier.acceptCovered(view, bytes));
       }
       await flushRun();
-      outcomes.push(await ctx.binding.applier.acceptCovered(view, bytes));
-    }
-    await flushRun();
+    });
     for (const outcome of outcomes) {
       if (outcome.kind === "applied" || outcome.kind === "profile-pending") {
         changed = true;

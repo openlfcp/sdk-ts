@@ -37,6 +37,7 @@ import {
 } from "@openlfcp/wire";
 import { decodeDeterministic } from "@openlfcp/wire/cbor";
 import { EngineGuard, isEngineTrap, unitItem } from "./engine-guard.js";
+import { ReceiveBatchStorage } from "./receive-batch.js";
 import { dataUnitRow, StoredSeenUnits } from "./storage.js";
 
 /**
@@ -355,7 +356,8 @@ const profileUnit = (view: ControlView, r: Accepted): ProfileUnit => ({
 export class DataUnitApplier {
   readonly #options: DataUnitApplierOptions;
   readonly #handlers: ReadonlyMap<string, DataProfileHandler<unknown>>;
-  readonly #storage: Pick<LfcpStorage, "dataUnits" | "snapshots" | "commit" | "localMarks">;
+  /** Storage with each receive batch's Data Unit writes held until its end (one commit). */
+  readonly #storage: ReceiveBatchStorage;
   readonly #seen: StoredSeenUnits;
   readonly #guard: EngineGuard;
   /** Units quarantined by the crash-loop breaker at this start, not yet reported. */
@@ -364,8 +366,9 @@ export class DataUnitApplier {
   constructor(options: DataUnitApplierOptions) {
     this.#options = options;
     this.#handlers = new Map(options.handlers.map((h) => [h.dataProfile, h]));
-    this.#storage = options.storage;
-    this.#seen = new StoredSeenUnits(options.storage);
+    this.#storage = new ReceiveBatchStorage(options.storage);
+    this.#seen = new StoredSeenUnits(this.#storage);
+    // The crash-loop record must be durable before the engine runs: not batched.
     this.#guard = new EngineGuard(options.storage, "units");
   }
 
@@ -415,7 +418,25 @@ export class DataUnitApplier {
    * Receives one Data Unit of the Resource `view` describes. Never creates
    * a Data Unit: received content is applied, not re-sent as local work.
    */
-  async receive(view: ControlView, bytes: Uint8Array): Promise<ApplyOutcome> {
+  receive(view: ControlView, bytes: Uint8Array): Promise<ApplyOutcome> {
+    return this.#storage.batch(() => this.#receive(view, bytes));
+  }
+
+  /**
+   * Runs `call` as one receive batch: the seen, accepted and status writes
+   * of every unit it receives (receive, receiveBatch, acceptCovered) are
+   * committed together, in one storage transaction, when it returns. Until
+   * then none of them is stored, so nothing may acknowledge or advertise
+   * those units; a crash before the commit loses the batch, which is
+   * fetched and received again. receiveBatch is one such batch by itself;
+   * a sync engine wraps all the calls one DATA_BATCH makes. Calls are not
+   * to run concurrently on one applier.
+   */
+  transaction<T>(call: () => Promise<T>): Promise<T> {
+    return this.#storage.batch(call);
+  }
+
+  async #receive(view: ControlView, bytes: Uint8Array): Promise<ApplyOutcome> {
     const R = view.state.resourceId;
     await this.#recover(R);
     const id = this.#idOf(bytes);
@@ -441,7 +462,11 @@ export class DataUnitApplier {
    * Before an equivocation is handled, the units accepted so far are
    * applied, so its exclusion sees them.
    */
-  async receiveBatch(view: ControlView, units: readonly Uint8Array[]): Promise<ApplyOutcome[]> {
+  receiveBatch(view: ControlView, units: readonly Uint8Array[]): Promise<ApplyOutcome[]> {
+    return this.#storage.batch(() => this.#receiveRun(view, units));
+  }
+
+  async #receiveRun(view: ControlView, units: readonly Uint8Array[]): Promise<ApplyOutcome[]> {
     const handler = this.#handlers.get(view.state.dataProfile);
     const outcomes: ApplyOutcome[] = [];
     if (handler?.applyBatch === undefined) {
@@ -995,7 +1020,11 @@ export class DataUnitApplier {
    * the previous unit is not checked: that unit is attested by the signed,
    * authorized Snapshot and was never received. A replay is a duplicate.
    */
-  async acceptCovered(view: ControlView, bytes: Uint8Array): Promise<ApplyOutcome> {
+  acceptCovered(view: ControlView, bytes: Uint8Array): Promise<ApplyOutcome> {
+    return this.#storage.batch(() => this.#acceptCovered(view, bytes));
+  }
+
+  async #acceptCovered(view: ControlView, bytes: Uint8Array): Promise<ApplyOutcome> {
     const dataProfile = view.state.dataProfile;
     try {
       this.#seen.expect(dataUnitRow(bytes));
