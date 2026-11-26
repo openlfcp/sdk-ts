@@ -3,7 +3,15 @@ import { fromBase64url, principalId } from "@openlfcp/core";
 import { isIdentityDescriptor, isResourceRef } from "../identity/values.js";
 import { pointerToken } from "../validate.js";
 import { isPrincipalRef, isUtcTimestamp } from "../values.js";
-import { isMapValue, isObject, isStr, isUint, ScReader, type ScValue } from "./reader.js";
+import {
+  isMapValue,
+  isObject,
+  isStr,
+  isUint,
+  type ScBackend,
+  ScReader,
+  type ScValue,
+} from "./reader.js";
 import {
   deviceFingerprint,
   EVENT_STATES,
@@ -435,7 +443,21 @@ export function validateServiceControl(
   resource: string,
   heads?: readonly string[],
 ): ServiceControlValidation {
-  const reader = new ScReader(A.getBackend(doc), heads);
+  return validateServiceControlOn(A.getBackend(doc), resource, heads);
+}
+
+/**
+ * validateServiceControl on a backend: the engine's, or a model of its
+ * current state whose versions let the readings of unchanged objects be
+ * reused (ScBackend.version), so validating after a change costs the paths
+ * it wrote, not the whole document (A§3.5, E-030).
+ */
+export function validateServiceControlOn(
+  backend: ScBackend,
+  resource: string,
+  heads?: readonly string[],
+): ServiceControlValidation {
+  const reader = new ScReader(backend, heads);
   const problems: ServiceControlProblem[] = [];
   const fail = (diagnostic: ServiceControlDiagnostic, pointer: string) =>
     problems.push(

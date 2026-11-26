@@ -41,7 +41,12 @@ import {
   type ServiceControlWriterClass,
 } from "./admission.js";
 import { isObject, ScReader } from "./reader.js";
-import { type ServiceControlValidation, validateServiceControl } from "./schema.js";
+import {
+  type ServiceControlValidation,
+  validateServiceControl,
+  validateServiceControlOn,
+} from "./schema.js";
+import { ShadowUnsupported } from "./shadow.js";
 import {
   deriveServiceControlActorId,
   SERVICE_CONTROL_PROFILE_ID,
@@ -450,7 +455,18 @@ export class ServiceControlReplica {
 
   /** §5: the state readers see (now, or at `heads`); invalid entries are left out. */
   validate(heads?: readonly string[]): ServiceControlValidation {
-    return validateServiceControl(this.#doc, toBase64url(this.#options.resource), heads);
+    const resource = toBase64url(this.#options.resource);
+    // A§3.5 (E-030): the current state is read on the shadow model, which equals the engine's
+    // there, so a write or a receive validates what it changed: on the engine, every read walks
+    // the history of its key, which grows with each heartbeat.
+    const current = heads === undefined ? this.#admission.current : undefined;
+    if (current !== undefined)
+      try {
+        return validateServiceControlOn(current, resource);
+      } catch (e) {
+        if (!(e instanceof ShadowUnsupported)) throw e;
+      }
+    return validateServiceControl(this.#doc, resource, heads);
   }
 
   /**

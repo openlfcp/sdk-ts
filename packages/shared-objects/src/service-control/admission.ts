@@ -730,6 +730,18 @@ export class ServiceControlAdmission {
     refuseServiceControl(diagnostic, `SERVICE-CONTROL-PROFILE-01 §4: ${diagnostic}`);
   }
 
+  /**
+   * A§3.5 (E-030): the shadow model when it reads exactly as the engine's
+   * document at its current heads (the pending batch applied, the document
+   * holding the admitted history alone); undefined otherwise. Its versions
+   * let a validation of the current state reuse the readings of the objects
+   * no change touched since.
+   */
+  get current(): ShadowDoc | undefined {
+    this.flush();
+    return this.#ahead ? undefined : this.#shadow;
+  }
+
   /** The document holds exactly the admitted history: from now on admitted changes are applied. */
   caughtUp(): void {
     this.flush();
