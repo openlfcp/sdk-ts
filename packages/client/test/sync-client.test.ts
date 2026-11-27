@@ -1556,11 +1556,15 @@ describe("a throwing listener (LFCP-03-034)", () => {
     const loaded: string[] = [];
     c.sync.open({
       ...c.binding(chain.R),
-      snapshot: { codec: TEXT, load: () => {
+      snapshot: {
+        codec: TEXT,
+        load: () => {
           throw Object.assign(new Error("snapshot admission failed"), {
             code: "PROFILE_INVALID",
           });
-        }, current: () => "" },
+        },
+        current: () => "",
+      },
     } as never);
     c.sync.start();
     await settle(300);
