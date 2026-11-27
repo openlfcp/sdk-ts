@@ -447,15 +447,24 @@ export class ServiceControlDataProfile {
       offered,
       this.#options.snapshotLimits,
     );
+    // Changes held outside the Snapshot survive: they are admitted again on top of it.
+    const outside = this.#replica.unitsMissingFrom(replica);
     this.#replica = replica;
-    this.#merged.clear();
-    this.#pending.clear();
-    this.#held.clear();
     for (const unit of units) {
       const hash = refusedChangeHash(unit.bytes);
-      if (hash !== undefined && replica.hasChange(hash))
-        this.#merged.set(toHex(unit.unitId), { unitId: unit.unitId, hash });
+      if (hash !== undefined && replica.hasChange(hash)) {
+        const k = toHex(unit.unitId);
+        this.#pending.delete(k);
+        this.#held.delete(k);
+        this.#merged.set(k, { unitId: unit.unitId, hash });
+      }
     }
-    this.#refresh("rebuild");
+    // Merged units the Snapshot does not carry wait until the retry admits them.
+    for (const [k, m] of [...this.#merged])
+      if (!replica.hasChange(m.hash)) {
+        this.#merged.delete(k);
+        this.#pending.set(k, m);
+      }
+    this.#settle(replica.receiveChanges(outside), "rebuild", true);
   }
 }
