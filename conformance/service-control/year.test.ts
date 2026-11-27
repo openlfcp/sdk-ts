@@ -3,7 +3,9 @@
 // those lengths in days and prints the figures (the bridge's nightly c-year job holds the whole
 // client to the budget). Cold connect here is the SDK's part: the replica from the plugin's latest
 // Snapshot (weekly) and the units it carries, the tail after it, then the reads a client makes of C (validate, creatorsOf, requestHistory), here and
-// again in a process of its own for its peak RSS (budget ≤ 350 MiB, enforced; cold-client.mjs).
+// again in a process of its own for its peak RSS (budget ≤ 350 MiB, enforced; cold-client.mjs). The RSS budget is measured with a capped V8 heap
+// (--max-old-space-size=200 --max-semi-space-size=4, V8_CAPS in cold-client.mjs); hosts are
+// recommended to run their cold client with similar caps.
 
 import { checkChange } from "@openlfcp/shared-objects/admission";
 import {
