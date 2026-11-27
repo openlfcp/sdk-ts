@@ -1,11 +1,15 @@
 // A bridge-style synthetic history of C (A§3.5, T§3 "synthetic year of C"), written straight
 // through the engine so a year takes linear time: the root initializes C and approves the bridge;
 // the bridge writes service and status, turns its bindings on (again once a month, a new
-// generation, with a preview), and writes status and bindings as A§3.5 has it
-// (ServiceControlStatusSchedule): the complete checks that moved (20 a day each) ride the heartbeat
-// unit every 30 minutes, transitions are merged into one write a minute. Two questions a week per
-// binding: the root answers, at the bridge's next unit, from a view that misses it (a concurrent
-// change), the bridge applies and resolves it, and cleans all three up after 7 days. The plugin
+// generation, with a preview), and writes status and bindings as the bridge's ControlClient does
+// (A§3.5, ServiceControlStatusSchedule): one unit per tick, with the status, the bindings, the
+// events and the resolutions of that tick; the complete checks that moved (20 a day each) ride
+// the next unit, transitions are merged into one write a minute; `heartbeatAt` only after 30
+// minutes without a tick unit, alone if nothing else is due (any unit is a sign of life). Two
+// questions a week per binding, each a unit of its own at a random time between the 30-minute
+// ticks: the root answers 5 minutes later, from its view when it saw the question (concurrent with
+// any question the bridge asked since), the bridge applies and resolves it in a tick of its own,
+// and cleans all three up after 7 days (the cleanup runs once an hour). The plugin
 // publishes a Snapshot every `snapshotEveryDays` (default daily; `snapshots` holds the length of the
 // history at each). With `refusals`, units §4 refuses are mixed in: by writers outside their rows,
 // and over the entry limit (refused on the post-state).
@@ -15,6 +19,7 @@ import { type PrincipalId, principalId, resourceId, toBase64url, toHex } from "@
 import { checkChange } from "../../src/admission/framing.js";
 import {
   deriveServiceControlActorId,
+  HEARTBEAT_INTERVAL_MS,
   type ServiceControlIntent,
   type ServiceControlOptions,
   type ServiceControlSignerClass,
@@ -194,58 +199,51 @@ export function syntheticYear(o: YearOptions): {
     });
   };
   for (const b of bindings.keys()) turnOn(b, T0);
-  bridge.write([...intents, ...schedule.take(T0)]);
+  /** When the bridge last wrote a tick unit: its questions and previews do not count. */
+  let wroteAt = Number.NEGATIVE_INFINITY;
+  /**
+   * A tick of the bridge at `t`: one unit when the schedule or `intents` have something to write,
+   * `heartbeatAt` in it only after HEARTBEAT_INTERVAL_MS without a tick unit.
+   */
+  const tick = (t: number, intents: readonly ServiceControlIntent[]) => {
+    if (intents.length === 0 && !schedule.due(t)) return;
+    const idle = t - wroteAt >= HEARTBEAT_INTERVAL_MS;
+    const taken = schedule.take(t).flatMap((i): ServiceControlIntent[] => {
+      if (i.intent !== "status.put" || idle) return [i];
+      const { heartbeatAt: _, ...fields } = i.fields;
+      return Object.keys(fields).length > 0 ? [{ ...i, fields }] : [];
+    });
+    bridge.write([...taken, ...intents]);
+    wroteAt = t;
+  };
+  tick(T0, intents);
 
   let next = 0;
   const cleanup: { at: number; qid: string; aid: string }[] = [];
-  const answered: { at: number; qid: string; aid: string }[] = [];
-  /** Questions the root answers at the bridge's next unit, from its view up to `upTo`. */
-  let asked: { t: number; b: number; qid: string; aid: string; hash: string; upTo: number }[] = [];
   const snapshots: number[] = [];
   const snapshotEvery = (o.snapshotEveryDays ?? 1) * 48;
-  for (let tick = 1; tick <= o.days * 48; tick++) {
-    const t = T0 + tick * 30 * MINUTE;
-    const day = Math.floor((t - T0) / DAY);
-    if (tick % 48 === 0 && day % 30 === 0) for (const b of bindings.keys()) turnOn(b, t);
-    bridge.pull(rootLog);
-    bindings.forEach((binding, b) => {
-      if (rnd() < perTick)
-        schedule.binding(binding, { lastCompleteCheckAt: iso(t - b * MINUTE) }, { defer: true });
-    });
-    const intents: ServiceControlIntent[] = [];
-    // The bridge applies an answer at one of its next units (the Mac may sleep in between).
-    for (const a of answered.filter((x) => x.at <= t)) {
-      const at = iso(t);
-      const { qid, aid } = a;
-      intents.push(
-        { intent: "event.put", id: aid, state: "applied", at },
-        { intent: "question.resolve", qid, resolved: { answerId: aid, choice: "restore", at } },
-      );
-      answered.splice(answered.indexOf(a), 1);
-      cleanup.push({ at: t + 7 * DAY, qid, aid });
-    }
-    while (cleanup.length > 0 && (cleanup[0] as { at: number }).at <= t) {
-      const { qid, aid } = cleanup.shift() as { qid: string; aid: string };
-      intents.push(
-        { intent: "delete", container: "answers", key: aid },
-        { intent: "delete", container: "events", key: aid },
-        { intent: "delete", container: "questions", key: qid },
-      );
-    }
-    if (intents.length > 0 || schedule.due(t)) bridge.write([...schedule.take(t), ...intents]);
-
-    for (const { t: q, b, qid, aid, hash, upTo } of asked) {
-      // The bridge's unit above is not in the root's view when it answers.
+  /** Answers the root gives, each 5 minutes after the question, in time order. */
+  const waiting: {
+    at: number;
+    b: number;
+    qid: string;
+    aid: string;
+    hash: string;
+    upTo: number;
+  }[] = [];
+  const answerUntil = (until: number) => {
+    while (waiting.length > 0 && (waiting[0] as { at: number }).at <= until) {
+      const { at: a, b, qid, aid, hash, upTo } = waiting.shift() as (typeof waiting)[number];
+      const at = iso(a);
+      // The root saw the question, not what the bridge wrote after it.
       root.pull(bridgeLog, upTo);
       root.write([
         {
           intent: "answer.create",
           aid,
-          answer: { qid, snapshotHash: hash, choice: "restore", at: iso(q + 5 * MINUTE) },
+          answer: { qid, snapshotHash: hash, choice: "restore", at },
         },
       ]);
-      answered.push({ at: t + Math.ceil(rnd() * 4) * 30 * MINUTE, qid, aid });
-      const at = iso(q + 5 * MINUTE);
       if (o.refusals && rnd() < 0.5) {
         // Refused on the pre-state (writers outside the row) and,
         // over the entry limit, only on the post-state.
@@ -257,15 +255,48 @@ export function syntheticYear(o: YearOptions): {
           },
         ]);
         root.pull(bridgeLog);
-        stray(root, [{ intent: "status.put", fields: { heartbeatAt: at } }]);
+        // A second past `at`: never a time the bridge writes, so always a change.
+        stray(root, [{ intent: "status.put", fields: { heartbeatAt: iso(a + 1000) } }]);
         const binding = bindings[b] as string;
         stray(bridge, [{ intent: "binding.put", binding, fields: { list: "x".repeat(9000) } }]);
       }
+      // The bridge applies the answer and resolves the question in a tick of its own.
+      bridge.pull(rootLog);
+      tick(a, [
+        { intent: "event.put", id: aid, state: "applied", at },
+        { intent: "question.resolve", qid, resolved: { answerId: aid, choice: "restore", at } },
+      ]);
+      cleanup.push({ at: a + 7 * DAY, qid, aid });
     }
-    asked = [];
+  };
+  for (let n = 1; n <= o.days * 48; n++) {
+    const t = T0 + n * 30 * MINUTE;
+    const day = Math.floor((t - T0) / DAY);
+    if (n % 48 === 0 && day % 30 === 0) for (const b of bindings.keys()) turnOn(b, t);
+    bridge.pull(rootLog);
+    bindings.forEach((binding, b) => {
+      if (rnd() < perTick)
+        schedule.binding(binding, { lastCompleteCheckAt: iso(t - b * MINUTE) }, { defer: true });
+    });
+    const intents: ServiceControlIntent[] = [];
+    // The cleanup, once an hour: what has been final for 7 days.
+    while (n % 2 === 0 && cleanup.length > 0 && (cleanup[0] as { at: number }).at <= t) {
+      const { qid, aid } = cleanup.shift() as { qid: string; aid: string };
+      intents.push(
+        { intent: "delete", container: "answers", key: aid },
+        { intent: "delete", container: "events", key: aid },
+        { intent: "delete", container: "questions", key: qid },
+      );
+    }
+    tick(t, intents);
 
-    for (const [b, binding] of bindings.entries()) {
-      if (rnd() >= questionPerTick) continue;
+    // The questions until the next tick; an answer may come after it.
+    const asks: { q: number; b: number }[] = [];
+    for (const b of bindings.keys())
+      if (rnd() < questionPerTick) asks.push({ q: t + (1 + Math.floor(rnd() * 29)) * MINUTE, b });
+    asks.sort((x, y) => x.q - y.q);
+    for (const { q, b } of asks) {
+      answerUntil(q);
       const [qid, aid] = [uid(++next), uid(++next)];
       const hash = hex(next);
       bridge.write([
@@ -273,7 +304,7 @@ export function syntheticYear(o: YearOptions): {
           intent: "question.create",
           qid,
           question: {
-            binding,
+            binding: bindings[b] as string,
             generation: generation[b],
             kind: "mass_delete",
             anomalyId: uid(++next),
@@ -281,13 +312,15 @@ export function syntheticYear(o: YearOptions): {
             items: ["Buy milk", "Call the bank", "Renew passport", "Book flights", "Pay rent"],
             counts: { deleted: 14 },
             options: ["restore", "accept"],
-            at: iso(t),
+            at: iso(q),
           },
         },
       ]);
-      asked.push({ t, b, qid, aid, hash, upTo: bridgeLog.length });
+      waiting.push({ at: q + 5 * MINUTE, b, qid, aid, hash, upTo: bridgeLog.length });
     }
-    if (tick % snapshotEvery === 0) snapshots.push(units.length);
+    answerUntil(t + 30 * MINUTE - 1);
+    if (n % snapshotEvery === 0) snapshots.push(units.length);
   }
+  answerUntil(Number.POSITIVE_INFINITY);
   return { options, units, strays, snapshots };
 }
