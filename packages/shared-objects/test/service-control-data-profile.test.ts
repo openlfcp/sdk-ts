@@ -152,13 +152,88 @@ describe("ServiceControlDataProfile: C through the client's Data Unit applier", 
     expect(profile.has(approvalUnit)).toBe(false);
   });
 
-  it("publishes Snapshots and loads none (§2.2)", () => {
+  it("publishes Snapshots and, without covered units, loads none (§2.5)", () => {
     const profile = new ServiceControlDataProfile({ ...options, signerClassOf });
     profile.applyBatch(history());
     const binding = profile.snapshotBinding();
     expect("load" in binding).toBe(false);
     const save = binding.current();
     expect(binding.codec.decode(binding.codec.encode(save))).toEqual(save);
+  });
+});
+
+describe("ServiceControlDataProfile.snapshotBinding().load: a Snapshot with admission (§2.5)", () => {
+  /** The publisher's Snapshot of the first three units; the request is the tail. */
+  function offered() {
+    const units = history();
+    const publisher = new ServiceControlDataProfile({ ...options, signerClassOf });
+    publisher.applyBatch(units.slice(0, 3));
+    const save = publisher.snapshotBinding().current();
+    const held = units.slice(0, 3).map(({ unit, value }) => ({ ...unit, bytes: value.bytes }));
+    return { units, save, held };
+  }
+
+  it("loads the Snapshot after admitting its changes, then replays only the tail", () => {
+    const { units, save, held } = offered();
+    const profile = new ServiceControlDataProfile({
+      ...options,
+      signerClassOf,
+      coveredUnits: () => held,
+    });
+    const seen: ServiceControlChanged[] = [];
+    profile.onChanged((e) => seen.push(e));
+    const binding = profile.snapshotBinding();
+    binding.load?.(binding.codec.decode(binding.codec.encode(save)));
+    expect(seen.map((e) => e.origin)).toEqual(["rebuild"]);
+    expect(profile.state().status?.state).toBe("running");
+    for (const u of units.slice(0, 3)) expect(profile.has(u.unit.unitId)).toBe(true);
+    expect(profile.has((units[3] as (typeof units)[number]).unit.unitId)).toBe(false);
+    const tail = units[3] as (typeof units)[number];
+    expect(profile.apply(tail.unit, tail.value).merged).toHaveLength(1);
+    expect(profile.state().requests[uid(1)]?.op).toBe("check");
+    // The covered units count as merged: excluding one rebuilds from the others.
+    const r = profile.exclude([(units[1] as (typeof units)[number]).unit.unitId]);
+    expect(r.pending.map(toHex)).toContain(toHex((units[2] as (typeof units)[number]).unit.unitId));
+    expect(profile.state().approvals).toEqual({});
+  });
+
+  it("admits against the class at control_ref: a failed admission leaves the state, replay follows", () => {
+    const { units, save, held } = offered();
+    // The host's table gives the service write no class: its change is refused as a unit would be.
+    const refusing = (u: { actor: PrincipalId; control?: unknown }) =>
+      toHex(u.actor) === toHex(B) ? "other" : signerClassOf(u);
+    const profile = new ServiceControlDataProfile({
+      ...options,
+      signerClassOf: refusing,
+      coveredUnits: () => held,
+    });
+    profile.applyBatch(units.slice(0, 1));
+    const before = profile.state();
+    expect(() => profile.snapshotBinding().load?.(save)).toThrowError(
+      expect.objectContaining({ code: "PROFILE_INVALID", diagnostic: "UNAUTHORIZED_WRITER" }),
+    );
+    expect(profile.state()).toBe(before);
+    expect(profile.has((units[0] as (typeof units)[number]).unit.unitId)).toBe(true);
+    // The fallback: the units, replayed in full, give the state the units give.
+    const r = profile.applyBatch(units);
+    expect(r.rejected.map((x) => x.diagnostic)).toEqual(["UNAUTHORIZED_WRITER"]);
+    expect(profile.state().approvals).toHaveProperty(principalRef(B));
+  });
+
+  it("fails admission for a Snapshot with a change no covered unit carries, and for omitted history", () => {
+    const { units, save, held } = offered();
+    const missing = new ServiceControlDataProfile({
+      ...options,
+      signerClassOf,
+      coveredUnits: () => held.slice(0, 2),
+    });
+    expect(() => missing.snapshotBinding().load?.(save)).toThrowError(
+      expect.objectContaining({ code: "MISSING_DEPENDENCY" }),
+    );
+    expect(missing.state().status).toBeUndefined();
+    // Full replay is still available after the failure.
+    expect(missing.applyBatch(units).rejected).toEqual([]);
+    expect(missing.state().requests[uid(1)]?.op).toBe("check");
   });
 });
 
