@@ -60,6 +60,7 @@ export {
   COSE_ALG_EDDSA,
   objectId,
   parseSignedObject,
+  prepareSignedObject,
   type SignedBytes,
   type SignedObject,
   type Signer,

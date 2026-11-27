@@ -1,7 +1,13 @@
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { bytesToNumberLE, concatBytes } from "@noble/curves/utils.js";
 import { sha512 } from "@noble/hashes/sha2.js";
-import { LfcpError } from "@openlfcp/core";
+import { bytesEqual, fromHex, LfcpError } from "@openlfcp/core";
+import {
+  type AsyncEd25519Verify,
+  detectNativeEd25519,
+  detectWebCryptoEd25519,
+  type NativeEd25519Verify,
+} from "./ed25519-native.js";
 import {
   type ActorDataKey,
   isSymmetricSecret,
@@ -201,6 +207,152 @@ export function isValidEd25519PublicKey(publicKey: Uint8Array): boolean {
   return a !== undefined && !a.isSmallOrder();
 }
 
+/** p = 2^255 − 19, the field modulus. */
+const P_FIELD = POINT.Fp.ORDER;
+const Y_MASK = (1n << 255n) - 1n;
+/**
+ * The y-coordinates of the eight small-order points (orders 1, 2, 4, 8).
+ * A canonical encoding is of small order iff its y (sign bit cleared) is
+ * one of these; x = 0 occurs only for y = ±1, which are in the set.
+ */
+const SMALL_ORDER_Y: ReadonlySet<bigint> = (() => {
+  /** A point of order 8. */
+  const t8 = POINT.fromBytes(
+    fromHex("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"),
+    false,
+  );
+  const ys = new Set<bigint>();
+  for (let i = 0n, q = POINT.ZERO; i < 8n; i++, q = q.add(t8)) {
+    ys.add(bytesToNumberLE(q.toBytes()) & Y_MASK);
+  }
+  return ys;
+})();
+
+/**
+ * Rules 2 and 3 on the encoding alone, without decompressing the point:
+ * y < p, and y is not that of a small-order point (which also covers x = 0
+ * with the sign bit set). An off-curve encoding passes here; the native
+ * equation check refuses it (A does not decode; R cannot match [S]B − [k]A).
+ */
+function passesEncodingRules(bytes: Uint8Array): boolean {
+  const y = bytesToNumberLE(bytes) & Y_MASK;
+  return y < P_FIELD && !SMALL_ORDER_Y.has(y);
+}
+
+/** Rules 1–3 on the bytes of A and of the signature (R ‖ S). */
+function passesRules1to3(publicKey: Uint8Array, signature: Uint8Array): boolean {
+  return (
+    passesEncodingRules(publicKey) &&
+    passesEncodingRules(signature.subarray(0, KEY_LENGTH)) &&
+    bytesToNumberLE(signature.subarray(KEY_LENGTH)) < L
+  );
+}
+
+/** undefined: not detected yet; null: no trustworthy native backend. */
+let nativeVerify: NativeEd25519Verify | null | undefined;
+
+function nativeBackend(): NativeEd25519Verify | null {
+  if (nativeVerify === undefined) nativeVerify = detectNativeEd25519();
+  return nativeVerify;
+}
+
+/** The WebCrypto backend: undefined until detection starts, then its result. */
+let webVerify: Promise<AsyncEd25519Verify | null> | undefined;
+/** Whether WebCrypto detection found a trustworthy backend; undefined until it settles. */
+let webDetected: boolean | undefined;
+
+function webBackend(): Promise<AsyncEd25519Verify | null> {
+  if (webVerify === undefined) {
+    webVerify = detectWebCryptoEd25519().then((verify) => {
+      webDetected = verify !== null;
+      return verify;
+    });
+  }
+  return webVerify;
+}
+
+/** Bound on pre-verified answers; the map is cleared when it is full. */
+const PREPARED_LIMIT = 4096;
+/** WebCrypto answers by A ‖ R ‖ S, with the message they were given for. */
+const prepared = new Map<string, { readonly message: Uint8Array; readonly valid: boolean }>();
+const preparedId = (publicKey: Uint8Array, signature: Uint8Array) =>
+  String.fromCharCode(...publicKey, ...signature);
+
+/**
+ * Test hook (not exported from the package index): replaces the native
+ * backend. null forces the noble path; undefined re-runs detection.
+ */
+export function setNativeEd25519ForTesting(verify: NativeEd25519Verify | null | undefined): void {
+  nativeVerify = verify;
+}
+
+/**
+ * Test hook (not exported from the package index): replaces the WebCrypto
+ * backend. null disables it; undefined re-runs detection. Clears the
+ * pre-verified answers.
+ */
+export function setWebCryptoEd25519ForTesting(verify: AsyncEd25519Verify | null | undefined): void {
+  webVerify = verify === undefined ? undefined : Promise.resolve(verify);
+  webDetected = verify === undefined ? undefined : verify !== null;
+  prepared.clear();
+}
+
+/**
+ * Which backend `verifyEd25519` currently uses (detecting the synchronous
+ * native one if needed): "webcrypto" once WebCrypto detection has found one
+ * (see `detectEd25519Backend`) and there is no synchronous native backend.
+ */
+export function ed25519Backend(): "native" | "webcrypto" | "noble" {
+  if (nativeBackend() !== null) return "native";
+  return webDetected === true ? "webcrypto" : "noble";
+}
+
+/** Like `ed25519Backend`, after running WebCrypto detection if it is needed. */
+export async function detectEd25519Backend(): Promise<"native" | "webcrypto" | "noble"> {
+  if (nativeBackend() === null) await webBackend();
+  return ed25519Backend();
+}
+
+/**
+ * Pre-verifies a signature with WebCrypto's Ed25519, for runtimes without a
+ * synchronous native backend (browsers, mobile WebViews). WebCrypto is
+ * asynchronous only, so the async receive steps call this before the
+ * synchronous `verifyEd25519`, which then uses the answer once instead of
+ * the noble equation. Rules 1–3 are checked here first, exactly as on the
+ * native path, and WebCrypto is trusted only after it reproduced the
+ * known-answer probes (detected once). Never throws; when there is a
+ * synchronous native backend, no trustworthy WebCrypto, or WebCrypto
+ * rejects (e.g. "unsupported"), it records nothing and noble decides.
+ */
+export async function prepareEd25519Verify(
+  publicKey: Uint8Array,
+  message: Uint8Array,
+  signature: Uint8Array,
+): Promise<void> {
+  try {
+    if (
+      !(publicKey instanceof Uint8Array) ||
+      !(message instanceof Uint8Array) ||
+      !(signature instanceof Uint8Array) ||
+      publicKey.length !== KEY_LENGTH ||
+      signature.length !== 2 * KEY_LENGTH ||
+      nativeBackend() !== null ||
+      !passesRules1to3(publicKey, signature)
+    )
+      return;
+    const web = await webBackend();
+    if (web === null) return;
+    const a = Uint8Array.from(publicKey);
+    const m = Uint8Array.from(message);
+    const sig = Uint8Array.from(signature);
+    const valid = (await web(a, m, sig)) === true;
+    if (prepared.size >= PREPARED_LIMIT) prepared.clear();
+    prepared.set(preparedId(a, sig), { message: m, valid });
+  } catch {
+    // e.g. an "unsupported" rejection: nothing recorded, noble decides.
+  }
+}
+
 /**
  * Strict Ed25519 verification, LFCP-WIRE-01 §10.5.1. Returns false (never
  * throws) for any malformed or invalid input. The checks run in this order:
@@ -212,11 +364,12 @@ export function isValidEd25519PublicKey(publicKey: Uint8Array): boolean {
  * 4. the cofactorless equation [S]B = R + [k]A, where k = SHA-512 of the
  *    exact received R bytes, the exact A bytes and M, reduced mod L — rule 4.
  *
- * noble's `ed25519.verify` is not used: it checks the cofactored equation
- * ([8][S]B = [8]R + [8][k]A) and does not refuse a small-order R, so it
- * accepts signatures §10.5.1 rejects (a mixed-order A or R, a small-order
- * R). The rules are composed here from noble's point decoding and
- * arithmetic, and R and A are never re-encoded.
+ * Where the platform has a native Ed25519 that passes the known-answer
+ * probes of ed25519-native.ts (Node's crypto), rules 1–3 are checked here
+ * on the encodings and rule 4 is delegated to it; if it throws, the noble
+ * path decides. Without it, an answer `prepareEd25519Verify` obtained from
+ * WebCrypto for these exact bytes is used (once). All paths give the same
+ * answer for every input.
  */
 export function verifyEd25519(
   publicKey: Uint8Array,
@@ -232,6 +385,44 @@ export function verifyEd25519(
       signature.length !== 2 * KEY_LENGTH
     )
       return false;
+    const native = nativeBackend();
+    if (native !== null) {
+      if (!passesRules1to3(publicKey, signature)) return false;
+      try {
+        return native(publicKey, message, signature) === true;
+      } catch {
+        // e.g. an "unsupported" error from the platform: let noble decide.
+      }
+    } else if (prepared.size > 0) {
+      const id = preparedId(publicKey, signature);
+      const answer = prepared.get(id);
+      if (answer !== undefined && bytesEqual(answer.message, message)) {
+        prepared.delete(id);
+        return answer.valid;
+      }
+    }
+    return verifyEd25519Noble(publicKey, message, signature);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The strict verification on @noble/curves alone (inputs already of the
+ * right type and length).
+ *
+ * noble's `ed25519.verify` is not used: it checks the cofactored equation
+ * ([8][S]B = [8]R + [8][k]A) and does not refuse a small-order R, so it
+ * accepts signatures §10.5.1 rejects (a mixed-order A or R, a small-order
+ * R). The rules are composed here from noble's point decoding and
+ * arithmetic, and R and A are never re-encoded.
+ */
+export function verifyEd25519Noble(
+  publicKey: Uint8Array,
+  message: Uint8Array,
+  signature: Uint8Array,
+): boolean {
+  try {
     const rBytes = signature.subarray(0, KEY_LENGTH);
     const a = decodePoint(publicKey);
     const r = decodePoint(rBytes);

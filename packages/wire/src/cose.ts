@@ -6,7 +6,7 @@ import {
   type PrincipalId,
   principalId,
 } from "@openlfcp/core";
-import { type SigningKeyPair, sha256, verifyEd25519 } from "@openlfcp/crypto";
+import { prepareEd25519Verify, type SigningKeyPair, sha256, verifyEd25519 } from "@openlfcp/crypto";
 import {
   type CborValue,
   cborMap,
@@ -175,6 +175,25 @@ export function parseSignedObject(bytes: Uint8Array): SignedObject {
     alg: COSE_ALG_EDDSA,
     id: objectId(exact),
   });
+}
+
+/**
+ * Lets an asynchronous receive step pre-verify the signature of `object`
+ * with WebCrypto where there is no synchronous native Ed25519 (browsers,
+ * mobile WebViews), so that the `verifySignedObject` that follows does not
+ * run the slower noble equation. It changes no answer and never throws;
+ * with a synchronous native backend it does nothing.
+ */
+export async function prepareSignedObject(
+  object: SignedObject,
+  expectedSigner: PrincipalDescriptor,
+): Promise<void> {
+  if (!bytesEqual(object.kid, expectedSigner.principalId)) return;
+  await prepareEd25519Verify(
+    expectedSigner.ed25519PublicKey,
+    sigStructureBytes(object.protectedBytes, object.payloadBytes),
+    object.signature,
+  );
 }
 
 /**
