@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// The peak-RSS budget (ARCHITECTURE §3.5: 350 MiB at 365 days of C, owner decision) is measured with
-// a capped V8 heap: the child runs with these flags, and hosts are recommended to run their cold
+// The peak-RSS budget is 350 MiB at 365 days of C: owner-queue Q-16 (B) and Q-17 (A), 2026-11-27, overrides the 200 MiB in ARCHITECTURE §3.5; measured with V8 heap caps; the redesign to 200 MiB is deferred until after 0.6.
+// The child runs with a capped V8 heap: the child runs with these flags, and hosts are recommended to run their cold
 // client with similar caps (Node: --max-old-space-size=200 --max-semi-space-size=4). Without them
 // V8 lets garbage pile up to the default limit and RSS overshoots the budget.
 export const V8_CAPS = ["--max-old-space-size=200", "--max-semi-space-size=4"];

@@ -3,8 +3,8 @@
 // those lengths in days and prints the figures (the bridge's nightly c-year job holds the whole
 // client to the budget). Cold connect here is the SDK's part: the replica from the plugin's latest
 // Snapshot (weekly) and the units it carries, the tail after it, then the reads a client makes of C (validate, creatorsOf, requestHistory), here and
-// again in a process of its own for its peak RSS (budget ≤ 350 MiB, enforced; cold-client.mjs). The RSS budget is measured with a capped V8 heap
-// (--max-old-space-size=200 --max-semi-space-size=4, V8_CAPS in cold-client.mjs); hosts are
+// again in a process of its own for its peak RSS (budget ≤ 350 MiB, enforced; cold-client.mjs). The 350 MiB budget: owner-queue Q-16 (B) and Q-17 (A), 2026-11-27, overrides the 200 MiB in ARCHITECTURE §3.5; measured with V8 heap caps; the redesign to 200 MiB is deferred until after 0.6.
+// The V8 caps are (--max-old-space-size=200 --max-semi-space-size=4, V8_CAPS in cold-client.mjs); hosts are
 // recommended to run their cold client with similar caps.
 
 import { checkChange } from "@openlfcp/shared-objects/admission";
@@ -82,8 +82,8 @@ describe.skipIf(DAYS.length === 0)("A§3.5 admission and cold connect of C", () 
       // ServiceControlDataProfile.snapshotBinding().load, §2.5).
       expect(figures.admissionMs).toBeLessThanOrEqual(5_000);
       expect(figures.coldClient.coldConnectMs).toBeLessThanOrEqual(10_000);
-      // Peak RSS ≤ 350 MiB is the third budget (ARCHITECTURE §3.5, owner decision: the JS client's
-      // cold-connect peak at 365 days of C; 200 MiB is not required). Always enforced.
+      // Peak RSS ≤ 350 MiB is the third budget (owner-queue Q-16 (B) and Q-17 (A), 2026-11-27, overrides the 200 MiB in ARCHITECTURE §3.5; measured with V8 heap caps; the redesign to 200 MiB is deferred until after 0.6): the JS client's
+      // cold-connect peak at 365 days of C; 200 MiB is not required. Always enforced.
       expect(figures.coldClient.peakRssMiB).toBeLessThanOrEqual(350);
     }, 3_600_000);
 });
