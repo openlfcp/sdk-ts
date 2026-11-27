@@ -1,14 +1,17 @@
 import { LfcpError } from "./errors.js";
 
 const HEX = "0123456789abcdef";
+const HEX_BYTE = Array.from({ length: 256 }, (_, b) => HEX.charAt(b >> 4) + HEX.charAt(b & 0x0f));
 const B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const B64URL_VALUE = new Map([...B64URL].map((c, i) => [c, i]));
 
 /** Lowercase hexadecimal, two digits per byte. */
 export function toHex(bytes: Uint8Array): string {
-  let out = "";
-  for (const b of bytes) out += HEX.charAt(b >> 4) + HEX.charAt(b & 0x0f);
-  return out;
+  // A flat string: appending digit by digit builds a rope of one node per byte, which every
+  // change hash of a long history would keep (A§3.5 cold-client memory).
+  const parts = new Array<string>(bytes.length);
+  for (let i = 0; i < bytes.length; i += 1) parts[i] = HEX_BYTE[bytes[i] as number] as string;
+  return parts.join("");
 }
 
 /**

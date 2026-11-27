@@ -11,6 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// The peak-RSS budget (ARCHITECTURE §3.5: 350 MiB at 365 days of C, owner decision) is measured with
+// a capped V8 heap: the child runs with these flags, and hosts are recommended to run their cold
+// client with similar caps (Node: --max-old-space-size=200 --max-semi-space-size=4). Without them
+// V8 lets garbage pile up to the default limit and RSS overshoots the budget.
+export const V8_CAPS = ["--max-old-space-size=200", "--max-semi-space-size=4"];
 const SELF = fileURLToPath(import.meta.url);
 const MIB = 2 ** 20;
 // Keeps the replica reachable across the final GC, so the live set includes it.
@@ -173,7 +178,7 @@ export function measureColdClient(snapshot, units, tail, options) {
   try {
     const file = join(dir, "c.bin");
     write(file, snapshot, units, tail, options);
-    const run = spawnSync(process.execPath, ["--expose-gc", "--trace-gc", SELF, file], {
+    const run = spawnSync(process.execPath, [...V8_CAPS, "--expose-gc", "--trace-gc", SELF, file], {
       encoding: "utf8",
       maxBuffer: 256 * MIB,
     });

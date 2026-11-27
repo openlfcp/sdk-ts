@@ -116,7 +116,13 @@ const refusal = (
  * slice and the engine's batch for it are what a cold client holds beyond the replica, so its
  * peak memory does not grow with the length of C's history.
  */
-const SNAPSHOT_SLICE = 512;
+const SNAPSHOT_SLICE = 64;
+/**
+ * The shadow's undo log while a Snapshot's history is admitted: each entry keeps a change's
+ * decode, and the default window (256) of them was promoted to V8's old generation and cost
+ * ~70 MiB of peak RSS at 365 days. A change forked deeper than this is judged on the engine.
+ */
+const SNAPSHOT_SHADOW_WINDOW = 32;
 
 const copyOptions = (o: ServiceControlOptions): ServiceControlOptions => ({
   resource: o.resource.slice() as ResourceId,
@@ -158,14 +164,14 @@ export class ServiceControlReplica {
   }
 
   /** `engine`: ServiceControlAdmissionMode.engine (fromSave). */
-  private constructor(options: ServiceControlOptions, engine?: A.Doc<unknown>) {
+  private constructor(options: ServiceControlOptions, engine?: A.Doc<unknown>, window?: number) {
     this.#options = copyOptions(options);
     // Validate raw ID lengths.
     deriveServiceControlActorId(options.resource, options.root);
     deriveServiceControlActorId(options.resource, options.genesisSigner);
     this.#admission = new ServiceControlAdmission(
       this.#options,
-      engine === undefined ? {} : { engine },
+      engine === undefined ? {} : { engine, ...(window === undefined ? {} : { window }) },
     );
   }
 
@@ -243,7 +249,7 @@ export class ServiceControlReplica {
     // A§3.5 (E-030): the loaded document is the engine's from the start, not built again from
     // the admitted changes; admission reads it at each change's heads. Admitted in full, it holds
     // exactly the admitted history.
-    const replica = new ServiceControlReplica(options, loaded);
+    const replica = new ServiceControlReplica(options, loaded, SNAPSHOT_SHADOW_WINDOW);
     // Admitted in causal slices (getAllChanges orders them so): the decodes of one slice are all
     // a slice holds, not the whole history at once.
     let error: ServiceControlRefusal | undefined;
