@@ -79,7 +79,8 @@ function read(file) {
 }
 
 async function child(file) {
-  const { ServiceControlReplica } = await import("@openlfcp/shared-objects/service-control");
+  const { ServiceControlDataProfile } = await import("@openlfcp/shared-objects/service-control");
+  const { checkChange } = await import("@openlfcp/shared-objects/admission");
   const { options, snapshot, units, tail } = read(file);
   const base = process.memoryUsage().rss;
   const timed = (f) => {
@@ -87,11 +88,38 @@ async function child(file) {
     const r = f();
     return [r, Math.round(performance.now() - t)];
   };
-  const [cold, fromSnapshot] = timed(() =>
-    ServiceControlReplica.fromSnapshot(snapshot, options, units.slice(0, units.length - tail)),
+  // The client's profile: the Snapshot is loaded through snapshotBinding().load after admission
+  // of its changes against the units that carry them (SERVICE-CONTROL-PROFILE-01 §2.5), then the
+  // tail is admitted as received units.
+  const covered = units.slice(0, units.length - tail).map((u, i) => ({
+    unitId: Uint8Array.of(i & 255, (i >> 8) & 255, (i >> 16) & 255),
+    actor: u.signer,
+    seq: u.actorSeq,
+    signerClass: u.signerClass,
+    bytes: u.bytes,
+  }));
+  const profile = new ServiceControlDataProfile({
+    ...options,
+    signerClassOf: (u) => u.signerClass,
+    coveredUnits: () => covered,
+  });
+  const binding = profile.snapshotBinding();
+  const [, fromSnapshot] = timed(() => binding.load(binding.codec.decode(snapshot)));
+  const cold = profile.replica;
+  const [received, tailMs] = timed(() =>
+    profile.applyBatch(
+      units.slice(units.length - tail).map((u, i) => ({
+        unit: {
+          unitId: Uint8Array.of(i & 255, (i >> 8) & 255, 255),
+          actor: u.signer,
+          seq: u.actorSeq,
+          signerClass: u.signerClass,
+        },
+        value: checkChange(u.bytes),
+      })),
+    ),
   );
-  const [received, tailMs] = timed(() => cold.receiveChanges(units.slice(units.length - tail)));
-  if (received.refused.length > 0) throw new Error("the tail was refused");
+  if (received.rejected.length > 0) throw new Error("the tail was refused");
   const [state, validate] = timed(() => cold.validate());
   const [, creatorsOf] = timed(() => {
     cold.creatorsOf("bindings", Object.keys(state.bindings)[0] ?? "");
