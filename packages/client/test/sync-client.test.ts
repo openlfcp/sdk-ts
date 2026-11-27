@@ -1502,6 +1502,82 @@ describe("a throwing listener (LFCP-03-034)", () => {
     expect(c.events.filter((e) => e.type === "error" && e.code !== "INTERNAL")).toEqual([]);
   });
 
+  it("replays every unit when loading the offered Snapshot fails admission (§29.2)", async () => {
+    const server = new FakeServer();
+    const clock = { t: 0 };
+    const chain = chainFor(250);
+    const c = client(OWNER, server, clock);
+    await ownerState(c, chain);
+    const v = chain.view();
+    // Remote units 1 and 2; a Snapshot covers unit 1.
+    const remote = new InMemoryLfcpStorage();
+    const base = {
+      view: v,
+      controlHead: v.state.head,
+      actor: OWNER.signer,
+      dek: DEK0,
+      profile: TEXT,
+    };
+    const u1 = await createQueuedDataUnit(remote, { ...base, previousUnitId: null, value: "one" });
+    const u2 = await createQueuedDataUnit(remote, {
+      ...base,
+      previousUnitId: u1.unitId,
+      value: "two",
+    });
+    const covered = [{ principalId: OWNER.signer.descriptor.principalId, contiguous: 1n }];
+    const snapshot = await createSnapshot({
+      view: v,
+      controlHead: v.state.head,
+      publisher: OWNER.signer,
+      dek: DEK0,
+      frontier: covered,
+      profile: TEXT,
+      value: "snap",
+      sequences: new InMemorySnapshotSequenceReservation(),
+    });
+    hostOf(server, chain, [u1.bytes, u2.bytes]);
+    const answer = server.onMessage;
+    server.onMessage = (m, sv) => {
+      if (m.type === "RESOURCE_OPEN") {
+        sv.reply(m, "RESOURCE_OPENED", {
+          resourceId: chain.R,
+          heads: [{ seq: v.state.seq, recordId: v.state.head }],
+          haves: [{ principalId: OWNER.signer.descriptor.principalId, contiguous: 2n }],
+          snapshot: { snapshotId: snapshot.snapshotId, dataEpoch: 0n, frontier: covered },
+        });
+        return [];
+      }
+      if (m.type === "SNAPSHOT_GET") {
+        sv.reply(m, "SNAPSHOT", { resourceId: chain.R, snapshot: snapshot.bytes });
+        return [];
+      }
+      return answer(m, sv);
+    };
+    const loaded: string[] = [];
+    c.sync.open({
+      ...c.binding(chain.R),
+      snapshot: {
+        codec: TEXT,
+        load: () => {
+          throw Object.assign(new Error("snapshot admission failed"), {
+            code: "PROFILE_INVALID",
+          });
+        },
+        current: () => "",
+      },
+    } as never);
+    c.sync.start();
+    await settle(300);
+    await c.sync.idle();
+    // The failed load is local: both units replay and the Resource is LIVE.
+    expect(loaded).toEqual([]);
+    expect(c.merged).toEqual(["one", "two"]);
+    expect(c.sync.resourceState(chain.R)).toBe("LIVE");
+    expect(c.events.some((e) => e.type === "snapshot-loaded")).toBe(false);
+    expect(c.events.some((e) => e.type === "error" && e.code === "PROFILE_REJECTED")).toBe(true);
+    expect(internal(c)).toEqual([]);
+  });
+
   it("never stops an ACK from dequeuing what it acknowledges", async () => {
     const server = new FakeServer();
     const clock = { t: 0 };

@@ -2000,7 +2000,21 @@ export class SyncClient {
           profile: guarded,
         });
         if (trap !== undefined) throw trap;
-        if (received.kind === "accepted") binding.load?.(received.value);
+        if (received.kind === "accepted") {
+          try {
+            binding.load?.(received.value);
+          } catch (e) {
+            // An engine trap goes to the crash-loop breaker; any other failure
+            // (e.g. failed admission) is local, and the units are replayed.
+            if (isEngineTrap(e)) throw e;
+            return {
+              kind: "local-failure",
+              reason: "PROFILE_REJECTED",
+              snapshotId: received.snapshotId,
+              message: e instanceof Error ? e.message : String(e),
+            } as const;
+          }
+        }
         return received;
       });
       if (r.kind === "accepted") {

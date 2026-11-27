@@ -440,6 +440,12 @@ export class ServiceControlReplica {
   heads(): string[] {
     return A.getHeads(this.#doc).sort();
   }
+  /** The units of every change held here, admitted or waiting, that `other` has not admitted. */
+  unitsMissingFrom(other: ServiceControlReplica): ServiceControlUnit[] {
+    return [...this.#accepted, ...[...this.#waiting].map(([hash, p]) => [hash, p.unit] as const)]
+      .filter(([hash]) => !other.hasChange(hash))
+      .map(([, unit]) => unit);
+  }
   hasChange(hash: string): boolean {
     return this.#accepted.has(hash);
   }

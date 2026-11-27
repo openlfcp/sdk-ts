@@ -6,6 +6,8 @@ import {
   toHex,
 } from "@openlfcp/core";
 import type { CheckedChange } from "../admission/framing.js";
+import { refusedChangeHash } from "../admission/framing.js";
+import type { SnapshotLimits } from "../admission/limits.js";
 import { GuardedListeners } from "../listeners.js";
 import type { ServiceControlOptions, ServiceControlSignerClass } from "./admission.js";
 import {
@@ -33,9 +35,14 @@ import type { ServiceControlIntent } from "./write.js";
  * `signerClassOf` turns it into the class (the client's
  * serviceControlSignerFacts with serviceControlSignerClass).
  *
- * A received Snapshot of C is never loaded: its changes would be admitted
- * without the units that carry them (§2.2, SOP §13), so a reader replays
- * the units. The profile publishes Snapshots (§9: by the human's clients).
+ * A received Snapshot of C is loaded only with the admission of its changes
+ * (§2.5, SOP §13): `snapshotBinding().load` exists when the host gives
+ * `coveredUnits`, the verified units that carry the Snapshot's changes, and
+ * it admits every change against them (ServiceControlReplica.fromSave)
+ * before it uses the Snapshot's state; the applier then replays only the
+ * units beyond the frontier. Without `coveredUnits`, or when admission
+ * fails, the Snapshot is not loaded and the units are replayed in full. The
+ * profile publishes Snapshots (§9: by the human's clients).
  */
 
 /** An accepted unit as the applier passes it (structurally the client's ProfileUnit). */
@@ -50,6 +57,17 @@ export interface ServiceControlProfileUnit {
 export interface ServiceControlDataProfileOptions extends ServiceControlOptions {
   /** §2.3 at the unit's control_ref; a unit without it is of class `other`. */
   readonly signerClassOf: (unit: ServiceControlProfileUnit) => ServiceControlSignerClass;
+  /**
+   * §2.5: the verified, decrypted units that carry the changes of `save`, a
+   * received Snapshot's document (the units the host holds; a unit the
+   * Snapshot does not cover is ignored). Absent: a Snapshot of C is not
+   * loaded and the units are replayed.
+   */
+  readonly coveredUnits?: (
+    save: Uint8Array,
+  ) => readonly (ServiceControlProfileUnit & { readonly bytes: Uint8Array })[];
+  /** Snapshot expansion limits (SOP §13.1) for a loaded Snapshot; the floor by default. */
+  readonly snapshotLimits?: SnapshotLimits;
 }
 
 /** What a merge, a local write or a rebuild changed in the state readers see. */
@@ -394,13 +412,59 @@ export class ServiceControlDataProfile {
 
   /**
    * The Snapshot binding of a sync client: publishes the full save (SOP
-   * §13); it has no `load`, so an offered Snapshot of C is not loaded and
-   * the units are replayed instead (§2.2).
+   * §13). With `coveredUnits` it also loads a received Snapshot (§2.5): every
+   * change is admitted against the unit that carries it, and only then does
+   * the state replace this one, the covered units counting as merged. A
+   * Snapshot that fails admission throws (PROFILE_INVALID, with the
+   * diagnostic of the failed check) and leaves the state as it was, so the
+   * client replays the units instead; the failure is local and excludes no unit.
    */
   snapshotBinding() {
+    const covered = this.#options.coveredUnits;
     return {
       codec: serviceControlSnapshotCodec,
       current: (): Uint8Array => this.#replica.save(),
+      ...(covered === undefined
+        ? {}
+        : { load: (save: Uint8Array): void => this.#load(save, covered) }),
     };
+  }
+
+  #load(
+    save: Uint8Array,
+    covered: NonNullable<ServiceControlDataProfileOptions["coveredUnits"]>,
+  ): void {
+    const units = covered(save);
+    const offered = units.map((unit) => ({
+      signer: unit.actor,
+      actorSeq: unit.seq,
+      signerClass: this.#options.signerClassOf(unit),
+      bytes: unit.bytes,
+    }));
+    const replica = ServiceControlReplica.fromSave(
+      save,
+      this.#options,
+      offered,
+      this.#options.snapshotLimits,
+    );
+    // Changes held outside the Snapshot survive: they are admitted again on top of it.
+    const outside = this.#replica.unitsMissingFrom(replica);
+    this.#replica = replica;
+    for (const unit of units) {
+      const hash = refusedChangeHash(unit.bytes);
+      if (hash !== undefined && replica.hasChange(hash)) {
+        const k = toHex(unit.unitId);
+        this.#pending.delete(k);
+        this.#held.delete(k);
+        this.#merged.set(k, { unitId: unit.unitId, hash });
+      }
+    }
+    // Merged units the Snapshot does not carry wait until the retry admits them.
+    for (const [k, m] of [...this.#merged])
+      if (!replica.hasChange(m.hash)) {
+        this.#merged.delete(k);
+        this.#pending.set(k, m);
+      }
+    this.#settle(replica.receiveChanges(outside), "rebuild", true);
   }
 }
