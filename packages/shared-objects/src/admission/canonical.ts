@@ -86,11 +86,8 @@ function utf8(bytes: Uint8Array, what: string): string {
 }
 
 const HEX = Array.from({ length: 256 }, (_, x) => x.toString(16).padStart(2, "0"));
-const hex = (b: Uint8Array): string => {
-  let s = "";
-  for (const x of b) s += HEX[x] as string;
-  return s;
-};
+// Joined, not appended digit by digit: that builds a rope per string, kept by every change's actor.
+const hex = (b: Uint8Array): string => Array.from(b, (x) => HEX[x] as string).join("");
 
 /** Byte-wise lexicographic order, a shorter prefix first. */
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
